@@ -1,3 +1,6 @@
+> **termux-app-zh：Termux v0.119.0-beta.3 简体中文汉化版**
+> 基于上游 termux/termux-app 的 v0.119.0-beta.3 标签（commit e634d8f），仅新增 `values-zh-rCN/strings.xml` 汉化（165 条界面字符串），包名仍为 `com.termux`。以下为上游原 README。
+
 # Termux application
 
 [![Build status](https://github.com/termux/termux-app/workflows/Build/badge.svg)](https://github.com/termux/termux-app/actions)
