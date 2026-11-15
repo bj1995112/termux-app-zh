@@ -1,0 +1,51 @@
+name: Import upstream v0.119.0-beta.3
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/import-upstream.yml
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Import upstream tag and keep localization
+        shell: bash
+        run: |
+          set -e
+          git config user.name "Bai"
+          git config user.email "46416178+bj1995112@users.noreply.github.com"
+          mkdir -p /tmp/keep
+          for d in app/src/main/res/values-zh-rCN termux-shared/src/main/res/values-zh-rCN terminal-view/src/main/res/values-zh-rCN; do
+            if [ -d "$d" ]; then mkdir -p "/tmp/keep/$(dirname "$d")"; cp -r "$d" "/tmp/keep/$d"; fi
+          done
+          git clone --depth 1 --branch v0.119.0-beta.3 https://github.com/termux/termux-app.git /tmp/upstream
+          git -C /tmp/upstream archive HEAD | tar -x -C .
+          for d in app/src/main/res/values-zh-rCN termux-shared/src/main/res/values-zh-rCN terminal-view/src/main/res/values-zh-rCN; do
+            if [ -d "/tmp/keep/$d" ]; then mkdir -p "$(dirname "$d")"; cp -r "/tmp/keep/$d" "$d"; fi
+          done
+          python3 - <<'PYEOF'
+          import pathlib
+          p = pathlib.Path(".github/workflows/debug_build.yml")
+          t = p.read_text(encoding="utf-8")
+          t = t.replace("      - master\n", "      - main\n      - master\n")
+          step = "      - name: Restore missing binary assets from upstream tag (fallback)\n        shell: bash {0}\n        run: |\n          for f in gradle/wrapper/gradle-wrapper.jar app/src/main/res/drawable/banner.png app/src/main/res/mipmap-hdpi/ic_launcher.png app/src/main/res/mipmap-hdpi/ic_launcher_round.png app/src/main/res/mipmap-mdpi/ic_launcher.png app/src/main/res/mipmap-mdpi/ic_launcher_round.png app/src/main/res/mipmap-xhdpi/ic_launcher.png app/src/main/res/mipmap-xhdpi/ic_launcher_round.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png app/testkey_untrusted.jks termux-shared/src/main/res/raw/bell.ogg; do\n            if [ ! -f \"$f\" ]; then echo \"Downloading missing $f\"; curl -fsSL \"https://raw.githubusercontent.com/termux/termux-app/v0.119.0-beta.3/$f\" -o \"$f\" || { echo \"Failed to download $f\"; exit 1; }; fi\n          done\n\n"
+          anchor = "      - name: Build APKs\n"
+          assert anchor in t
+          t = t.replace(anchor, step + anchor, 1)
+          p.write_text(t, encoding="utf-8")
+          rp = pathlib.Path("README.md")
+          rt = rp.read_text(encoding="utf-8")
+          header = "> **termux-app-zh：Termux v0.119.0-beta.3 简体中文汉化版**\n> 基于上游 termux/termux-app 的 v0.119.0-beta.3 标签（commit e634d8f），仅新增 `values-zh-rCN/strings.xml` 汉化（165 条界面字符串），包名仍为 `com.termux`。以下为上游原 README。\n\n"
+          if "termux-app-zh" not in rt:
+              rp.write_text(header + rt, encoding="utf-8")
+          PYEOF
+          rm -f TEST.txt .github/workflows/import-upstream.yml
+          git add -A
+          git status --short | head -50
+          git commit -m "Import Termux v0.119.0-beta.3 (e634d8f) with Simplified Chinese localization"
+          git push origin main
