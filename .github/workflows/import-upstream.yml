@@ -46,6 +46,5 @@ jobs:
           PYEOF
           rm -f TEST.txt .github/workflows/import-upstream.yml
           git add -A
-          git status --short | head -50
           git commit -m "Import Termux v0.119.0-beta.3 (e634d8f) with Simplified Chinese localization"
           git push origin main
