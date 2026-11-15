@@ -7,7 +7,6 @@ on:
       - .github/workflows/import-upstream.yml
 permissions:
   contents: write
-  workflows: write
 jobs:
   import:
     runs-on: ubuntu-latest
@@ -43,9 +42,9 @@ jobs:
           rt = rp.read_text(encoding="utf-8")
           header = "> **termux-app-zh：Termux v0.119.0-beta.3 简体中文汉化版**\n> 基于上游 termux/termux-app 的 v0.119.0-beta.3 标签（commit e634d8f），仅新增 `values-zh-rCN/strings.xml` 汉化（165 条界面字符串），包名仍为 `com.termux`。以下为上游原 README。\n\n"
           if "termux-app-zh" not in rt:
-              rp.write_text(header + rt, encoding="utf-8")
-          PYEOF
-          rm -f TEST.txt .github/workflows/import-upstream.yml
+              rp.write_text(header + rt, encoding=
+          rm -f TEST.txt
+          rm -rf .github
           git add -A
           git commit -m "Import Termux v0.119.0-beta.3 (e634d8f) with Simplified Chinese localization"
           git push origin main
