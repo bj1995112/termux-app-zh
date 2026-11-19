@@ -25,6 +25,7 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.termux.R;
 import com.termux.shared.termux.TermuxConstants;
 
 import java.io.File;
@@ -189,7 +190,7 @@ public class TermuxStyleActivity extends Activity {
 
             boolean defaultChoice = currentSelectable.fileName.equals(DEFAULT_FILENAME);
             AtomicFile atomicFile = new AtomicFile(destinationFile);
-            java.io.OutputStream out = atomicFile.startWrite();
+            java.io.FileOutputStream out = atomicFile.startWrite();
             if (defaultChoice) {
                 if (colors) {
                     byte[] comment = "# Using default color theme.".getBytes(StandardCharsets.UTF_8);
