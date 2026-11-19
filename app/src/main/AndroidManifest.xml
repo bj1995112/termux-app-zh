@@ -99,6 +99,13 @@
             tools:targetApi="n" />
 
         <activity
+            android:name=".app.activities.TermuxStyleActivity"
+            android:exported="false"
+            android:label="@string/action_style_terminal"
+            android:noHistory="true"
+            android:theme="@style/TermuxStylingTheme" />
+
+        <activity
             android:name=".app.activities.SettingsActivity"
             android:exported="true"
             android:label="@string/title_activity_termux_settings"
