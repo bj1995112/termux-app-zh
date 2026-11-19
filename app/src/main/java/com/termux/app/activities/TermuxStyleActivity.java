@@ -211,8 +211,8 @@ public class TermuxStyleActivity extends Activity {
 
             // Note: Must match constant in TermuxActivity (ACTION_RELOAD_STYLE).
             // The extra key is the action string itself, value "colors" or "font".
-            Intent reloadIntent = new Intent(TermuxConstants.TERMUX_ACTIVITY.ACTION_RELOAD_STYLE);
-            reloadIntent.putExtra(TermuxConstants.TERMUX_ACTIVITY.EXTRA_RELOAD_STYLE,
+            Intent reloadIntent = new Intent(TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY.ACTION_RELOAD_STYLE);
+            reloadIntent.putExtra(TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY.EXTRA_RELOAD_STYLE,
                     colors ? "colors" : "font");
             sendBroadcast(reloadIntent);
         } catch (Exception e) {
