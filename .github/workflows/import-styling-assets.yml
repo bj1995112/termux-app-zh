@@ -3,6 +3,9 @@ name: Import Styling Assets
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   import:
     runs-on: ubuntu-latest
