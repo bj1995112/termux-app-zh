@@ -243,4 +243,10 @@
     <!-- Donate Preference -->
     <string name="donate_preference_title">Donate</string>
 
+    <!-- Built-in styling chooser (ported from Termux:Styling) -->
+    <string name="app_name">Termux:Styling</string>
+    <string name="color_prompt">Choose color</string>
+    <string name="font_prompt">Choose font</string>
+    <string name="writing_failed">Failed to install file:\n\n</string>
+
 </resources>
