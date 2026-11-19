@@ -32,10 +32,110 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 public class TermuxStyleActivity extends Activity {
 
     private static final String DEFAULT_FILENAME = "Default";
+
+    // Chinese display names for color schemes and fonts: file names are
+    // English, so the chooser shows "中文 (English)" when a mapping exists
+    // and plain English otherwise (well-known brand names have no mapping).
+    private static final Map<String, String> CHINESE_NAMES = new LinkedHashMap<>();
+    static {
+        // Colors: Base16 series ("Base16" itself is kept, it is the scheme system name)
+        CHINESE_NAMES.put("Base16 3024 Dark", "Base16 3024 深色");
+        CHINESE_NAMES.put("Base16 3024 Light", "Base16 3024 浅色");
+        CHINESE_NAMES.put("Base16 Apathy Dark", "Base16 冷漠 深色");
+        CHINESE_NAMES.put("Base16 Apathy Light", "Base16 冷漠 浅色");
+        CHINESE_NAMES.put("Base16 Ashes Dark", "Base16 灰烬 深色");
+        CHINESE_NAMES.put("Base16 Ashes Light", "Base16 灰烬 浅色");
+        CHINESE_NAMES.put("Base16 Atelierdune Dark", "Base16 画室·沙丘 深色");
+        CHINESE_NAMES.put("Base16 Atelierdune Light", "Base16 画室·沙丘 浅色");
+        CHINESE_NAMES.put("Base16 Atelierforest Dark", "Base16 画室·森林 深色");
+        CHINESE_NAMES.put("Base16 Atelierforest Light", "Base16 画室·森林 浅色");
+        CHINESE_NAMES.put("Base16 Atelierheath Dark", "Base16 画室·荒原 深色");
+        CHINESE_NAMES.put("Base16 Atelierheath Light", "Base16 画室·荒原 浅色");
+        CHINESE_NAMES.put("Base16 Atelierlakeside Dark", "Base16 画室·湖畔 深色");
+        CHINESE_NAMES.put("Base16 Atelierlakeside Light", "Base16 画室·湖畔 浅色");
+        CHINESE_NAMES.put("Base16 Atelierseaside Dark", "Base16 画室·海滨 深色");
+        CHINESE_NAMES.put("Base16 Atelierseaside Light", "Base16 画室·海滨 浅色");
+        CHINESE_NAMES.put("Base16 Bright Dark", "Base16 明亮 深色");
+        CHINESE_NAMES.put("Base16 Bright Light", "Base16 明亮 浅色");
+        CHINESE_NAMES.put("Base16 Chalk Dark", "Base16 粉笔 深色");
+        CHINESE_NAMES.put("Base16 Chalk Light", "Base16 粉笔 浅色");
+        CHINESE_NAMES.put("Base16 Codeschool Dark", "Base16 代码学校 深色");
+        CHINESE_NAMES.put("Base16 Codeschool Light", "Base16 代码学校 浅色");
+        CHINESE_NAMES.put("Base16 Colors Dark", "Base16 多彩 深色");
+        CHINESE_NAMES.put("Base16 Colors Light", "Base16 多彩 浅色");
+        CHINESE_NAMES.put("Base16 Default Dark", "Base16 默认 深色");
+        CHINESE_NAMES.put("Base16 Default Light", "Base16 默认 浅色");
+        CHINESE_NAMES.put("Base16 Eighties Dark", "Base16 八十年代 深色");
+        CHINESE_NAMES.put("Base16 Eighties Light", "Base16 八十年代 浅色");
+        CHINESE_NAMES.put("Base16 Embers Dark", "Base16 余烬 深色");
+        CHINESE_NAMES.put("Base16 Embers Light", "Base16 余烬 浅色");
+        CHINESE_NAMES.put("Base16 Flat Dark", "Base16 扁平 深色");
+        CHINESE_NAMES.put("Base16 Flat Light", "Base16 扁平 浅色");
+        CHINESE_NAMES.put("Base16 Google Dark", "Base16 谷歌 深色");
+        CHINESE_NAMES.put("Base16 Google Light", "Base16 谷歌 浅色");
+        CHINESE_NAMES.put("Base16 Grayscale Dark", "Base16 灰度 深色");
+        CHINESE_NAMES.put("Base16 Grayscale Light", "Base16 灰度 浅色");
+        CHINESE_NAMES.put("Base16 Greenscreen Dark", "Base16 绿屏 深色");
+        CHINESE_NAMES.put("Base16 Greenscreen Light", "Base16 绿屏 浅色");
+        CHINESE_NAMES.put("Base16 Londontube Dark", "Base16 伦敦地铁 深色");
+        CHINESE_NAMES.put("Base16 Londontube Light", "Base16 伦敦地铁 浅色");
+        CHINESE_NAMES.put("Base16 Marrakesh Dark", "Base16 马拉喀什 深色");
+        CHINESE_NAMES.put("Base16 Marrakesh Light", "Base16 马拉喀什 浅色");
+        CHINESE_NAMES.put("Base16 Materia", "Base16 材质");
+        CHINESE_NAMES.put("Base16 Mocha Dark", "Base16 摩卡 深色");
+        CHINESE_NAMES.put("Base16 Mocha Light", "Base16 摩卡 浅色");
+        CHINESE_NAMES.put("Base16 Ocean Dark", "Base16 海洋 深色");
+        CHINESE_NAMES.put("Base16 Ocean Light", "Base16 海洋 浅色");
+        CHINESE_NAMES.put("Base16 One Dark", "Base16 One 深色");
+        CHINESE_NAMES.put("Base16 One Light", "Base16 One 浅色");
+        CHINESE_NAMES.put("Base16 Paraiso Dark", "Base16 天堂 深色");
+        CHINESE_NAMES.put("Base16 Paraiso Light", "Base16 天堂 浅色");
+        CHINESE_NAMES.put("Base16 Summerfruit Dark", "Base16 夏日水果 深色");
+        CHINESE_NAMES.put("Base16 Summerfruit Light", "Base16 夏日水果 浅色");
+        CHINESE_NAMES.put("Base16 Tomorrow Dark", "Base16 明日 深色");
+        CHINESE_NAMES.put("Base16 Tomorrow Light", "Base16 明日 浅色");
+        CHINESE_NAMES.put("Base16 Twilight Dark", "Base16 暮光 深色");
+        CHINESE_NAMES.put("Base16 Twilight Light", "Base16 暮光 浅色");
+
+        // Colors: standalone schemes
+        CHINESE_NAMES.put("Black On White", "黑字白底");
+        CHINESE_NAMES.put("Catppuccin Frappe", "卡布奇诺·冰沙");
+        CHINESE_NAMES.put("Catppuccin Latte", "卡布奇诺·拿铁");
+        CHINESE_NAMES.put("Catppuccin Macchiato", "卡布奇诺·玛奇朵");
+        CHINESE_NAMES.put("Catppuccin Mocha", "卡布奇诺·摩卡");
+        CHINESE_NAMES.put("Dracula", "德古拉");
+        CHINESE_NAMES.put("E Ink", "电子墨水");
+        CHINESE_NAMES.put("E Ink Color", "电子墨水·彩色");
+        CHINESE_NAMES.put("Gnometerm", "GNOME 终端");
+        CHINESE_NAMES.put("Gnometerm New", "GNOME 终端·新版");
+        CHINESE_NAMES.put("Gotham", "哥谭");
+        CHINESE_NAMES.put("Iceberg", "冰山");
+        CHINESE_NAMES.put("Material", "质感");
+        CHINESE_NAMES.put("Neon", "霓虹");
+        CHINESE_NAMES.put("Rosé Pine", "玫瑰松");
+        CHINESE_NAMES.put("Rosé Pine Dawn", "玫瑰松·黎明");
+        CHINESE_NAMES.put("Rosé Pine Moon", "玫瑰松·月夜");
+        CHINESE_NAMES.put("Tokyonight Dark", "东京之夜 深色");
+        CHINESE_NAMES.put("Tokyonight Day", "东京之夜 日间");
+        CHINESE_NAMES.put("Tomorrow Night", "明日 夜晚");
+        CHINESE_NAMES.put("White On Black", "白字黑底");
+        CHINESE_NAMES.put("Wild Cherry", "野樱桃");
+
+        // Fonts (only the 8 bundled ones) and the Default entry
+        CHINESE_NAMES.put("Default", "默认");
+        CHINESE_NAMES.put("Fira Code", "Fira 代码");
+        CHINESE_NAMES.put("JetBrains Mono", "JetBrains 等宽");
+        CHINESE_NAMES.put("CascadiaCode", "Cascadia 代码");
+        CHINESE_NAMES.put("Ubuntu Mono", "Ubuntu 等宽");
+        CHINESE_NAMES.put("DejaVu Sans Mono", "DejaVu 等宽");
+        CHINESE_NAMES.put("Go Mono", "Go 等宽");
+    }
 
     private static String capitalize(String str) {
         boolean lastWhitespace = true;
@@ -61,7 +161,11 @@ public class TermuxStyleActivity extends Activity {
             String name = fileName.replace('-', ' ');
             int dotIndex = name.lastIndexOf('.');
             if (dotIndex != -1) name = name.substring(0, dotIndex);
-            this.displayName = capitalize(name);
+            String displayName = capitalize(name);
+            String chineseName = CHINESE_NAMES.get(displayName);
+            this.displayName = chineseName != null
+                    ? chineseName + " (" + displayName + ")"
+                    : displayName;
         }
 
         @Override
