@@ -1,0 +1,33 @@
+name: Import Styling Assets
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Clone termux-styling
+        run: git clone --depth 1 https://github.com/termux/termux-styling /tmp/styling
+      - name: Copy color schemes and fonts
+        run: |
+          mkdir -p app/src/main/assets/colors app/src/main/assets/fonts
+          cp /tmp/styling/app/src/main/assets/colors/*.properties app/src/main/assets/colors/
+          cp /tmp/styling/app/src/main/assets/colors/*.txt app/src/main/assets/colors/
+          for f in Fira-Code JetBrains-Mono CascadiaCode Hack Ubuntu-Mono DejaVu-Sans-Mono Source-Code-Pro Go-Mono; do
+            cp "/tmp/styling/app/src/main/assets/fonts/$f.ttf" app/src/main/assets/fonts/
+            cp "/tmp/styling/app/src/main/assets/fonts/$f.txt" app/src/main/assets/fonts/ || true
+          done
+          echo "colors: $(ls app/src/main/assets/colors/*.properties | wc -l)"
+          echo "fonts: $(ls app/src/main/assets/fonts/*.ttf | wc -l)"
+          du -sh app/src/main/assets
+      - name: Commit assets
+        run: |
+          git config user.name "Bai"
+          git config user.email "46416178+bj1995112@users.noreply.github.com"
+          git add app/src/main/assets
+          git status --short
+          git diff --cached --quiet || git commit -m "Import Termux:Styling assets (114 colors, 8 fonts)"
+          git push
