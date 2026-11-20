@@ -105,6 +105,13 @@
             android:noHistory="true"
             android:theme="@style/TermuxStylingTheme" />
 
+<activity
+            android:name=".app.activities.DistroActivity"
+            android:exported="false"
+            android:label="@string/distro_title"
+            android:parentActivityName=".app.TermuxActivity"
+            android:theme="@style/Theme.TermuxApp.DayNight.NoActionBar" />
+
         <activity
             android:name=".app.activities.SettingsActivity"
             android:exported="true"
