@@ -35,7 +35,9 @@ import com.termux.terminal.TextStyle;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.HashSet;
 import java.util.Properties;
+import java.util.Set;
 
 /** The {@link TerminalSessionClient} implementation that may require an {@link Activity} for its interface methods. */
 public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionClientBase {
@@ -49,6 +51,15 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
     private int mBellSoundId;
 
     private static final String LOG_TAG = "TermuxTerminalSessionActivityClient";
+
+    /**
+     * Sessions the user asked to delete from the drawer long-press menu.
+     * A killed session exits with a non-zero status (SIGKILL is reported as
+     * signal 9, not 0/130), so {@link #onSessionFinished} would NOT
+     * auto-remove it; the set makes onSessionFinished force-remove exactly
+     * these sessions instead.
+     */
+    private final Set<TerminalSession> mSessionsPendingDeletion = new HashSet<>();
 
     public TermuxTerminalSessionActivityClient(TermuxActivity activity) {
         this.mActivity = activity;
@@ -146,6 +157,14 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
         }
 
         int index = service.getIndexOfSession(finishedSession);
+
+        if (mSessionsPendingDeletion.remove(finishedSession)) {
+            // User deleted this session from the drawer list: remove it
+            // regardless of exit status (a SIGKILL exit is signal 9, not
+            // 0/130, so the normal auto-remove below would leave it behind).
+            removeFinishedSession(finishedSession);
+            return;
+        }
 
         // For plugin commands that expect the result back, we should immediately close the session
         // and send the result back instead of waiting fo the user to press enter.
@@ -362,6 +381,11 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
     }
 
     public void addNewSession(boolean isFailSafe, String sessionName) {
+        // Apply the "show welcome message" setting before the new session's
+        // login script runs, so a fresh session opens clean (or with the
+        // welcome text, if the user turned it on).
+        TermuxActivity.syncWelcomeMessageVisibility(mActivity);
+
         TermuxService service = mActivity.getTermuxService();
         if (service == null) return;
 
@@ -449,6 +473,32 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
             if (termuxSession != null)
                 setCurrentSession(termuxSession.getTerminalSession());
         }
+    }
+
+    /**
+     * Delete a session from the drawer long-press menu.
+     *
+     * Running sessions are killed first and removed when the process exit
+     * is reported (see {@link #onSessionFinished}: a SIGKILL exit is
+     * signal 9, so without {@link #mSessionsPendingDeletion} the session
+     * would stay in the list as a finished session). Already-finished
+     * sessions are removed immediately. Removing the current session
+     * switches to another one first (handled by
+     * {@link #removeFinishedSession}); removing the last session finishes
+     * the activity, exactly like typing {@code exit} in the last session —
+     * reopening the app opens a fresh session.
+     */
+    public void deleteSession(final TerminalSession sessionToDelete) {
+        if (sessionToDelete == null) return;
+
+        if (!sessionToDelete.isRunning()) {
+            // Already finished: no exit callback will fire again, so remove it now.
+            removeFinishedSession(sessionToDelete);
+            return;
+        }
+
+        mSessionsPendingDeletion.add(sessionToDelete);
+        sessionToDelete.finishIfRunning();
     }
 
     public void termuxSessionListNotifyUpdated() {
