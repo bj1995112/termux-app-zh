@@ -270,5 +270,7 @@
     <string name="distro_proot_distro_missing">未安装 proot-distro</string>
     <string name="distro_session_install">安装 %1$s</string>
     <string name="distro_session_tools">安装工具：%1$s</string>
+    <string name="distro_latest_updated">最新更新 %1$s</string>
+    <string name="distro_updated_on">更新于 %1$s</string>
 
 </resources>
