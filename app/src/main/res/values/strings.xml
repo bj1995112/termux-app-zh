@@ -301,7 +301,7 @@
     <string name="aiagents_update">Update</string>
     <string name="aiagents_update_dsh_note">dsh is a preview build; the update prints the current version first, and the rollback command if needed.</string>
     <string name="aiagents_session">AI assistants: %1$s</string>
-    <string name="aiagents_no_rootfs">Cannot find this distro's files</string>
+    <string name="aiagents_no_rootfs">Cannot find this distro\'s files</string>
     <string name="aiagents_script_failed">Failed to write install script: %1$s</string>
     <string name="aiagents_install_started">Installing in a new terminal session…</string>
 
