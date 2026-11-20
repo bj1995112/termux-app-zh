@@ -140,6 +140,25 @@ public final class DistroUtils {
         return installed;
     }
 
+    /**
+     * Rootfs directory of one installed container, or null when it cannot be
+     * found (container removed, or an unfinished install). v5 layout first:
+     * $PREFIX/var/lib/proot-distro/containers/<name>/rootfs/; legacy layout
+     * (.../installed-rootfs/<name>) is the rootfs itself. Used by
+     * AiAgentsActivity to detect installed agents by scanning binary paths,
+     * and to write the install script into the container's /tmp.
+     */
+    public static File containerRootfs(String container) {
+        if (container == null || container.isEmpty()) return null;
+        File v5 = new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH,
+            "lib/proot-distro/containers/" + container + "/rootfs");
+        if (v5.isDirectory()) return v5;
+        File legacy = new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH,
+            "lib/proot-distro/installed-rootfs/" + container);
+        if (legacy.isDirectory()) return legacy;
+        return null;
+    }
+
     private static void collectContainers(File parentDir, Set<String> out, boolean rootfsIsChild) {
         if (parentDir == null || !parentDir.isDirectory()) return;
         File[] children = parentDir.listFiles();
