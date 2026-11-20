@@ -111,6 +111,16 @@ public class SettingsActivity extends AppCompatActivity {
             }
         }
 
+        private void configurePromptStylePreference(@NonNull Context context) {
+            Preference promptStylePreference = findPreference("prompt_style");
+            if (promptStylePreference != null) {
+                promptStylePreference.setOnPreferenceClickListener(preference -> {
+                    context.startActivity(new Intent(context, PromptStyleActivity.class));
+                    return true;
+                });
+            }
+        }
+
         private void configureAboutPreference(@NonNull Context context) {
             Preference aboutPreference = findPreference("about");
             if (aboutPreference != null) {
