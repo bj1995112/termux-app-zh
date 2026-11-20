@@ -23,7 +23,10 @@
 
 package com.termux.app.activities;
 
+import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -34,10 +37,13 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 public final class AiAgentUtils {
 
@@ -59,7 +65,25 @@ public final class AiAgentUtils {
         /** ~/.codex/packages/standalone/releases/<version>/ directory names. */
         CODEX_RELEASES,
         /** uv tool metadata: ~/.local/share/uv/tools/aider-chat/.../aider_chat-*.dist-info/METADATA. */
-        AIDER_DIST_INFO
+        AIDER_DIST_INFO,
+        /** ~/.local/share/claude/versions/<version>/ directory names. */
+        CLAUDE_VERSIONS
+    }
+
+    /** Which agents can be opened in the phone browser (v1: dsh, OpenCode, Pi only). */
+    public enum WebKind {
+        /** No web UI: terminal only. */
+        NONE,
+        /** `dsh web`: fixed port 3080, but the startup URL carries a fresh
+         * session token, so the app cannot open it by itself (see startWebSession). */
+        DSH,
+        /** `opencode serve --port 4096`: fixed port + password, so the app
+         * can open http://127.0.0.1:4096 directly. */
+        OPENCODE,
+        /** Official pi-webapp (`npx pi-webapp`): no fixed port, the launcher
+         * prints a token-bearing local address, so the app cannot open it
+         * by itself (see startWebSession). */
+        PI
     }
 
     /** One AI assistant that can be installed into a container. */
@@ -75,11 +99,14 @@ public final class AiAgentUtils {
         final String npmPackage;    // for NPM_PACKAGE_JSON, e.g. "@deepseek-ai/dsh"
         final String installSnippet; // shell lines run inside the container (install)
         final String updateSnippet;  // shell lines run inside the container (update)
+        final WebKind webKind;       // NONE when the agent has no web UI
+        final int webPort;           // fixed web port (3080 dsh, 4096 opencode), 0 when none
 
         AgentDef(String id, String displayName, int descriptionRes, boolean needsNode,
                  String command, String homeBinPath, String[] binPaths,
                  VersionKind versionKind, String npmPackage,
-                 String installSnippet, String updateSnippet) {
+                 String installSnippet, String updateSnippet,
+                 WebKind webKind, int webPort) {
             this.id = id;
             this.displayName = displayName;
             this.descriptionRes = descriptionRes;
@@ -91,49 +118,80 @@ public final class AiAgentUtils {
             this.npmPackage = npmPackage;
             this.installSnippet = installSnippet;
             this.updateSnippet = updateSnippet;
+            this.webKind = webKind;
+            this.webPort = webPort;
         }
     }
 
     // All install/update commands verified against primary sources on 2026-11-20
     // (npm registry, PyPI, official docs); see ai-agents/design.md §1.
+    // Web launch facts verified 2026-11-21 (see web-agents/design.md §1):
+    // dsh web = :3080 with a per-start token in the URL; OpenCode 2 has no
+    // `web` command — the web UI is served by `opencode serve --port 4096`
+    // (password-protected); pi-webapp has no fixed port. Claude Code facts
+    // verified 2026-11-21 against Anthropic docs: the installer is
+    // https://claude.ai/install.sh (claude.com/install.sh is a 404), the
+    // binary is ~/.local/bin/claude, update is `claude update`, no Node needed.
     public static final List<AgentDef> AGENTS = Arrays.asList(
         new AgentDef("codex", "Codex", R.string.aiagents_desc_codex, false, "codex",
             ".local/bin/codex",
             new String[]{"root/.local/bin/codex"},
             VersionKind.CODEX_RELEASES, null,
             "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
-            "codex update || curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"),
+            "codex update || curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
+            WebKind.NONE, 0),
         new AgentDef("pi", "Pi", R.string.aiagents_desc_pi, true, "pi",
             "",
             new String[]{"usr/bin/pi", "usr/local/bin/pi"},
             VersionKind.NPM_PACKAGE_JSON, "@earendil-works/pi-coding-agent",
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-            "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"),
+            "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+            WebKind.PI, 0),
         new AgentDef("agy", "Antigravity CLI", R.string.aiagents_desc_agy, false, "agy",
             ".local/bin/agy",
             new String[]{"root/.local/bin/agy"},
             VersionKind.NONE, null,
             "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
-            "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh"),
+            "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
+            WebKind.NONE, 0),
         new AgentDef("dsh", "DeepSeek Harness", R.string.aiagents_desc_dsh, true, "dsh",
             "",
             new String[]{"usr/bin/dsh", "usr/local/bin/dsh"},
             VersionKind.NPM_PACKAGE_JSON, "@deepseek-ai/dsh",
             "npm install -g @deepseek-ai/dsh",
-            "old_ver=$(npm list -g @deepseek-ai/dsh --depth=0 2>/dev/null | grep -oE '@deepseek-ai/dsh@[0-9][^ ]*' | cut -d@ -f3); if [ -n \"$old_ver\" ]; then echo \"当前版本：$old_ver；如需回退：npm install -g @deepseek-ai/dsh@$old_ver\"; fi; npm install -g @deepseek-ai/dsh"),
+            "old_ver=$(npm list -g @deepseek-ai/dsh --depth=0 2>/dev/null | grep -oE '@deepseek-ai/dsh@[0-9][^ ]*' | cut -d@ -f3); if [ -n \"$old_ver\" ]; then echo \"当前版本：$old_ver；如需回退：npm install -g @deepseek-ai/dsh@$old_ver\"; fi; npm install -g @deepseek-ai/dsh",
+            WebKind.DSH, 3080),
         new AgentDef("opencode", "OpenCode", R.string.aiagents_desc_opencode, true, "opencode",
             "",
             new String[]{"usr/bin/opencode", "usr/local/bin/opencode"},
             VersionKind.NPM_PACKAGE_JSON, "@opencode/cli",
             "npm install -g @opencode/cli",
-            "npm install -g @opencode/cli"),
+            "npm install -g @opencode/cli",
+            WebKind.OPENCODE, 4096),
         new AgentDef("aider", "Aider", R.string.aiagents_desc_aider, false, "aider",
             ".local/bin/aider",
             new String[]{"root/.local/bin/aider"},
             VersionKind.AIDER_DIST_INFO, null,
             "curl -LsSf https://aider.chat/install.sh | sh",
-            "aider --upgrade")
+            "aider --upgrade",
+            WebKind.NONE, 0),
+        new AgentDef("claude", "Claude Code", R.string.aiagents_desc_claude, false, "claude",
+            ".local/bin/claude",
+            new String[]{"root/.local/bin/claude"},
+            VersionKind.CLAUDE_VERSIONS, null,
+            "curl -fsSL https://claude.ai/install.sh | bash",
+            "claude update",
+            WebKind.NONE, 0)
     );
+
+    /** AgentDef for an id, or null when unknown. */
+    public static AgentDef findDef(String id) {
+        if (id == null) return null;
+        for (AgentDef def : AGENTS) {
+            if (def.id.equals(id)) return def;
+        }
+        return null;
+    }
 
     /** One installed agent inside one installed container. */
     public static final class InstalledAgent {
@@ -217,8 +275,10 @@ public final class AiAgentUtils {
         return result;
     }
 
-    /** First binary path of the agent that exists in the rootfs, or null. */
-    private static String findBinPath(File rootfs, AgentDef def) {
+    /** First binary path of the agent that exists in the rootfs, or null.
+     * Public so AiAgentsActivity can rebuild an InstalledAgent for the web
+     * button from a row it already detected. */
+    public static String findBinPath(File rootfs, AgentDef def) {
         for (String bin : def.binPaths) {
             if (new File(rootfs, bin).isFile()) return bin;
         }
@@ -244,20 +304,11 @@ public final class AiAgentUtils {
                     }
                     return "";
                 case CODEX_RELEASES:
-                    File releases = new File(rootfs, "root/.codex/packages/standalone/releases");
-                    if (!releases.isDirectory()) return "";
-                    File[] children = releases.listFiles();
-                    if (children == null) return "";
-                    List<String> versions = new ArrayList<>();
-                    for (File child : children) {
-                        if (child.isDirectory()
-                            && child.getName().matches("[0-9]+\\.[0-9]+\\.[0-9]+.*")) {
-                            versions.add(child.getName());
-                        }
-                    }
-                    if (versions.isEmpty()) return "";
-                    Collections.sort(versions, (a, b) -> compareVersionsDescending(a, b));
-                    return versions.get(0);
+                    return probeMaxVersionDir(
+                        new File(rootfs, "root/.codex/packages/standalone/releases"));
+                case CLAUDE_VERSIONS:
+                    return probeMaxVersionDir(
+                        new File(rootfs, "root/.local/share/claude/versions"));
                 case AIDER_DIST_INFO:
                     return probeAiderVersion(rootfs);
                 default:
@@ -267,6 +318,25 @@ public final class AiAgentUtils {
             Log.w(LOG_TAG, "Failed to probe version for " + def.id, e);
             return "";
         }
+    }
+
+    /** Newest <version> directory name under a versions dir, or "".
+     * Shared by Codex (~/.codex/.../releases) and Claude Code
+     * (~/.local/share/claude/versions). */
+    private static String probeMaxVersionDir(File dir) {
+        if (dir == null || !dir.isDirectory()) return "";
+        File[] children = dir.listFiles();
+        if (children == null) return "";
+        List<String> versions = new ArrayList<>();
+        for (File child : children) {
+            if (child.isDirectory()
+                && child.getName().matches("[0-9]+\\.[0-9]+\\.[0-9]+.*")) {
+                versions.add(child.getName());
+            }
+        }
+        if (versions.isEmpty()) return "";
+        Collections.sort(versions, (a, b) -> compareVersionsDescending(a, b));
+        return versions.get(0);
     }
 
     private static String probeAiderVersion(File rootfs) {
@@ -359,6 +429,184 @@ public final class AiAgentUtils {
     }
 
     // ------------------------------------------------------------------
+    // Open an installed agent's web UI in the phone browser
+    // ------------------------------------------------------------------
+
+    /**
+     * Start a web-capable agent's server inside its container (visible
+     * session, same script-file method as the install flow) and explain how
+     * to reach it. The explanation dialog is shown FIRST and the session
+     * starts only from its positive button: starting the session first
+     * would switch to the new session and bring TermuxActivity to the
+     * foreground (DistroUtils.startSessionWithExecutable uses
+     * VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY),
+     * hiding the dialog behind the terminal until the user presses Back.
+     * The server runs while the session is open; closing the session stops
+     * it (proot has no systemd, so there is no background daemon). There
+     * is deliberately no server-running-state detection in v1: the app
+     * cannot probe inside the container without in-container exec, so it
+     * never claims a server is up — it only starts one.
+     *
+     * The three agents differ in what the app can open by itself:
+     * - dsh: `dsh web` serves :3080, but the startup URL carries a fresh
+     *   per-start session token, so the app cannot build a working URL.
+     *   The dialog tells the user to copy the token URL from the session.
+     * - OpenCode (v2): there is NO `opencode web` command in v2. The web
+     *   UI is served by `opencode serve --port 4096`, password-protected.
+     *   The app generates a random password per launch, passes it via
+     *   OPENCODE_PASSWORD, shows it in the dialog, and opens
+     *   http://127.0.0.1:4096 with an ACTION_VIEW intent; the user types
+     *   the password into the web UI. If the password login ever fails,
+     *   the fallback is `opencode pair` in the session (one-time link).
+     * - Pi: the official pi-webapp has no fixed port; the launcher prints
+     *   a token-bearing local address, so the app cannot build a URL.
+     *   The dialog tells the user to copy the address from the session
+     *   (or run `npx pi-webapp status` there). PI_WEBAPP_AUTO_OPEN=0
+     *   stops the launcher from trying to open a browser inside the
+     *   container. The launcher may exit after starting its background
+     *   service, so the script keeps the session open with a read prompt.
+     *
+     * @param onDialogDismissed run when the explanation dialog is closed
+     *        (DistroActivity passes finish() here); null is fine.
+     */
+    public static void startWebSession(final Context context, final InstalledAgent agent,
+                                       final Runnable onDialogDismissed) {
+        final AgentDef def = findDef(agent.agentId);
+        if (def == null || def.webKind == WebKind.NONE) return;
+        final String webPassword;
+        if (def.webKind == WebKind.OPENCODE) {
+            webPassword = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        } else {
+            webPassword = null;
+        }
+        File rootfs = DistroUtils.containerRootfs(agent.container);
+        if (rootfs == null) {
+            Toast.makeText(context, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
+            return;
+        }
+        String scriptName = "termux-web-" + agent.agentId + "-" + agent.container + ".sh";
+        File scriptFile = new File(rootfs, "tmp/" + scriptName);
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(buildWebScript(def, agent, webPassword)
+                    .getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setReadable(true, true);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write web launch script", e);
+            Toast.makeText(context, context.getString(R.string.aiagents_web_script_failed,
+                e.getMessage()), Toast.LENGTH_LONG).show();
+            return;
+        }
+        // Fail fast when proot-distro is missing: no dialog is shown then.
+        final String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
+            .getAbsolutePath();
+        if (!new File(prootDistro).isFile()) {
+            Toast.makeText(context, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        // Dialog FIRST, session second (see the javadoc above): the session
+        // start is deferred into a Runnable that only the dialog's positive
+        // button runs. Cancel starts nothing.
+        final String sessionName = context.getString(R.string.aiagents_web_session,
+            agent.displayName, agent.distroDisplay);
+        final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
+            new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
+            sessionName, sessionName);
+        showWebDialog(context, def, agent, webPassword, startSession, onDialogDismissed);
+    }
+
+    /**
+     * Explanation dialog for a web launch; OpenCode also gets an "Open browser" button.
+     * The positive button starts the session (and, for OpenCode, opens the
+     * browser); Cancel starts nothing. The dismiss listener still runs
+     * onDialogDismissed in every case, including Cancel.
+     */
+    private static void showWebDialog(final Context context, final AgentDef def,
+                                      final InstalledAgent agent, final String webPassword,
+                                      final Runnable onStartSession,
+                                      final Runnable onDialogDismissed) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setOnDismissListener(dialog -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            });
+        switch (def.webKind) {
+            case DSH:
+                builder.setMessage(R.string.aiagents_web_dsh_msg)
+                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                        if (onStartSession != null) onStartSession.run();
+                    });
+                break;
+            case PI:
+                builder.setMessage(R.string.aiagents_web_pi_msg)
+                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                        if (onStartSession != null) onStartSession.run();
+                    });
+                break;
+            case OPENCODE:
+                builder.setMessage(context.getString(R.string.aiagents_web_opencode_msg, webPassword))
+                    .setPositiveButton(R.string.aiagents_web_open_browser, (dialog, which) -> {
+                        if (onStartSession != null) onStartSession.run();
+                        Intent intent = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("http://127.0.0.1:" + def.webPort));
+                        context.startActivity(intent);
+                    })
+                    .setNegativeButton(android.R.string.cancel, null);
+                break;
+            default:
+                return;
+        }
+        builder.show();
+    }
+
+    /** The script a web launch runs inside the container (as root). */
+    private static String buildWebScript(AgentDef def, InstalledAgent agent, String webPassword) {
+        StringBuilder s = new StringBuilder();
+        s.append("#!/bin/bash\n");
+        s.append("# Generated by Termux \"AI 助手\" web launch - do not edit.\n");
+        switch (def.webKind) {
+            case DSH:
+                s.append("echo \"正在启动 dsh 网页版（").append(agent.distroDisplay).append("）…\"\n");
+                s.append("echo \"启动后在下面找到 dsh web: http://127.0.0.1:3080/?token=… 这一行，复制完整地址到手机浏览器打开。\"\n");
+                s.append("echo \"注意：直接打开 http://127.0.0.1:3080 进不去，必须带 token 的完整地址。\"\n");
+                s.append("command -v dsh >/dev/null 2>&1 || { echo \"没有找到 dsh，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("cd ~ || true\n");
+                s.append("dsh web --no-open\n");
+                break;
+            case OPENCODE:
+                s.append("echo \"正在启动 OpenCode 网页版（").append(agent.distroDisplay).append("）…\"\n");
+                s.append("echo \"地址：http://127.0.0.1:").append(def.webPort).append("\"\n");
+                s.append("echo \"密码：").append(webPassword).append("（也在手机弹出的对话框里）\"\n");
+                s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("export OPENCODE_PASSWORD=\"").append(webPassword).append("\"\n");
+                s.append("opencode serve --hostname 127.0.0.1 --port ").append(def.webPort).append("\n");
+                break;
+            case PI:
+                s.append("echo \"正在启动 Pi 网页版（").append(agent.distroDisplay).append("）…\"\n");
+                s.append("echo \"第一次启动会先下载官方 pi-webapp（npx），稍等一会。\"\n");
+                s.append("echo \"启动后在下面找到带 token 的本地地址，复制到浏览器打开；\"\n");
+                s.append("echo \"也可以在会话里跑 npx pi-webapp status 查看地址。\"\n");
+                s.append("command -v pi >/dev/null 2>&1 || { echo \"没有找到 pi，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("command -v npx >/dev/null 2>&1 || { echo \"没有找到 npx（需要 Node），请先在“AI 助手”里安装 Pi（会自动装 Node 24）。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("cd ~ || true\n");
+                s.append("PI_WEBAPP_AUTO_OPEN=0 npx -y pi-webapp\n");
+                s.append("# pi-webapp starts its service in the background and may exit at\n");
+                s.append("# once; keep this session open so the service keeps running.\n");
+                s.append("echo \"Pi 网页版服务运行中，关闭此会话即停止。\"\n");
+                s.append("read -r -p \"按回车关闭此会话\"\n");
+                break;
+            default:
+                break;
+        }
+        return s.toString();
+    }
+
+    // ------------------------------------------------------------------
     // `ai` shell command
     // ------------------------------------------------------------------
 
@@ -392,6 +640,7 @@ public final class AiAgentUtils {
         "opencode|OpenCode|usr/bin/opencode\n" +
         "opencode|OpenCode|usr/local/bin/opencode\n" +
         "aider|Aider|root/.local/bin/aider\n" +
+        "claude|Claude Code|root/.local/bin/claude\n" +
         "'\n" +
         "\n" +
         "usage() {\n" +
@@ -399,8 +648,10 @@ public final class AiAgentUtils {
         "    echo \"  ai            列出已安装的助手\"\n" +
         "    echo \"  ai list       同上\"\n" +
         "    echo \"  ai codex      在装有 Codex 的发行版里启动 Codex\"\n" +
+        "    echo \"  ai dsh web    启动 dsh 网页版（地址在会话里，带 token）\"\n" +
         "    echo \"  ai -h         显示帮助\"\n" +
-        "    echo \"助手：codex、pi、agy、dsh、opencode、aider\"\n" +
+        "    echo \"助手：codex、pi、agy、dsh、opencode、aider、claude\"\n" +
+        "    echo \"网页版：dsh、opencode、pi（ai <助手名> web）\"\n" +
         "}\n" +
         "\n" +
         "# Print one line per installed agent: id|display|container|/absolute/path.\n" +
@@ -440,9 +691,13 @@ public final class AiAgentUtils {
         "        exit 1\n" +
         "    fi\n" +
         "    printf '%s\\n' \"$installed\" | while IFS='|' read -r id display container path; do\n" +
-        "        printf '%s — %s\\n' \"$display\" \"$container\"\n" +
+        "        case \"$id\" in\n" +
+        "            dsh|opencode|pi) tag=\" · 网页版\" ;;\n" +
+        "            *) tag=\"\" ;;\n" +
+        "        esac\n" +
+        "        printf '%s — %s%s\\n' \"$display\" \"$container\" \"$tag\"\n" +
         "    done\n" +
-        "    echo \"启动：ai <助手名>，例如 ai codex\"\n" +
+        "    echo \"启动：ai <助手名>，网页版：ai <助手名> web，例如 ai dsh web\"\n" +
         "    exit 0\n" +
         "fi\n" +
         "\n" +
@@ -454,7 +709,7 @@ public final class AiAgentUtils {
         "    [ -n \"$id\" ] || continue\n" +
         "    lower=$(printf '%s' \"$display\" | tr 'A-Z' 'a-z')\n" +
         "    if [ \"$id\" = \"$name\" ] || [ \"$lower\" = \"$name\" ]; then\n" +
-        "        printf '%s|%s|%s\\n' \"$display\" \"$container\" \"$path\"\n" +
+        "        printf '%s|%s|%s|%s\\n' \"$id\" \"$display\" \"$container\" \"$path\"\n" +
         "    fi\n" +
         "done)\n" +
         "count=$(printf '%s\\n' \"$matches\" | grep -c .)\n" +
@@ -473,7 +728,7 @@ public final class AiAgentUtils {
         "if [ \"$count\" -gt 1 ]; then\n" +
         "    echo \"“$wanted”装在多个发行版里，选一个：\"\n" +
         "    i=0\n" +
-        "    printf '%s\\n' \"$matches\" | while IFS='|' read -r display container path; do\n" +
+        "    printf '%s\\n' \"$matches\" | while IFS='|' read -r id display container path; do\n" +
         "        i=$((i + 1))\n" +
         "        printf '  %s) %s — %s\\n' \"$i\" \"$display\" \"$container\"\n" +
         "    done\n" +
@@ -488,12 +743,41 @@ public final class AiAgentUtils {
         "    fi\n" +
         "    matches=$(printf '%s\\n' \"$matches\" | sed -n \"${choice}p\")\n" +
         "fi\n" +
-        "display=$(printf '%s' \"$matches\" | cut -d'|' -f1)\n" +
-        "container=$(printf '%s' \"$matches\" | cut -d'|' -f2)\n" +
-        "path=$(printf '%s' \"$matches\" | cut -d'|' -f3)\n" +
+        "agent_id=$(printf '%s' \"$matches\" | cut -d'|' -f1)\n" +
+        "display=$(printf '%s' \"$matches\" | cut -d'|' -f2)\n" +
+        "container=$(printf '%s' \"$matches\" | cut -d'|' -f3)\n" +
+        "path=$(printf '%s' \"$matches\" | cut -d'|' -f4)\n" +
         "if ! command -v proot-distro >/dev/null 2>&1; then\n" +
         "    echo \"没有安装 proot-distro，请先执行：pkg install proot-distro\"\n" +
         "    exit 1\n" +
+        "fi\n" +
+        "# Web UI: ai <name> web starts the agent's web server in this session\n" +
+        "# and prints how to reach it. A shell command cannot open the phone\n" +
+        "# browser, so open the printed address yourself. The server stops\n" +
+        "# when this session closes.\n" +
+        "if [ \"$1\" = \"web\" ]; then\n" +
+        "    shift\n" +
+        "    case \"$agent_id\" in\n" +
+        "        dsh)\n" +
+        "            echo \"启动 dsh 网页版（$container）…\"\n" +
+        "            echo \"地址在会话里：找到 dsh web: http://127.0.0.1:3080/?token=… 这一行，复制完整地址到浏览器打开。\"\n" +
+        "            exec proot-distro login \"$container\" -- dsh web --no-open \"$@\"\n" +
+        "            ;;\n" +
+        "        opencode)\n" +
+        "            echo \"启动 OpenCode 网页版（$container）…\"\n" +
+        "            echo \"地址：http://127.0.0.1:4096，密码见会话里的 server password 一行。\"\n" +
+        "            exec proot-distro login \"$container\" -- opencode serve --hostname 127.0.0.1 --port 4096 \"$@\"\n" +
+        "            ;;\n" +
+        "        pi)\n" +
+        "            echo \"启动 Pi 网页版（$container）…\"\n" +
+        "            echo \"地址在会话里（带 token 的链接），复制到浏览器打开；也可以跑 npx pi-webapp status 查看地址。\"\n" +
+        "            exec proot-distro login \"$container\" -- bash -c 'PI_WEBAPP_AUTO_OPEN=0 npx -y pi-webapp; echo \"Pi 网页版服务运行中，关闭此会话即停止。\"; read -r -p \"按回车关闭此会话\"'\n" +
+        "            ;;\n" +
+        "        *)\n" +
+        "            echo \"“$display”没有网页版。带网页版的助手：dsh、opencode、pi。\"\n" +
+        "            exit 1\n" +
+        "            ;;\n" +
+        "    esac\n" +
         "fi\n" +
         "echo \"启动 $display（$container）…\"\n" +
         "exec proot-distro login \"$container\" -- \"$path\" \"$@\"\n";
