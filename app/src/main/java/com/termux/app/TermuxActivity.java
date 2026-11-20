@@ -71,6 +71,7 @@ import androidx.core.content.ContextCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.viewpager.widget.ViewPager;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -690,11 +691,20 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         for (int i = 0; i < shown; i++) {
             final AiAgentUtils.InstalledAgent agent = installed.get(i);
             TextView row = newInstalledDistroRow(rows);
-            row.setText(getString(R.string.aiagents_drawer_row,
-                agent.displayName, agent.distroDisplay));
+            String rowText = getString(R.string.aiagents_drawer_row,
+                agent.displayName, agent.distroDisplay);
+            if (AiAgentUtils.hasWeb(agent.agentId)) {
+                rowText += " · " + getString(R.string.aiagents_web_open);
+            }
+            row.setText(rowText);
             row.setOnClickListener(v -> {
                 getDrawer().closeDrawers();
                 AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+            });
+            row.setLongClickable(true);
+            row.setOnLongClickListener(v -> {
+                showAgentDrawerMenu(agent);
+                return true;
             });
             rows.addView(row);
         }
@@ -708,6 +718,34 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             });
             rows.addView(moreRow);
         }
+    }
+
+    /** Long-press menu on a drawer "AI 助手" row: enter the terminal, or
+     * (web-capable agents only) open the web UI through the shared
+     * dialog-first startWebSession flow. The drawer has nothing to finish,
+     * so the onDialogDismissed callback is null (startWebSession documents
+     * null as fine). */
+    private void showAgentDrawerMenu(final AiAgentUtils.InstalledAgent agent) {
+        List<String> names = new ArrayList<>();
+        List<Runnable> actions = new ArrayList<>();
+        names.add(getString(R.string.aiagents_drawer_enter_terminal));
+        actions.add(() -> {
+            getDrawer().closeDrawers();
+            AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+        });
+        if (AiAgentUtils.hasWeb(agent.agentId)) {
+            names.add(getString(R.string.aiagents_web_quick_item, agent.displayName));
+            actions.add(() -> {
+                getDrawer().closeDrawers();
+                AiAgentUtils.startWebSession(TermuxActivity.this, agent, null);
+            });
+        }
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_drawer_row,
+                agent.displayName, agent.distroDisplay))
+            .setItems(names.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
     }
 
     /** One drawer row (installed distros and installed AI assistants):
