@@ -285,6 +285,7 @@
     <string name="aiagents_desc_opencode">OpenCode, open-source AI coding agent (npm, needs Node 24)</string>
     <string name="aiagents_desc_aider">Aider, AI pair-programming in the terminal (uv installer, no Node needed)</string>
     <string name="aiagents_desc_claude">Claude Code, Anthropic coding agent (installer, no Node needed; chatting needs a Claude plan)</string>
+    <string name="aiagents_desc_hermes">Hermes Agent, Nous Research self-improving AI agent (installer, no Node needed; chatting needs a model key or Nous Portal)</string>
     <string name="aiagents_not_installed">Not installed</string>
     <string name="aiagents_installed">Installed %1$s</string>
     <string name="aiagents_installed_unknown">Installed</string>
@@ -313,6 +314,7 @@
     <string name="aiagents_web_dsh_msg">Started in a new session. Find the line starting with "dsh web: http://127.0.0.1:3080/?token=" in the session output and open that full address in your browser. Opening http://127.0.0.1:3080 on its own does not work; the token is required.</string>
     <string name="aiagents_web_pi_msg">Started in a new session. The first launch downloads the official pi-webapp, so give it a moment. Find the token-bearing local address printed in the session output and open it in your browser; you can also run "npx pi-webapp status" in the session to show the address.</string>
     <string name="aiagents_web_opencode_msg">Address: http://127.0.0.1:4096\nPassword: %1$s\nThe password stays the same every time, so the browser stays signed in after the first login.\nWait until the session shows "server listening", then tap Open browser.</string>
+    <string name="aiagents_web_hermes_msg">Address: http://127.0.0.1:9119\nNo password is needed (the dashboard only listens on this phone). The first launch downloads pnpm and builds the web UI, so give it a moment.\nTap Open browser once the session shows the dashboard is up.</string>
     <string name="aiagents_web_open_browser">Open browser</string>
     <string name="aiagents_web_restart_server">Restart server</string>
     <string name="aiagents_web_restart_note">A server is already running. If the password does not work, tap Restart server to restart it with the fixed password. It takes a few seconds; if the browser cannot connect yet, wait and refresh.</string>
