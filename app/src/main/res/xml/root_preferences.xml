@@ -7,6 +7,12 @@
         app:fragment="com.termux.app.fragments.settings.TermuxPreferencesFragment"/>
 
     <Preference
+        app:key="prompt_style"
+        app:title="@string/prompt_style_title"
+        app:summary="@string/prompt_theme_01_name"
+        app:persistent="false"/>
+
+    <Preference
         app:key="termux_api"
         app:title="@string/termux_api_preferences_title"
         app:summary="@string/termux_api_preferences_summary"
