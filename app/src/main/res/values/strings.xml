@@ -255,7 +255,7 @@
     <string name="action_refresh_distro_list">Refresh list</string>
     <string name="distro_status_loading">Loading version list…</string>
     <string name="distro_status_updated">List updated %1$s</string>
-    <string name="distro_status_offline">No network, showing cached list</string>
+    <string name="distro_status_offline">No network, showing known versions</string>
     <string name="distro_installed">Installed: %1$s</string>
     <string name="distro_available_versions">Available: %1$s</string>
     <string name="distro_version_latest">latest</string>
