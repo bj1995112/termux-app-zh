@@ -245,4 +245,30 @@
     <string name="font_prompt">选择字体</string>
     <string name="writing_failed">安装文件失败：\n\n</string>
 
+<!-- Linux 发行版管理器（内置，基于 proot-distro） -->
+    <string name="distro_title">Linux 发行版</string>
+    <string name="action_open_distro">Linux 发行版</string>
+    <string name="action_refresh_distro_list">刷新列表</string>
+    <string name="distro_status_loading">正在加载版本列表…</string>
+    <string name="distro_status_updated">列表更新于 %1$s</string>
+    <string name="distro_status_offline">无网络，显示缓存列表</string>
+    <string name="distro_installed">已安装：%1$s</string>
+    <string name="distro_available_versions">可安装：%1$s</string>
+    <string name="distro_version_latest">最新版</string>
+    <string name="distro_enter">进入 %1$s</string>
+    <string name="distro_install_tools_for">为 %1$s 安装常用工具</string>
+    <string name="distro_install_new_version">安装新版本…</string>
+    <string name="distro_choose_version">选择 %1$s 版本</string>
+    <string name="distro_install_title">安装 %1$s</string>
+    <string name="distro_install_confirm">将下载 %1$s 镜像并用 proot-distro 安装，继续吗？</string>
+    <string name="distro_install">安装</string>
+    <string name="distro_tools_title">%1$s 常用工具</string>
+    <string name="distro_tools_none_selected">没有选中任何工具</string>
+    <string name="distro_install_started">正在新会话中安装…</string>
+    <string name="distro_tools_started">正在新会话中安装工具…</string>
+    <string name="distro_install_script_failed">写安装脚本失败：%1$s</string>
+    <string name="distro_proot_distro_missing">未安装 proot-distro</string>
+    <string name="distro_session_install">安装 %1$s</string>
+    <string name="distro_session_tools">安装工具：%1$s</string>
+
 </resources>
