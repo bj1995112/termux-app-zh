@@ -251,7 +251,7 @@
     <string name="action_refresh_distro_list">刷新列表</string>
     <string name="distro_status_loading">正在加载版本列表…</string>
     <string name="distro_status_updated">列表更新于 %1$s</string>
-    <string name="distro_status_offline">无网络，显示缓存列表</string>
+    <string name="distro_status_offline">无网络，显示已知版本</string>
     <string name="distro_installed">已安装：%1$s</string>
     <string name="distro_available_versions">可安装：%1$s</string>
     <string name="distro_version_latest">最新版</string>
