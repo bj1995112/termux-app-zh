@@ -1,0 +1,922 @@
+// Linux distro manager: list, one-click install and login for proot-distro
+// containers.
+//
+// The distro list is fetched at runtime: the 7 supported distros and their
+// Docker Hub image names are the only fixed data. Version numbers come from
+// the Docker Hub tags API, with the last fetched list cached in
+// ~/.termux/distro-list.json as an offline fallback. proot-distro v5 has no
+// alias system, so installs use image references such as "ubuntu:26.04".
+//
+// Install / login / tools install run in a visible terminal session via the
+// same internal TERMUX_SERVICE.ACTION_SERVICE_EXECUTE intent that
+// RunCommandService uses, so TermuxService creates the session, switches to
+// it and brings TermuxActivity forward by itself. This activity finishes
+// right after sending the intent.
+//
+// Pure Java, zero new dependencies: only Android framework APIs
+// (HttpURLConnection, org.json, AtomicFile) and existing termux-shared
+// classes are used.
+
+package com.termux.app.activities;
+
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.util.AtomicFile;
+import android.util.Log;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
+import android.widget.ListView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.termux.R;
+import com.termux.app.TermuxService;
+import com.termux.shared.activity.media.AppCompatActivityUtils;
+import com.termux.shared.shell.command.ExecutionCommand;
+import com.termux.shared.termux.TermuxConstants;
+import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_SERVICE;
+import com.termux.shared.theme.NightMode;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+public class DistroActivity extends AppCompatActivity {
+
+    private static final String LOG_TAG = "DistroActivity";
+
+    /** Version list cache file, under ~/.termux/. */
+    private static final String CACHE_FILE_NAME = "distro-list.json";
+
+    private static final int DOCKER_HUB_CONNECT_TIMEOUT_MS = 10000;
+    private static final int DOCKER_HUB_READ_TIMEOUT_MS = 15000;
+    private static final int DOCKER_HUB_TAGS_PAGE_SIZE = 100;
+
+    /** The `distro` shell command, written to $PREFIX/bin on first use. */
+    private static final String DISTRO_COMMAND_FILE_NAME = "distro";
+    private static final String DISTRO_COMMAND_CONTENT =
+        "#!/data/data/com.termux/files/usr/bin/sh\n" +
+        "# `distro` - open the Linux distro manager, or pass arguments to proot-distro.\n" +
+        "# Written by Termux (DistroActivity.ensureDistroCommand); edits are overwritten.\n" +
+        "if [ $# -eq 0 ]; then\n" +
+        "    am start -n com.termux/.app.activities.DistroActivity >/dev/null 2>&1 \\\n" +
+        "        || /system/bin/am start -n com.termux/.app.activities.DistroActivity >/dev/null 2>&1 \\\n" +
+        "        || echo \"Cannot open the Linux distro screen, please use the drawer entry.\"\n" +
+        "else\n" +
+        "    exec proot-distro \"$@\"\n" +
+        "fi\n";
+
+    /** How version tags of a Docker Hub image are picked. */
+    private enum TagFilter {
+        /** Tags like 26.04 / 3.23, newest first. */
+        DOTTED_VERSION,
+        /** Tags like 46 / 13, newest first. */
+        INTEGER_VERSION,
+        /** Debian codenames, in preference order. */
+        DEBIAN_CODENAME,
+        /** Only the "latest" tag (rolling releases). */
+        ROLLING
+    }
+
+    /** One Docker Hub image that provides versions for a distro. */
+    private static class TagSource {
+        final String image;          // e.g. "ubuntu" or "opensuse/leap"
+        final TagFilter filter;
+        final String displayPrefix;  // e.g. "" or "Leap "
+
+        TagSource(String image, TagFilter filter, String displayPrefix) {
+            this.image = image;
+            this.filter = filter;
+            this.displayPrefix = displayPrefix;
+        }
+    }
+
+    /** One distro shown in the list. Only the image names are fixed; versions are fetched. */
+    private static class DistroDef {
+        final String id;             // e.g. "ubuntu", used for package manager mapping
+        final String displayName;    // e.g. "Ubuntu"
+        final String note;           // short note shown in the row subtitle when nothing is installed
+        final String containerPrefix; // installed container names start with this, e.g. "ubuntu"
+        final List<TagSource> sources;
+
+        DistroDef(String id, String displayName, String note, String containerPrefix, TagSource... sources) {
+            this.id = id;
+            this.displayName = displayName;
+            this.note = note;
+            this.containerPrefix = containerPrefix;
+            this.sources = Arrays.asList(sources);
+        }
+    }
+
+    /** One installable version: what the user picks in the dialog. */
+    private static class VersionOption {
+        final String display;        // e.g. "26.10" or "Leap 16.1"
+        final String imageRef;       // e.g. "ubuntu:26.10" or "opensuse/leap:16.1"
+        final String container;      // e.g. "ubuntu-26.10"
+
+        VersionOption(String display, String imageRef) {
+            this.display = display;
+            this.imageRef = imageRef;
+            this.container = containerNameForImageRef(imageRef);
+        }
+    }
+
+    /** One row of the distro list. */
+    private static class DistroRow {
+        final String title;
+        final String subtitle;
+
+        DistroRow(String title, String subtitle) {
+            this.title = title;
+            this.subtitle = subtitle;
+        }
+
+        @Override
+        public String toString() {
+            return title;
+        }
+    }
+
+    // Debian codenames in preference order, with their version numbers.
+    // "sid" has no version number.
+    private static final String[] DEBIAN_CODENAMES = {"trixie", "bookworm", "bullseye", "sid"};
+    private static final Map<String, String> DEBIAN_CODENAME_VERSIONS = new HashMap<>();
+    static {
+        DEBIAN_CODENAME_VERSIONS.put("trixie", "13");
+        DEBIAN_CODENAME_VERSIONS.put("bookworm", "12");
+        DEBIAN_CODENAME_VERSIONS.put("bullseye", "11");
+    }
+
+    // The 7 supported distros. Only the Docker Hub image names are fixed here;
+    // version numbers are fetched from the Docker Hub tags API at runtime.
+    private static final List<DistroDef> DISTROS = Arrays.asList(
+        new DistroDef("ubuntu", "Ubuntu", "可选最新版或长期支持版", "ubuntu",
+            new TagSource("ubuntu", TagFilter.DOTTED_VERSION, "")),
+        new DistroDef("debian", "Debian", "可选代号版本", "debian",
+            new TagSource("debian", TagFilter.DEBIAN_CODENAME, "")),
+        new DistroDef("arch", "Arch Linux", "滚动更新", "archlinux",
+            new TagSource("archlinux", TagFilter.ROLLING, "")),
+        new DistroDef("alpine", "Alpine Linux", "轻量小巧", "alpine",
+            new TagSource("alpine", TagFilter.DOTTED_VERSION, "")),
+        new DistroDef("fedora", "Fedora", "可选数字版本", "fedora",
+            new TagSource("fedora", TagFilter.INTEGER_VERSION, "")),
+        new DistroDef("opensuse", "openSUSE", "Leap 稳定版 / Tumbleweed 滚动版", "opensuse",
+            new TagSource("opensuse/leap", TagFilter.DOTTED_VERSION, "Leap "),
+            new TagSource("opensuse/tumbleweed", TagFilter.ROLLING, "Tumbleweed ")),
+        new DistroDef("void", "Void Linux", "滚动更新（镜像较旧，装完请立即升级）", "voidlinux",
+            new TagSource("voidlinux/voidlinux", TagFilter.ROLLING, ""))
+    );
+
+    /** Common tools the user can tick after installing a distro. */
+    private static final String[] TOOL_IDS =
+        {"git", "curl", "wget", "vim", "nano", "htop", "python3", "unzip", "openssh"};
+    private static final String[] TOOL_DISPLAY_NAMES =
+        {"Git", "cURL", "Wget", "Vim", "Nano", "htop", "Python 3", "unzip", "OpenSSH 客户端"};
+
+    private ListView mDistroListView;
+    private TextView mStatusView;
+    private ArrayAdapter<DistroRow> mAdapter;
+
+    /** distro id -> fetched version options (empty until fetched). */
+    private final Map<String, List<VersionOption>> mVersions = new HashMap<>();
+    /** container name -> display name, e.g. "ubuntu-26.04" -> "Ubuntu 26.04". */
+    private final Map<String, String> mContainerDisplayNames = new HashMap<>();
+    /** Installed container names, from scanning the containers directories. */
+    private Set<String> mInstalledContainers = new HashSet<>();
+    private boolean mListLoading = true;
+    /** "latest" label, resolved on the UI thread once and reused in background threads. */
+    private String mLatestLabel;
+    /** When the cached list was fetched, 0 if there is no cache. */
+    private long mCacheUpdatedAt;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        AppCompatActivityUtils.setNightMode(this, NightMode.getAppNightMode().getName(), true);
+
+        setContentView(R.layout.distro_layout);
+        AppCompatActivityUtils.setToolbar(this, com.termux.shared.R.id.toolbar);
+        AppCompatActivityUtils.setShowBackButtonInActionBar(this, true);
+
+        ensureDistroCommand();
+
+        mLatestLabel = getString(R.string.distro_version_latest);
+
+        mDistroListView = findViewById(R.id.distro_list);
+        mStatusView = findViewById(R.id.distro_status);
+        mAdapter = new ArrayAdapter<DistroRow>(this, android.R.layout.simple_list_item_2,
+            android.R.id.text1, new ArrayList<DistroRow>()) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                View view = super.getView(position, convertView, parent);
+                DistroRow row = getItem(position);
+                if (row != null) {
+                    ((TextView) view.findViewById(android.R.id.text1)).setText(row.title);
+                    ((TextView) view.findViewById(android.R.id.text2)).setText(row.subtitle);
+                }
+                return view;
+            }
+        };
+        mDistroListView.setAdapter(mAdapter);
+        mDistroListView.setOnItemClickListener((parent, view, position, id) -> {
+            DistroDef distro = DISTROS.get(position);
+            if (installedContainersFor(distro).isEmpty()) {
+                showVersionDialog(distro);
+            } else {
+                showDistroDialog(distro);
+            }
+        });
+
+        loadCachedVersions();
+        refreshInstalledContainers();
+        if (mCacheUpdatedAt > 0) {
+            updateListRows(getString(R.string.distro_status_updated, formatTime(mCacheUpdatedAt)));
+        } else {
+            updateListRows(getString(R.string.distro_status_loading));
+        }
+        refreshVersionsInBackground();
+    }
+
+    @Override
+    public boolean onSupportNavigateUp() {
+        onBackPressed();
+        return true;
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.distro_menu, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.action_refresh_distro_list) {
+            refreshVersionsInBackground();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    // ------------------------------------------------------------------
+    // `distro` shell command
+    // ------------------------------------------------------------------
+
+    /** Write the `distro` shell command to $PREFIX/bin if it is missing or outdated. */
+    public static void ensureDistroCommand() {
+        try {
+            File binDir = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH);
+            if (!binDir.isDirectory()) return; // bootstrap not ready yet
+            File commandFile = new File(binDir, DISTRO_COMMAND_FILE_NAME);
+            String existing = null;
+            if (commandFile.isFile()) {
+                existing = readFile(commandFile);
+            }
+            if (DISTRO_COMMAND_CONTENT.equals(existing)) return;
+            try (FileOutputStream out = new FileOutputStream(commandFile)) {
+                out.write(DISTRO_COMMAND_CONTENT.getBytes(StandardCharsets.UTF_8));
+            }
+            commandFile.setExecutable(true, true);
+            commandFile.setReadable(true, true);
+            commandFile.setWritable(true, true);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to install `distro` command", e);
+        }
+    }
+
+    private static String readFile(File file) throws IOException {
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] buffer = new byte[(int) file.length()];
+            int read = 0;
+            while (read < buffer.length) {
+                int n = in.read(buffer, read, buffer.length - read);
+                if (n == -1) break;
+                read += n;
+            }
+            return new String(buffer, 0, read, StandardCharsets.UTF_8);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Installed containers
+    // ------------------------------------------------------------------
+
+    /** Installed containers, from the proot-distro v5 containers dir (plus the legacy dir). */
+    private void refreshInstalledContainers() {
+        Set<String> installed = new HashSet<>();
+        // v5: $PREFIX/var/lib/proot-distro/containers/<name>/rootfs/
+        collectContainers(
+            new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH, "lib/proot-distro/containers"),
+            installed, true);
+        // Legacy layout (pre-v5, migrated on first login): .../installed-rootfs/<name>/
+        // is the rootfs itself, so any directory counts.
+        collectContainers(
+            new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH, "lib/proot-distro/installed-rootfs"),
+            installed, false);
+        mInstalledContainers = installed;
+    }
+
+    private static void collectContainers(File parentDir, Set<String> out, boolean rootfsIsChild) {
+        if (parentDir == null || !parentDir.isDirectory()) return;
+        File[] children = parentDir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (!child.isDirectory()) continue;
+            // A container only counts as installed once its rootfs exists, so a
+            // half-finished install does not show up as installed.
+            if (!rootfsIsChild || new File(child, "rootfs").isDirectory()) {
+                out.add(child.getName());
+            }
+        }
+    }
+
+    private List<String> installedContainersFor(DistroDef distro) {
+        List<String> result = new ArrayList<>();
+        for (String container : mInstalledContainers) {
+            if (container.equals(distro.containerPrefix)
+                || container.startsWith(distro.containerPrefix + "-")) {
+                result.add(container);
+            }
+        }
+        Collections.sort(result);
+        return result;
+    }
+
+    private String displayNameForContainer(String container) {
+        String display = mContainerDisplayNames.get(container);
+        return display != null ? display : container;
+    }
+
+    // ------------------------------------------------------------------
+    // Version list: cache + Docker Hub
+    // ------------------------------------------------------------------
+
+    private void loadCachedVersions() {
+        File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, CACHE_FILE_NAME);
+        if (!cacheFile.isFile()) return;
+        try {
+            JSONObject root = new JSONObject(readFile(cacheFile));
+            mCacheUpdatedAt = root.optLong("updatedAt", 0);
+            JSONObject versions = root.optJSONObject("versions");
+            if (versions == null) return;
+            for (DistroDef distro : DISTROS) {
+                JSONArray array = versions.optJSONArray(distro.id);
+                if (array == null) continue;
+                List<VersionOption> options = new ArrayList<>();
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject option = array.optJSONObject(i);
+                    if (option == null) continue;
+                    String display = option.optString("d", null);
+                    String imageRef = option.optString("r", null);
+                    if (display == null || imageRef == null) continue;
+                    options.add(new VersionOption(display, imageRef));
+                }
+                if (!options.isEmpty()) {
+                    mVersions.put(distro.id, options);
+                    for (VersionOption versionOption : options) {
+                        mContainerDisplayNames.put(versionOption.container,
+                            distro.displayName + " " + versionOption.display);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Corrupt cache: ignore it, the background refresh rebuilds it.
+            Log.w(LOG_TAG, "Failed to read distro list cache", e);
+            mCacheUpdatedAt = 0;
+        }
+    }
+
+    private void saveCachedVersions() {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("updatedAt", System.currentTimeMillis());
+            JSONObject versions = new JSONObject();
+            for (DistroDef distro : DISTROS) {
+                List<VersionOption> options = mVersions.get(distro.id);
+                if (options == null || options.isEmpty()) continue;
+                JSONArray array = new JSONArray();
+                for (VersionOption option : options) {
+                    JSONObject object = new JSONObject();
+                    object.put("d", option.display);
+                    object.put("r", option.imageRef);
+                    array.put(object);
+                }
+                versions.put(distro.id, array);
+            }
+            root.put("versions", versions);
+            File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, CACHE_FILE_NAME);
+            File parent = cacheFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return;
+            AtomicFile atomicFile = new AtomicFile(cacheFile);
+            FileOutputStream out = atomicFile.startWrite();
+            try {
+                out.write(root.toString().getBytes(StandardCharsets.UTF_8));
+                atomicFile.finishWrite(out);
+            } catch (IOException e) {
+                atomicFile.failWrite(out);
+                throw e;
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to save distro list cache", e);
+        }
+    }
+
+    private void refreshVersionsInBackground() {
+        mListLoading = true;
+        updateStatus(getString(R.string.distro_status_loading));
+        new Thread() {
+            @Override
+            public void run() {
+                Map<String, List<VersionOption>> fetchedVersions = new HashMap<>();
+                Map<String, String> fetchedDisplays = new HashMap<>();
+                for (DistroDef distro : DISTROS) {
+                    List<VersionOption> options = fetchVersionsForDistro(distro);
+                    if (options != null && !options.isEmpty()) {
+                        fetchedVersions.put(distro.id, options);
+                        for (VersionOption option : options) {
+                            fetchedDisplays.put(option.container,
+                                distro.displayName + " " + option.display);
+                        }
+                    }
+                }
+                final boolean updated = !fetchedVersions.isEmpty();
+                runOnUiThread(() -> {
+                    mVersions.putAll(fetchedVersions);
+                    mContainerDisplayNames.putAll(fetchedDisplays);
+                    if (updated) saveCachedVersions();
+                    mListLoading = false;
+                    refreshInstalledContainers();
+                    if (updated) {
+                        updateListRows(getString(R.string.distro_status_updated,
+                            formatTime(System.currentTimeMillis())));
+                    } else {
+                        updateListRows(getString(R.string.distro_status_offline));
+                    }
+                });
+            }
+        }.start();
+    }
+
+    private List<VersionOption> fetchVersionsForDistro(DistroDef distro) {
+        List<VersionOption> options = new ArrayList<>();
+        for (TagSource source : distro.sources) {
+            try {
+                List<String> tags = fetchDockerHubTags(source.image);
+                options.addAll(pickVersions(source, tags));
+            } catch (Exception e) {
+                Log.w(LOG_TAG, "Failed to fetch tags for " + source.image, e);
+            }
+        }
+        return options;
+    }
+
+    /** One page of tag names from the Docker Hub API (most recently updated first). */
+    private List<String> fetchDockerHubTags(String image) throws IOException, JSONException {
+        URL url = new URL("https://hub.docker.com/v2/repositories/" + image
+            + "/tags?page_size=" + DOCKER_HUB_TAGS_PAGE_SIZE);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(DOCKER_HUB_CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(DOCKER_HUB_READ_TIMEOUT_MS);
+        connection.setRequestProperty("User-Agent", "termux-app-zh-distro/1.0");
+        try {
+            int status = connection.getResponseCode();
+            if (status != HttpURLConnection.HTTP_OK) {
+                throw new IOException("Docker Hub returned HTTP " + status + " for " + image);
+            }
+            String body = readStream(connection.getInputStream());
+            JSONObject root = new JSONObject(body);
+            JSONArray results = root.getJSONArray("results");
+            List<String> tags = new ArrayList<>();
+            for (int i = 0; i < results.length(); i++) {
+                tags.add(results.getJSONObject(i).getString("name"));
+            }
+            return tags;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private List<VersionOption> pickVersions(TagSource source, List<String> tags) {
+        List<VersionOption> options = new ArrayList<>();
+        switch (source.filter) {
+            case ROLLING:
+                if (tags.contains("latest")) {
+                    options.add(new VersionOption(source.displayPrefix + mLatestLabel,
+                        source.image + ":latest"));
+                }
+                break;
+            case DOTTED_VERSION: {
+                List<String> versions = new ArrayList<>();
+                for (String tag : tags) {
+                    if (tag.matches("\\d+\\.\\d+")) versions.add(tag);
+                }
+                sortVersionStringsDescending(versions);
+                for (int i = 0; i < Math.min(3, versions.size()); i++) {
+                    options.add(new VersionOption(source.displayPrefix + versions.get(i),
+                        source.image + ":" + versions.get(i)));
+                }
+                break;
+            }
+            case INTEGER_VERSION: {
+                List<Integer> versions = new ArrayList<>();
+                for (String tag : tags) {
+                    if (tag.matches("\\d+")) versions.add(Integer.parseInt(tag));
+                }
+                Collections.sort(versions, Collections.reverseOrder());
+                for (int i = 0; i < Math.min(3, versions.size()); i++) {
+                    String version = String.valueOf(versions.get(i));
+                    options.add(new VersionOption(source.displayPrefix + version,
+                        source.image + ":" + version));
+                }
+                break;
+            }
+            case DEBIAN_CODENAME: {
+                Set<String> coveredVersions = new HashSet<>();
+                for (String codename : DEBIAN_CODENAMES) {
+                    if (!tags.contains(codename)) continue;
+                    String version = DEBIAN_CODENAME_VERSIONS.get(codename);
+                    String display = version != null ? codename + " (" + version + ")" : codename;
+                    options.add(new VersionOption(source.displayPrefix + display,
+                        source.image + ":" + codename));
+                    if (version != null) coveredVersions.add(version);
+                }
+                // Numeric tags not already covered by a codename, newest first.
+                List<Integer> numerics = new ArrayList<>();
+                for (String tag : tags) {
+                    if (tag.matches("\\d+")) numerics.add(Integer.parseInt(tag));
+                }
+                Collections.sort(numerics, Collections.reverseOrder());
+                for (int numeric : numerics) {
+                    if (options.size() >= 4) break;
+                    if (coveredVersions.contains(String.valueOf(numeric))) continue;
+                    String version = String.valueOf(numeric);
+                    options.add(new VersionOption(source.displayPrefix + version,
+                        source.image + ":" + version));
+                }
+                break;
+            }
+        }
+        return options;
+    }
+
+    /** Offline fallback: only "latest" per image, which proot-distro can always install. */
+    private List<VersionOption> fallbackOptions(DistroDef distro) {
+        List<VersionOption> options = new ArrayList<>();
+        for (TagSource source : distro.sources) {
+            options.add(new VersionOption(source.displayPrefix + mLatestLabel,
+                source.image + ":latest"));
+        }
+        return options;
+    }
+
+    private static void sortVersionStringsDescending(List<String> versions) {
+        Collections.sort(versions, (a, b) -> {
+            String[] partsA = a.split("\\.");
+            String[] partsB = b.split("\\.");
+            int length = Math.max(partsA.length, partsB.length);
+            for (int i = 0; i < length; i++) {
+                int numberA = i < partsA.length ? parseIntOrZero(partsA[i]) : 0;
+                int numberB = i < partsB.length ? parseIntOrZero(partsB[i]) : 0;
+                if (numberA != numberB) return Integer.compare(numberB, numberA);
+            }
+            return 0;
+        });
+    }
+
+    private static int parseIntOrZero(String text) {
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** "opensuse/leap:16.1" -> "opensuse-leap-16.1", "archlinux:latest" -> "archlinux". */
+    private static String containerNameForImageRef(String imageRef) {
+        String name = imageRef.replace('/', '-').replace(':', '-');
+        if (name.endsWith("-latest")) name = name.substring(0, name.length() - "-latest".length());
+        return name;
+    }
+
+    private static String readStream(InputStream inputStream) throws IOException {
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+            new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                out.append(line);
+            }
+        }
+        return out.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // List rows
+    // ------------------------------------------------------------------
+
+    private void updateListRows(String status) {
+        List<DistroRow> rows = new ArrayList<>();
+        for (DistroDef distro : DISTROS) {
+            rows.add(new DistroRow(distro.displayName, subtitleFor(distro)));
+        }
+        mAdapter.clear();
+        mAdapter.addAll(rows);
+        updateStatus(status);
+    }
+
+    private String subtitleFor(DistroDef distro) {
+        List<String> installed = installedContainersFor(distro);
+        if (!installed.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (String container : installed) names.add(displayNameForContainer(container));
+            return getString(R.string.distro_installed, joinWithComma(names));
+        }
+        List<VersionOption> options = mVersions.get(distro.id);
+        if (options != null && !options.isEmpty()) {
+            List<String> versions = new ArrayList<>();
+            for (VersionOption option : options) versions.add(option.display);
+            return getString(R.string.distro_available_versions, joinWithComma(versions));
+        }
+        if (mListLoading) return getString(R.string.distro_status_loading);
+        return distro.note;
+    }
+
+    private void updateStatus(String status) {
+        if (mStatusView != null) mStatusView.setText(status);
+    }
+
+    private static String joinWithComma(List<String> items) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) out.append(", ");
+            out.append(items.get(i));
+        }
+        return out.toString();
+    }
+
+    private static String joinWithSpace(List<String> items) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) out.append(' ');
+            out.append(items.get(i));
+        }
+        return out.toString();
+    }
+
+    private static String formatTime(long timeMs) {
+        return new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(new Date(timeMs));
+    }
+
+    // ------------------------------------------------------------------
+    // Dialogs
+    // ------------------------------------------------------------------
+
+    /** Distro with at least one installed container: enter / install tools / install more. */
+    private void showDistroDialog(final DistroDef distro) {
+        List<String> items = new ArrayList<>();
+        final List<Runnable> actions = new ArrayList<>();
+        for (final String container : installedContainersFor(distro)) {
+            final String display = displayNameForContainer(container);
+            items.add(getString(R.string.distro_enter, display));
+            actions.add(() -> startLoginSession(container, display));
+            items.add(getString(R.string.distro_install_tools_for, display));
+            actions.add(() -> showToolsDialog(distro, container, display));
+        }
+        items.add(getString(R.string.distro_install_new_version));
+        actions.add(() -> showVersionDialog(distro));
+        new AlertDialog.Builder(this)
+            .setTitle(distro.displayName)
+            .setItems(items.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    private void showVersionDialog(final DistroDef distro) {
+        List<VersionOption> options = mVersions.get(distro.id);
+        if (options == null || options.isEmpty()) {
+            options = fallbackOptions(distro);
+        }
+        final List<VersionOption> finalOptions = options;
+        String[] displays = new String[options.size()];
+        for (int i = 0; i < options.size(); i++) displays[i] = options.get(i).display;
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.distro_choose_version, distro.displayName))
+            .setItems(displays, (dialog, which) -> showInstallConfirmDialog(distro, finalOptions.get(which)))
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    private void showInstallConfirmDialog(final DistroDef distro, final VersionOption version) {
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.distro_install_title, distro.displayName + " " + version.display))
+            .setMessage(getString(R.string.distro_install_confirm, version.imageRef))
+            .setPositiveButton(R.string.distro_install, (dialog, which) -> startInstallSession(distro, version))
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    private void showToolsDialog(final DistroDef distro, final String container, final String display) {
+        final boolean[] checked = new boolean[TOOL_IDS.length];
+        Arrays.fill(checked, true);
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.distro_tools_title, display))
+            .setMultiChoiceItems(TOOL_DISPLAY_NAMES, checked,
+                (dialog, which, isChecked) -> checked[which] = isChecked)
+            .setPositiveButton(R.string.distro_install, (dialog, which) -> {
+                List<String> packages = new ArrayList<>();
+                for (int i = 0; i < TOOL_IDS.length; i++) {
+                    if (checked[i]) packages.add(packageNameFor(distro.id, TOOL_IDS[i]));
+                }
+                if (packages.isEmpty()) {
+                    Toast.makeText(DistroActivity.this,
+                        R.string.distro_tools_none_selected, Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                startToolsSession(distro, container, display, packages);
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    // ------------------------------------------------------------------
+    // Package manager mapping
+    // ------------------------------------------------------------------
+
+    /** Package name of a tool on a distro. Only python3 and openssh differ. */
+    private static String packageNameFor(String distroId, String toolId) {
+        if ("python3".equals(toolId) && "arch".equals(distroId)) return "python";
+        if ("openssh".equals(toolId)) {
+            if ("ubuntu".equals(distroId) || "debian".equals(distroId) || "alpine".equals(distroId)) {
+                return "openssh-client";
+            }
+            if ("fedora".equals(distroId)) return "openssh-clients";
+            return "openssh"; // arch, opensuse, void
+        }
+        return toolId;
+    }
+
+    /** Full install command run inside the container (as root). */
+    private static String buildToolsInstallCommand(String distroId, List<String> packageNames) {
+        String packages = joinWithSpace(packageNames);
+        switch (distroId) {
+            case "ubuntu":
+            case "debian":
+                return "apt-get update && apt-get install -y " + packages;
+            case "alpine":
+                return "apk update && apk add " + packages;
+            case "arch":
+                return "pacman -Sy --noconfirm " + packages;
+            case "fedora":
+                return "dnf install -y " + packages;
+            case "opensuse":
+                return "zypper refresh && zypper install -y " + packages;
+            case "void":
+                return "xbps-install -Sy " + packages;
+            default:
+                return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Sessions: install / login / tools install
+    // ------------------------------------------------------------------
+
+    /** Write the install script and run it in a new visible terminal session. */
+    private void startInstallSession(DistroDef distro, VersionOption version) {
+        File scriptFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR,
+            "distro-install-" + version.container + ".sh");
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(buildInstallScript(distro, version).getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setExecutable(true, true);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write install script", e);
+            Toast.makeText(this, getString(R.string.distro_install_script_failed, e.getMessage()),
+                Toast.LENGTH_LONG).show();
+            return;
+        }
+        String sessionName = getString(R.string.distro_session_install,
+            distro.displayName + " " + version.display);
+        startSessionWithExecutable(scriptFile.getAbsolutePath(), null, sessionName, sessionName);
+        Toast.makeText(this, R.string.distro_install_started, Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    private static String buildInstallScript(DistroDef distro, VersionOption version) {
+        StringBuilder script = new StringBuilder();
+        script.append("#!/data/data/com.termux/files/usr/bin/bash\n");
+        script.append("# Generated by Termux \"Linux 发行版\" (DistroActivity) - do not edit.\n");
+        script.append("echo \"正在安装 ").append(distro.displayName).append(" ").append(version.display)
+            .append(" (").append(version.imageRef).append(") ...\"\n");
+        script.append("if ! command -v proot-distro >/dev/null 2>&1; then\n");
+        script.append("  echo \"正在安装 proot-distro ...\"\n");
+        script.append("  pkg install -y proot-distro\n");
+        script.append("  if ! command -v proot-distro >/dev/null 2>&1; then\n");
+        script.append("    echo \"安装 proot-distro 失败，请检查网络后重试。\"\n");
+        script.append("    read -r -p \"按回车关闭此会话\"\n");
+        script.append("    exit 1\n");
+        script.append("  fi\n");
+        script.append("fi\n");
+        script.append("proot-distro install ").append(version.imageRef)
+            .append(" --name ").append(version.container).append("\n");
+        script.append("status=$?\n");
+        script.append("if [ \"$status\" -eq 0 ]; then\n");
+        script.append("  echo \"安装成功！回到“Linux 发行版”界面，点“进入”即可使用。\"\n");
+        script.append("else\n");
+        script.append("  echo \"安装失败（退出码 $status）。常见原因：网络中断或 Docker Hub 限流，稍后重试。\"\n");
+        script.append("fi\n");
+        script.append("read -r -p \"按回车关闭此会话\"\n");
+        return script.toString();
+    }
+
+    private void startLoginSession(String container, String display) {
+        String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
+            .getAbsolutePath();
+        if (!new File(prootDistro).isFile()) {
+            Toast.makeText(this, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        startSessionWithExecutable(prootDistro, new String[]{"login", container}, display, display);
+        finish();
+    }
+
+    private void startToolsSession(DistroDef distro, String container, String display,
+                                   List<String> packages) {
+        String command = buildToolsInstallCommand(distro.id, packages);
+        if (command == null) return;
+        String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
+            .getAbsolutePath();
+        if (!new File(prootDistro).isFile()) {
+            Toast.makeText(this, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        String sessionName = getString(R.string.distro_session_tools, display);
+        startSessionWithExecutable(prootDistro,
+            new String[]{"login", container, "--", "bash", "-c", command},
+            sessionName, sessionName);
+        Toast.makeText(this, R.string.distro_tools_started, Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    /**
+     * Run a command in a new visible terminal session, via the same internal
+     * TERMUX_SERVICE.ACTION_SERVICE_EXECUTE intent that RunCommandService uses
+     * (RunCommandService.java, "Start TERMUX_SERVICE and pass it execution intent").
+     * TermuxService creates the session, switches to it and brings
+     * TermuxActivity forward (default session action), so this activity
+     * finishes right after sending the intent.
+     */
+    private void startSessionWithExecutable(String executablePath, String[] arguments,
+                                            String sessionName, String commandLabel) {
+        Uri executableUri = new Uri.Builder()
+            .scheme(TERMUX_SERVICE.URI_SCHEME_SERVICE_EXECUTE)
+            .path(executablePath)
+            .build();
+        Intent execIntent = new Intent(TERMUX_SERVICE.ACTION_SERVICE_EXECUTE, executableUri);
+        execIntent.setClass(this, TermuxService.class);
+        if (arguments != null) execIntent.putExtra(TERMUX_SERVICE.EXTRA_ARGUMENTS, arguments);
+        execIntent.putExtra(TERMUX_SERVICE.EXTRA_RUNNER,
+            ExecutionCommand.Runner.TERMINAL_SESSION.getName());
+        execIntent.putExtra(TERMUX_SERVICE.EXTRA_SESSION_ACTION,
+            String.valueOf(TERMUX_SERVICE.VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY));
+        execIntent.putExtra(TERMUX_SERVICE.EXTRA_SHELL_NAME, sessionName);
+        execIntent.putExtra(TERMUX_SERVICE.EXTRA_COMMAND_LABEL, commandLabel);
+        execIntent.putExtra(TERMUX_SERVICE.EXTRA_WORKDIR, TermuxConstants.TERMUX_HOME_DIR_PATH);
+        startService(execIntent);
+    }
+}
