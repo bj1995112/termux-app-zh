@@ -322,6 +322,11 @@
     <string name="aiagents_web_session">%1$s Web (%2$s)</string>
     <string name="aiagents_web_script_failed">Failed to write web launch script: %1$s</string>
     <string name="aiagents_web_quick_item">Open %1$s in browser</string>
+    <string name="aiagents_check_updates">Check for updates</string>
+    <string name="aiagents_checking_updates">Checking for updates…</string>
+    <string name="aiagents_no_updates">All installed assistants are up to date</string>
+    <string name="aiagents_installed_with_update">Installed %1$s · Update available: %2$s</string>
+    <string name="aiagents_update_new_version">New version available: %1$s (installed: %2$s).</string>
 
     <string name="prompt_style_title">Command-Line Style</string>
     <string name="welcome_message_title">Show welcome message at startup</string>
