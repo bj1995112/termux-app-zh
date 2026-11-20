@@ -277,4 +277,7 @@
     <string name="distro_latest_updated">Latest update %1$s</string>
     <string name="distro_updated_on">Updated %1$s</string>
 
+<string name="distro_installed_title">Installed Linux</string>
+    <string name="distro_more_in_drawer">%1$s more…</string>
+
 </resources>
