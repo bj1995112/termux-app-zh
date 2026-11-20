@@ -1,6 +1,7 @@
 package com.termux.app.terminal;
 
 import android.annotation.SuppressLint;
+import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
@@ -25,6 +26,7 @@ import com.termux.shared.theme.NightMode;
 import com.termux.shared.theme.ThemeUtils;
 import com.termux.terminal.TerminalSession;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class TermuxSessionsListViewController extends ArrayAdapter<TermuxSession> implements AdapterView.OnItemClickListener, AdapterView.OnItemLongClickListener {
@@ -102,8 +104,42 @@ public class TermuxSessionsListViewController extends ArrayAdapter<TermuxSession
     @Override
     public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
         final TermuxSession selectedSession = getItem(position);
-        mActivity.getTermuxTerminalSessionClient().renameSession(selectedSession.getTerminalSession());
+        if (selectedSession == null) return true;
+        final TerminalSession terminalSession = selectedSession.getTerminalSession();
+        if (terminalSession == null) return true;
+
+        List<String> names = new ArrayList<>();
+        List<Runnable> actions = new ArrayList<>();
+        names.add(mActivity.getString(R.string.session_menu_rename));
+        actions.add(() -> mActivity.getTermuxTerminalSessionClient().renameSession(terminalSession));
+        names.add(mActivity.getString(R.string.session_menu_delete));
+        actions.add(() -> showDeleteSessionDialog(terminalSession));
+
+        // Title is the session's display name ("[2] Ubuntu 26.10"); may be
+        // null when the service is gone, in which case no title is shown.
+        String title = mActivity.getTermuxTerminalSessionClient().toToastTitle(terminalSession);
+        new AlertDialog.Builder(mActivity)
+            .setTitle(title)
+            .setItems(names.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
         return true;
+    }
+
+    /** Confirm before deleting a session (mirrors the "kill process" dialog). */
+    private void showDeleteSessionDialog(final TerminalSession sessionToDelete) {
+        if (sessionToDelete == null) return;
+
+        new AlertDialog.Builder(mActivity)
+            .setIcon(android.R.drawable.ic_dialog_alert)
+            .setTitle(R.string.session_menu_delete)
+            .setMessage(R.string.session_delete_confirm_message)
+            .setPositiveButton(android.R.string.yes, (dialog, id) -> {
+                dialog.dismiss();
+                mActivity.getTermuxTerminalSessionClient().deleteSession(sessionToDelete);
+            })
+            .setNegativeButton(android.R.string.no, null)
+            .show();
     }
 
 }
