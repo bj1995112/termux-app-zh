@@ -318,6 +318,11 @@
     <string name="aiagents_web_session">%1$s 网页版（%2$s）</string>
     <string name="aiagents_web_script_failed">写网页版启动脚本失败：%1$s</string>
     <string name="aiagents_web_quick_item">打开 %1$s 网页版</string>
+    <string name="aiagents_check_updates">检查更新</string>
+    <string name="aiagents_checking_updates">正在检查更新…</string>
+    <string name="aiagents_no_updates">已安装的助手都是最新版本</string>
+    <string name="aiagents_installed_with_update">已安装 %1$s · 有新版本 %2$s</string>
+    <string name="aiagents_update_new_version">有新版本：%1$s（已安装 %2$s）。</string>
 
     <string name="prompt_style_title">命令行样式</string>
     <string name="welcome_message_title">启动时显示欢迎信息</string>
