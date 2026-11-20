@@ -41,6 +41,7 @@ import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY;
 import com.termux.app.activities.DistroActivity;
 import com.termux.app.activities.DistroUtils;
+import com.termux.app.activities.AiAgentUtils;
 import com.termux.app.activities.HelpActivity;
 import com.termux.app.activities.SettingsActivity;
 import com.termux.app.activities.TermuxStyleActivity;
@@ -262,6 +263,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setInstalledDistrosView();
 
         DistroActivity.ensureDistroCommand();
+
+        AiAgentUtils.ensureAiCommand();
 
         registerForContextMenu(mTerminalView);
 
@@ -619,9 +622,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             @Override
             public void onDrawerOpened(View drawerView) {
                 refreshInstalledDistrosInDrawer();
+                refreshInstalledAgentsInDrawer();
             }
         });
         refreshInstalledDistrosInDrawer();
+        refreshInstalledAgentsInDrawer();
     }
 
     private void refreshInstalledDistrosInDrawer() {
@@ -664,10 +669,52 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     }
 
 
-    /** One drawer distro row: same layout as a session row, but with the dark
-     * background the session list applies at runtime. The layout's own
-     * background is a white ripple, which renders as a solid white box with
-     * invisible white text on the dark drawer. */
+    /** "AI 助手" section in the drawer: one row per installed agent across
+     * all distros ("Codex · Ubuntu 26.04"). Tap opens a terminal session
+     * that runs the agent directly inside its container; more than 5 rows
+     * get an overflow row that opens the distro list. Hidden when no agent
+     * is installed anywhere. Detection is a rootfs binary scan (no session,
+     * no version probing), the same cost class as the distro scan above. */
+    private void refreshInstalledAgentsInDrawer() {
+        LinearLayout container = findViewById(R.id.installed_agents_container);
+        LinearLayout rows = findViewById(R.id.installed_agents_rows);
+        if (container == null || rows == null) return;
+        rows.removeAllViews();
+        List<AiAgentUtils.InstalledAgent> installed = AiAgentUtils.detectInstalledAgents();
+        if (installed.isEmpty()) {
+            container.setVisibility(View.GONE);
+            return;
+        }
+        container.setVisibility(View.VISIBLE);
+        int shown = Math.min(installed.size(), AiAgentUtils.MAX_DRAWER_AGENT_ROWS);
+        for (int i = 0; i < shown; i++) {
+            final AiAgentUtils.InstalledAgent agent = installed.get(i);
+            TextView row = newInstalledDistroRow(rows);
+            row.setText(getString(R.string.aiagents_drawer_row,
+                agent.displayName, agent.distroDisplay));
+            row.setOnClickListener(v -> {
+                getDrawer().closeDrawers();
+                AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+            });
+            rows.addView(row);
+        }
+        if (installed.size() > AiAgentUtils.MAX_DRAWER_AGENT_ROWS) {
+            TextView moreRow = newInstalledDistroRow(rows);
+            moreRow.setText(getString(R.string.distro_more_in_drawer,
+                installed.size() - AiAgentUtils.MAX_DRAWER_AGENT_ROWS));
+            moreRow.setOnClickListener(v -> {
+                ActivityUtils.startActivity(this, new Intent(this, DistroActivity.class));
+                getDrawer().closeDrawers();
+            });
+            rows.addView(moreRow);
+        }
+    }
+
+    /** One drawer row (installed distros and installed AI assistants):
+     * same layout as a session row, but with the dark background the session
+     * list applies at runtime. The layout's own background is a white ripple,
+     * which renders as a solid white box with invisible white text on the
+     * dark drawer. */
     private TextView newInstalledDistroRow(LinearLayout rows) {
         TextView row = (TextView) getLayoutInflater()
             .inflate(R.layout.item_terminal_sessions_list, rows, false);
