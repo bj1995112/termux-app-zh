@@ -273,4 +273,7 @@
     <string name="distro_latest_updated">最新更新 %1$s</string>
     <string name="distro_updated_on">更新于 %1$s</string>
 
+<string name="distro_installed_title">已安装的 Linux</string>
+    <string name="distro_more_in_drawer">还有 %1$s 个…</string>
+
 </resources>
