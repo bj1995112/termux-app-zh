@@ -8,9 +8,10 @@
 // with the bottom button; tapping an installed agent offers an update.
 //
 // Installed detection scans the container rootfs for known binary paths
-// (DistroUtils.containerRootfs), so opening the list never pops up a
-// terminal session; detection runs on a background thread and re-runs on
-// onResume, so coming back from an install session shows the new status.
+// (AiAgentUtils, via DistroUtils.containerRootfs), so opening the list never
+// pops up a terminal session; detection runs on a background thread and
+// re-runs on onResume, so coming back from an install session shows the new
+// status.
 //
 // Install / update runs in a visible terminal session: the install script
 // is written into the container's /tmp and executed with
@@ -20,8 +21,8 @@
 // container already has Node >= 24.9.0); each agent's commands are
 // idempotent, so a failed install can simply be retried.
 //
-// Pure Java, zero new dependencies: only Android framework APIs,
-// org.json and existing termux-shared classes are used.
+// Pure Java, zero new dependencies: only Android framework APIs and
+// existing termux-shared classes are used.
 
 package com.termux.app.activities;
 
@@ -44,15 +45,12 @@ import com.termux.shared.activity.media.AppCompatActivityUtils;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.theme.NightMode;
 
-import org.json.JSONObject;
-
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -76,100 +74,18 @@ public class AiAgentsActivity extends AppCompatActivity {
     private static final int NODE_MIN_MAJOR = 24;
     private static final int NODE_MIN_MINOR = 9;
 
-    /** How an installed agent's version is found (from files, never by running it). */
-    private enum VersionKind {
-        /** No local version file known (agy): show installed without a version. */
-        NONE,
-        /** <prefix>/lib/node_modules/<npm package>/package.json "version". */
-        NPM_PACKAGE_JSON,
-        /** ~/.codex/packages/standalone/releases/<version>/ directory names. */
-        CODEX_RELEASES,
-        /** uv tool metadata: ~/.local/share/uv/tools/aider-chat/.../aider_chat-*.dist-info/METADATA. */
-        AIDER_DIST_INFO
-    }
-
-    /** One AI assistant that can be installed into a container. */
-    private static class AgentDef {
-        final String id;
-        final String displayName;
-        final int descriptionRes;
-        final boolean needsNode;
-        final String command;       // binary name, e.g. "codex"
-        final String homeBinPath;   // $HOME-relative binary, e.g. ".local/bin/codex", "" if none
-        final String[] binPaths;    // rootfs-relative binary paths that mean "installed"
-        final VersionKind versionKind;
-        final String npmPackage;    // for NPM_PACKAGE_JSON, e.g. "@deepseek-ai/dsh"
-        final String installSnippet; // shell lines run inside the container (install)
-        final String updateSnippet;  // shell lines run inside the container (update)
-
-        AgentDef(String id, String displayName, int descriptionRes, boolean needsNode,
-                 String command, String homeBinPath, String[] binPaths,
-                 VersionKind versionKind, String npmPackage,
-                 String installSnippet, String updateSnippet) {
-            this.id = id;
-            this.displayName = displayName;
-            this.descriptionRes = descriptionRes;
-            this.needsNode = needsNode;
-            this.command = command;
-            this.homeBinPath = homeBinPath;
-            this.binPaths = binPaths;
-            this.versionKind = versionKind;
-            this.npmPackage = npmPackage;
-            this.installSnippet = installSnippet;
-            this.updateSnippet = updateSnippet;
-        }
-    }
-
-    // All install/update commands verified against primary sources on 2026-11-20
-    // (npm registry, PyPI, official docs); see design.md §1 for the sources.
-    private static final List<AgentDef> AGENTS = Arrays.asList(
-        new AgentDef("codex", "Codex", R.string.aiagents_desc_codex, false, "codex",
-            ".local/bin/codex",
-            new String[]{"root/.local/bin/codex"},
-            VersionKind.CODEX_RELEASES, null,
-            "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
-            "codex update || curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"),
-        new AgentDef("pi", "Pi", R.string.aiagents_desc_pi, true, "pi",
-            "",
-            new String[]{"usr/bin/pi", "usr/local/bin/pi"},
-            VersionKind.NPM_PACKAGE_JSON, "@earendil-works/pi-coding-agent",
-            "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-            "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"),
-        new AgentDef("agy", "Antigravity CLI", R.string.aiagents_desc_agy, false, "agy",
-            ".local/bin/agy",
-            new String[]{"root/.local/bin/agy"},
-            VersionKind.NONE, null,
-            "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
-            "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh"),
-        new AgentDef("dsh", "DeepSeek Harness", R.string.aiagents_desc_dsh, true, "dsh",
-            "",
-            new String[]{"usr/bin/dsh", "usr/local/bin/dsh"},
-            VersionKind.NPM_PACKAGE_JSON, "@deepseek-ai/dsh",
-            "npm install -g @deepseek-ai/dsh",
-            "old_ver=$(npm list -g @deepseek-ai/dsh --depth=0 2>/dev/null | grep -oE '@deepseek-ai/dsh@[0-9][^ ]*' | cut -d@ -f3); if [ -n \"$old_ver\" ]; then echo \"当前版本：$old_ver；如需回退：npm install -g @deepseek-ai/dsh@$old_ver\"; fi; npm install -g @deepseek-ai/dsh"),
-        new AgentDef("opencode", "OpenCode", R.string.aiagents_desc_opencode, true, "opencode",
-            "",
-            new String[]{"usr/bin/opencode", "usr/local/bin/opencode"},
-            VersionKind.NPM_PACKAGE_JSON, "@opencode/cli",
-            "npm install -g @opencode/cli",
-            "npm install -g @opencode/cli"),
-        new AgentDef("aider", "Aider", R.string.aiagents_desc_aider, false, "aider",
-            ".local/bin/aider",
-            new String[]{"root/.local/bin/aider"},
-            VersionKind.AIDER_DIST_INFO, null,
-            "curl -LsSf https://aider.chat/install.sh | sh",
-            "aider --upgrade")
-    );
+    // Agent definitions, detection and version probing live in AiAgentUtils
+    // (shared with the drawer quick-entry section and the `ai` command).
 
     /** One row of the agent list. */
     private static class AgentRow {
-        final AgentDef def;
+        final AiAgentUtils.AgentDef def;
         boolean installed;
         String version; // "" when unknown
         boolean selected;
         boolean supported;
 
-        AgentRow(AgentDef def) {
+        AgentRow(AiAgentUtils.AgentDef def) {
             this.def = def;
             this.version = "";
             this.supported = true;
@@ -209,7 +125,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         if (mDistroId == null) mDistroId = "";
         if (mDisplay == null) mDisplay = mContainer;
 
-        for (AgentDef def : AGENTS) mRows.add(new AgentRow(def));
+        for (AiAgentUtils.AgentDef def : AiAgentUtils.AGENTS) mRows.add(new AgentRow(def));
 
         mAgentListView = findViewById(R.id.aiagents_list);
         mStatusView = findViewById(R.id.aiagents_status);
@@ -298,12 +214,12 @@ public class AiAgentsActivity extends AppCompatActivity {
             public void run() {
                 File rootfs = DistroUtils.containerRootfs(mContainer);
                 final List<AgentRow> detected = new ArrayList<>();
-                for (AgentDef def : AGENTS) {
+                for (AiAgentUtils.AgentDef def : AiAgentUtils.AGENTS) {
                     AgentRow row = new AgentRow(def);
                     row.supported = isSupported(def);
                     if (rootfs != null) {
-                        row.installed = isInstalled(rootfs, def);
-                        if (row.installed) row.version = probeVersion(rootfs, def);
+                        row.installed = AiAgentUtils.isInstalled(rootfs, def);
+                        if (row.installed) row.version = AiAgentUtils.probeVersion(rootfs, def);
                     }
                     detected.add(row);
                 }
@@ -322,120 +238,10 @@ public class AiAgentsActivity extends AppCompatActivity {
 
     /** Node-dependent agents are only offered where the Node 24 path is verified;
      * agy is a glibc binary and Alpine uses musl. */
-    private boolean isSupported(AgentDef def) {
+    private boolean isSupported(AiAgentUtils.AgentDef def) {
         if (def.needsNode && !NODE_VERIFIED.contains(mDistroId)) return false;
         if ("agy".equals(def.id) && "alpine".equals(mDistroId)) return false;
         return true;
-    }
-
-    private static boolean isInstalled(File rootfs, AgentDef def) {
-        for (String bin : def.binPaths) {
-            if (new File(rootfs, bin).isFile()) return true;
-        }
-        return false;
-    }
-
-    private static String probeVersion(File rootfs, AgentDef def) {
-        try {
-            switch (def.versionKind) {
-                case NPM_PACKAGE_JSON:
-                    for (String prefix : new String[]{"usr/lib", "usr/local/lib"}) {
-                        File pkg = new File(rootfs,
-                            prefix + "/node_modules/" + def.npmPackage + "/package.json");
-                        if (pkg.isFile()) {
-                            String version = new JSONObject(DistroUtils.readFile(pkg))
-                                .optString("version", "");
-                            if (!version.isEmpty()) return version;
-                        }
-                    }
-                    return "";
-                case CODEX_RELEASES:
-                    File releases = new File(rootfs, "root/.codex/packages/standalone/releases");
-                    if (!releases.isDirectory()) return "";
-                    File[] children = releases.listFiles();
-                    if (children == null) return "";
-                    List<String> versions = new ArrayList<>();
-                    for (File child : children) {
-                        if (child.isDirectory()
-                            && child.getName().matches("[0-9]+\\.[0-9]+\\.[0-9]+.*")) {
-                            versions.add(child.getName());
-                        }
-                    }
-                    if (versions.isEmpty()) return "";
-                    Collections.sort(versions, (a, b) -> compareVersionsDescending(a, b));
-                    return versions.get(0);
-                case AIDER_DIST_INFO:
-                    return probeAiderVersion(rootfs);
-                default:
-                    return "";
-            }
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to probe version for " + def.id, e);
-            return "";
-        }
-    }
-
-    private static String probeAiderVersion(File rootfs) {
-        // uv tool install: ~/.local/share/uv/tools/aider-chat/lib/python3.*/site-packages/...
-        String version = readDistInfoVersion(
-            new File(rootfs, "root/.local/share/uv/tools/aider-chat/lib"));
-        if (!version.isEmpty()) return version;
-        // pipx install: ~/.local/share/pipx/venvs/aider-chat/lib/python3.*/site-packages/...
-        return readDistInfoVersion(
-            new File(rootfs, "root/.local/share/pipx/venvs/aider-chat/lib"));
-    }
-
-    private static String readDistInfoVersion(File libDir) {
-        if (libDir == null || !libDir.isDirectory()) return "";
-        File[] pythons = libDir.listFiles();
-        if (pythons == null) return "";
-        for (File python : pythons) {
-            File sitePackages = new File(python, "site-packages");
-            if (!sitePackages.isDirectory()) continue;
-            File[] children = sitePackages.listFiles();
-            if (children == null) continue;
-            for (File child : children) {
-                String name = child.getName();
-                if (child.isDirectory() && name.startsWith("aider_chat-")
-                    && name.endsWith(".dist-info")) {
-                    try {
-                        String metadata = DistroUtils.readFile(new File(child, "METADATA"));
-                        for (String line : metadata.split("\n")) {
-                            if (line.startsWith("Version: ")) {
-                                return line.substring("Version: ".length()).trim();
-                            }
-                        }
-                    } catch (Exception e) {
-                        Log.w(LOG_TAG, "Failed to read aider METADATA", e);
-                    }
-                }
-            }
-        }
-        return "";
-    }
-
-    /** Newest version first. Mirrors DistroActivity.sortVersionStringsDescending. */
-    private static int compareVersionsDescending(String a, String b) {
-        String[] partsA = a.split("[.-]");
-        String[] partsB = b.split("[.-]");
-        int length = Math.max(partsA.length, partsB.length);
-        for (int i = 0; i < length; i++) {
-            int numberA = i < partsA.length ? leadingInt(partsA[i]) : 0;
-            int numberB = i < partsB.length ? leadingInt(partsB[i]) : 0;
-            if (numberA != numberB) return Integer.compare(numberB, numberA);
-        }
-        return 0;
-    }
-
-    private static int leadingInt(String text) {
-        int end = 0;
-        while (end < text.length() && Character.isDigit(text.charAt(end))) end++;
-        if (end == 0) return 0;
-        try {
-            return Integer.parseInt(text.substring(0, end));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
     }
 
     // ------------------------------------------------------------------
@@ -443,7 +249,7 @@ public class AiAgentsActivity extends AppCompatActivity {
     // ------------------------------------------------------------------
 
     private void installSelected() {
-        List<AgentDef> selected = new ArrayList<>();
+        List<AiAgentUtils.AgentDef> selected = new ArrayList<>();
         for (AgentRow row : mRows) {
             if (row.selected && !row.installed && row.supported) selected.add(row.def);
         }
@@ -454,12 +260,12 @@ public class AiAgentsActivity extends AppCompatActivity {
         startAgentSession(selected, false);
     }
 
-    private void showUpdateDialog(final AgentDef def) {
+    private void showUpdateDialog(final AiAgentUtils.AgentDef def) {
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
             .setTitle(getString(R.string.aiagents_update_title, def.displayName))
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.aiagents_update, (dialog, which) -> {
-                List<AgentDef> single = new ArrayList<>();
+                List<AiAgentUtils.AgentDef> single = new ArrayList<>();
                 single.add(def);
                 startAgentSession(single, true);
             });
@@ -479,7 +285,7 @@ public class AiAgentsActivity extends AppCompatActivity {
     /** Write the install/update script into the container's /tmp and run it
      * in a new visible terminal session. Deliberately does not finish():
      * Back from the session returns here and onResume re-detects. */
-    private void startAgentSession(List<AgentDef> agents, boolean update) {
+    private void startAgentSession(List<AiAgentUtils.AgentDef> agents, boolean update) {
         File rootfs = DistroUtils.containerRootfs(mContainer);
         if (rootfs == null) {
             Toast.makeText(this, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
@@ -516,7 +322,7 @@ public class AiAgentsActivity extends AppCompatActivity {
     }
 
     /** Full install/update script run inside the container (as root). */
-    private String buildAgentScript(List<AgentDef> agents, boolean update) {
+    private String buildAgentScript(List<AiAgentUtils.AgentDef> agents, boolean update) {
         StringBuilder s = new StringBuilder();
         s.append("#!/bin/bash\n");
         s.append("# Generated by Termux \"AI 助手\" (AiAgentsActivity) - do not edit.\n");
@@ -548,7 +354,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("}\n");
         s.append(ensureCurlCommand(mDistroId)).append("\n");
         boolean needsNode = false;
-        for (AgentDef def : agents) if (def.needsNode) needsNode = true;
+        for (AiAgentUtils.AgentDef def : agents) if (def.needsNode) needsNode = true;
         if (needsNode) {
             s.append("if ! node_ok; then\n");
             s.append("  echo \"正在安装 Node 24 …\"\n");
@@ -559,7 +365,7 @@ public class AiAgentsActivity extends AppCompatActivity {
             s.append("else echo \"Node 24 安装失败，需要 Node 的助手（Pi、dsh、OpenCode）将跳过。\"; fi\n");
         }
         s.append("failed=\"\"\n");
-        for (AgentDef def : agents) {
+        for (AiAgentUtils.AgentDef def : agents) {
             s.append("echo \"--- ").append(def.displayName).append(" ---\"\n");
             if ("codex".equals(def.id)) {
                 // Codex sandboxes with bubblewrap; install it best-effort.
