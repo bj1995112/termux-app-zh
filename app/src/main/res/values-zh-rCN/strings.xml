@@ -55,6 +55,9 @@
 
     <string name="title_rename_session">设置会话名称</string>
     <string name="action_rename_session_confirm">设置</string>
+    <string name="session_menu_rename">重命名会话</string>
+    <string name="session_menu_delete">删除会话</string>
+    <string name="session_delete_confirm_message">确定要删除这个会话吗？正在运行的进程会被结束。</string>
     <string name="title_create_named_session">新建命名会话</string>
     <string name="action_create_named_session_confirm">创建</string>
 
@@ -232,13 +235,6 @@
     <string name="termux_widget_preferences_summary">&TERMUX_WIDGET_APP_NAME; 应用的偏好设置</string>
 
 
-
-    <!-- About Preference -->
-    <string name="about_preference_title">关于</string>
-
-    <!-- Donate Preference -->
-    <string name="donate_preference_title">捐赠</string>
-
     <!-- 内置样式选择器（移植自 Termux:Styling） -->
     <string name="app_name">Termux:Styling</string>
     <string name="color_prompt">选择配色</string>
@@ -314,11 +310,16 @@
     <string name="aiagents_web_pi_msg">已在新会话里启动。第一次会先下载官方 pi-webapp，稍等一会。在会话输出里找到带 token 的本地地址，复制到浏览器打开；也可以在会话里跑 npx pi-webapp status 查看地址。</string>
     <string name="aiagents_web_opencode_msg">地址：http://127.0.0.1:4096\n密码：%1$s\n密码每次都一样，浏览器登一次就能一直用。\n等会话里出现 server listening 后，再点“打开浏览器”。</string>
     <string name="aiagents_web_open_browser">打开浏览器</string>
+    <string name="aiagents_web_restart_server">重启服务</string>
+    <string name="aiagents_web_restart_note">检测到已有服务在运行。如果密码对不上，点“重启服务”用固定密码重起。重启要几秒，浏览器暂时打不开就等一下再刷新。</string>
+    <string name="aiagents_web_battery_hint">提示：网页版服务要在 Termux 后台一直跑着才正常。如果网页端卡住没反应，去“设置 → 应用 → Termux → 电池”设为不限制；有些手机会在后台冻住它。</string>
     <string name="aiagents_web_session">%1$s 网页版（%2$s）</string>
     <string name="aiagents_web_script_failed">写网页版启动脚本失败：%1$s</string>
     <string name="aiagents_web_quick_item">打开 %1$s 网页版</string>
 
     <string name="prompt_style_title">命令行样式</string>
+    <string name="welcome_message_title">启动时显示欢迎信息</string>
+    <string name="welcome_message_summary">新会话开始时显示欢迎信息</string>
     <string name="prompt_theme_section_title">提示符主题</string>
     <string name="prompt_new_session_note">新会话自动使用所选主题。</string>
     <string name="prompt_color_section_title">提示符颜色</string>
