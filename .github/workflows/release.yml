@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v，如 0.01）"
+        required: true
+        type: string
+      run_id:
+        description: "要发布的 Build 运行 ID"
+        required: true
+        type: string
+      commit:
+        description: "要打标签的提交 SHA（留空用当前 HEAD）"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: termux-app-zh-arm64-v8a
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: apk
+      - name: Rename APK
+        run: |
+          ls -l apk
+          mv apk/termux-app_apt-android-7-debug_arm64-v8a.apk "termux-app-zh-v${{ inputs.version }}-arm64-v8a.apk"
+          sha256sum "termux-app-zh-v${{ inputs.version }}-arm64-v8a.apk"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TARGET="${{ inputs.commit }}"
+          if [ -z "$TARGET" ]; then TARGET="${{ github.sha }}"; fi
+          gh release create "v${{ inputs.version }}" --target "$TARGET" --title "Termux 中文版 v${{ inputs.version }}" --notes "Termux 中文版 v${{ inputs.version }}，基于上游 v0.119.0-beta.3。
+
+          包含内容：完整简体中文界面；内置 Termux:Styling（114 套配色 + 8 款精选字体）；Linux 发行版一键安装（Ubuntu / Debian / Arch / Alpine / Fedora / openSUSE / Void，可选版本，自动拉取最新版本和更新日期）；AI 助手（Codex / Pi / Antigravity CLI / DeepSeek Harness / OpenCode / Aider / Claude Code，选择性安装，支持单独更新，抽屉快捷进入 + ai 命令）；网页版（dsh / OpenCode / Pi，手机浏览器打开）；24 套提示符主题 + 提示符颜色，自动同步到发行版；主页干净（无欢迎文字，设置里可恢复），设置里去掉了捐赠和关于，会话长按可删除。
+
+          安装说明：包名仍为 com.termux，安装前请先卸载官方 Termux；仅支持 arm64-v8a 设备；APK 为 debug 构建。" "termux-app-zh-v${{ inputs.version }}-arm64-v8a.apk"
