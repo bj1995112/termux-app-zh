@@ -149,11 +149,17 @@ public class DistroActivity extends AppCompatActivity {
         final String display;        // e.g. "26.10" or "Leap 16.1"
         final String imageRef;       // e.g. "ubuntu:26.10" or "opensuse/leap:16.1"
         final String container;      // e.g. "ubuntu-26.10"
+        final String updated;        // yyyy-MM-dd when the image was last updated, "" if unknown
 
         VersionOption(String display, String imageRef) {
+            this(display, imageRef, "");
+        }
+
+        VersionOption(String display, String imageRef, String updated) {
             this.display = display;
             this.imageRef = imageRef;
             this.container = containerNameForImageRef(imageRef);
+            this.updated = updated != null ? updated : "";
         }
     }
 
@@ -406,7 +412,7 @@ public class DistroActivity extends AppCompatActivity {
                     String display = option.optString("d", null);
                     String imageRef = option.optString("r", null);
                     if (display == null || imageRef == null) continue;
-                    options.add(new VersionOption(display, imageRef));
+                    options.add(new VersionOption(display, imageRef, option.optString("u", "")));
                 }
                 if (!options.isEmpty()) {
                     mVersions.put(distro.id, options);
@@ -436,6 +442,9 @@ public class DistroActivity extends AppCompatActivity {
                     JSONObject object = new JSONObject();
                     object.put("d", option.display);
                     object.put("r", option.imageRef);
+                    if (option.updated != null && !option.updated.isEmpty()) {
+                        object.put("u", option.updated);
+                    }
                     array.put(object);
                 }
                 versions.put(distro.id, array);
@@ -555,27 +564,35 @@ public class DistroActivity extends AppCompatActivity {
     private List<VersionOption> pickVersions(TagSource source, List<TagInfo> tags) {
         List<VersionOption> options = new ArrayList<>();
         List<String> names = new ArrayList<>();
-        for (TagInfo tag : tags) names.add(tag.name);
+        Map<String, String> updatedDates = new HashMap<>();
+        for (TagInfo tag : tags) {
+            names.add(tag.name);
+            if (tag.lastUpdated.length() >= 10) {
+                updatedDates.put(tag.name, tag.lastUpdated.substring(0, 10));
+            }
+        }
         switch (source.filter) {
             case ROLLING:
                 if (names.contains("latest")) {
                     options.add(new VersionOption(source.displayPrefix + mLatestLabel,
-                        source.image + ":latest"));
+                        source.image + ":latest", updatedDates.get("latest")));
                 }
                 break;
             case DOTTED_VERSION: {
                 List<String> versions = freshVersions(tags, "\\d+\\.\\d+");
                 for (int i = 0; i < Math.min(3, versions.size()); i++) {
-                    options.add(new VersionOption(source.displayPrefix + versions.get(i),
-                        source.image + ":" + versions.get(i)));
+                    String version = versions.get(i);
+                    options.add(new VersionOption(source.displayPrefix + version,
+                        source.image + ":" + version, updatedDates.get(version)));
                 }
                 break;
             }
             case INTEGER_VERSION: {
                 List<String> versions = freshVersions(tags, "\\d+");
                 for (int i = 0; i < Math.min(3, versions.size()); i++) {
-                    options.add(new VersionOption(source.displayPrefix + versions.get(i),
-                        source.image + ":" + versions.get(i)));
+                    String version = versions.get(i);
+                    options.add(new VersionOption(source.displayPrefix + version,
+                        source.image + ":" + version, updatedDates.get(version)));
                 }
                 break;
             }
@@ -586,7 +603,7 @@ public class DistroActivity extends AppCompatActivity {
                     String version = DEBIAN_CODENAME_VERSIONS.get(codename);
                     String display = version != null ? codename + " (" + version + ")" : codename;
                     options.add(new VersionOption(source.displayPrefix + display,
-                        source.image + ":" + codename));
+                        source.image + ":" + codename, updatedDates.get(codename)));
                     if (version != null) coveredVersions.add(version);
                 }
                 // Numeric tags not already covered by a codename, newest first.
@@ -600,7 +617,7 @@ public class DistroActivity extends AppCompatActivity {
                     if (coveredVersions.contains(String.valueOf(numeric))) continue;
                     String version = String.valueOf(numeric);
                     options.add(new VersionOption(source.displayPrefix + version,
-                        source.image + ":" + version));
+                        source.image + ":" + version, updatedDates.get(version)));
                 }
                 break;
             }
@@ -649,36 +666,36 @@ public class DistroActivity extends AppCompatActivity {
         List<VersionOption> options = new ArrayList<>();
         switch (distro.id) {
             case "ubuntu":
-                options.add(new VersionOption("26.10", "ubuntu:26.10"));
-                options.add(new VersionOption("26.04", "ubuntu:26.04"));
-                options.add(new VersionOption("25.10", "ubuntu:25.10"));
+                options.add(new VersionOption("26.10", "ubuntu:26.10", "2026-11-20"));
+                options.add(new VersionOption("26.04", "ubuntu:26.04", "2026-11-16"));
+                options.add(new VersionOption("25.10", "ubuntu:25.10", "2026-06-19"));
                 break;
             case "debian":
-                options.add(new VersionOption("trixie (13)", "debian:trixie"));
-                options.add(new VersionOption("bookworm (12)", "debian:bookworm"));
+                options.add(new VersionOption("trixie (13)", "debian:trixie", "2026-11-05"));
+                options.add(new VersionOption("bookworm (12)", "debian:bookworm", "2026-11-05"));
                 break;
             case "arch":
-                options.add(new VersionOption(mLatestLabel, "archlinux:latest"));
+                options.add(new VersionOption(mLatestLabel, "archlinux:latest", "2026-11-10"));
                 break;
             case "alpine":
-                options.add(new VersionOption("3.24", "alpine:3.24"));
-                options.add(new VersionOption("3.23", "alpine:3.23"));
-                options.add(new VersionOption("3.22", "alpine:3.22"));
+                options.add(new VersionOption("3.24", "alpine:3.24", "2026-11-08"));
+                options.add(new VersionOption("3.23", "alpine:3.23", "2026-11-08"));
+                options.add(new VersionOption("3.22", "alpine:3.22", "2026-11-08"));
                 break;
             case "fedora":
-                options.add(new VersionOption("46", "fedora:46"));
-                options.add(new VersionOption("45", "fedora:45"));
-                options.add(new VersionOption("44", "fedora:44"));
+                options.add(new VersionOption("46", "fedora:46", "2026-11-02"));
+                options.add(new VersionOption("45", "fedora:45", "2026-11-02"));
+                options.add(new VersionOption("44", "fedora:44", "2026-11-02"));
                 break;
             case "opensuse":
-                options.add(new VersionOption("Leap 16.1", "opensuse/leap:16.1"));
-                options.add(new VersionOption("Leap 16.0", "opensuse/leap:16.0"));
-                options.add(new VersionOption("Leap 15.6", "opensuse/leap:15.6"));
+                options.add(new VersionOption("Leap 16.1", "opensuse/leap:16.1", "2026-11-19"));
+                options.add(new VersionOption("Leap 16.0", "opensuse/leap:16.0", "2026-11-06"));
+                options.add(new VersionOption("Leap 15.6", "opensuse/leap:15.6", "2026-04-27"));
                 options.add(new VersionOption("Tumbleweed " + mLatestLabel,
-                    "opensuse/tumbleweed:latest"));
+                    "opensuse/tumbleweed:latest", "2026-11-20"));
                 break;
             case "void":
-                options.add(new VersionOption(mLatestLabel, "voidlinux/voidlinux:latest"));
+                options.add(new VersionOption(mLatestLabel, "voidlinux/voidlinux:latest", "2021-07-25"));
                 break;
             default:
                 for (TagSource source : distro.sources) {
@@ -769,7 +786,12 @@ public class DistroActivity extends AppCompatActivity {
         if (!options.isEmpty()) {
             List<String> versions = new ArrayList<>();
             for (VersionOption option : options) versions.add(option.display);
-            return getString(R.string.distro_available_versions, joinWithComma(versions));
+            String subtitle = getString(R.string.distro_available_versions, joinWithComma(versions));
+            String updated = options.get(0).updated;
+            if (updated != null && !updated.isEmpty()) {
+                subtitle += " · " + getString(R.string.distro_latest_updated, updated);
+            }
+            return subtitle;
         }
         if (mListLoading) return getString(R.string.distro_status_loading);
         return distro.note;
@@ -829,7 +851,13 @@ public class DistroActivity extends AppCompatActivity {
         List<VersionOption> options = optionsFor(distro);
         final List<VersionOption> finalOptions = options;
         String[] displays = new String[options.size()];
-        for (int i = 0; i < options.size(); i++) displays[i] = options.get(i).display;
+        for (int i = 0; i < options.size(); i++) {
+            VersionOption option = options.get(i);
+            displays[i] = option.display;
+            if (option.updated != null && !option.updated.isEmpty()) {
+                displays[i] += "（" + getString(R.string.distro_updated_on, option.updated) + "）";
+            }
+        }
         new AlertDialog.Builder(this)
             .setTitle(getString(R.string.distro_choose_version, distro.displayName))
             .setItems(displays, (dialog, which) -> showInstallConfirmDialog(distro, finalOptions.get(which)))
