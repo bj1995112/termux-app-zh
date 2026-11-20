@@ -284,6 +284,7 @@
     <string name="aiagents_desc_dsh">DeepSeek Harness，DeepSeek 编程助手，预览版（npm，需要 Node 24）</string>
     <string name="aiagents_desc_opencode">OpenCode，开源 AI 编程助手（npm，需要 Node 24）</string>
     <string name="aiagents_desc_aider">Aider，终端 AI 结对编程（uv 安装器，无需 Node）</string>
+    <string name="aiagents_desc_claude">Claude Code，Anthropic 编程助手（安装器，无需 Node；对话需要 Claude 套餐）</string>
     <string name="aiagents_not_installed">未安装</string>
     <string name="aiagents_installed">已安装 %1$s</string>
     <string name="aiagents_installed_unknown">已安装</string>
@@ -306,6 +307,15 @@
     <string name="aiagents_quick_session">%1$s（%2$s）</string>
     <string name="distro_quick_start_for">在 %1$s 上快速启动</string>
     <string name="aiagents_quick_start_title">快速启动：%1$s</string>
+    <string name="aiagents_web_open">网页版</string>
+    <string name="aiagents_web_title">%1$s 网页版</string>
+    <string name="aiagents_web_dsh_msg">已在新会话里启动。在会话输出里找到 dsh web: http://127.0.0.1:3080/?token=… 这一行，复制完整地址到浏览器打开。直接打开 http://127.0.0.1:3080 进不去，必须带 token。</string>
+    <string name="aiagents_web_pi_msg">已在新会话里启动。第一次会先下载官方 pi-webapp，稍等一会。在会话输出里找到带 token 的本地地址，复制到浏览器打开；也可以在会话里跑 npx pi-webapp status 查看地址。</string>
+    <string name="aiagents_web_opencode_msg">地址：http://127.0.0.1:4096\n密码：%1$s\n等会话里出现 server listening 后，再点“打开浏览器”。</string>
+    <string name="aiagents_web_open_browser">打开浏览器</string>
+    <string name="aiagents_web_session">%1$s 网页版（%2$s）</string>
+    <string name="aiagents_web_script_failed">写网页版启动脚本失败：%1$s</string>
+    <string name="aiagents_web_quick_item">打开 %1$s 网页版</string>
 
     <string name="prompt_style_title">命令行样式</string>
     <string name="prompt_theme_section_title">提示符主题</string>
