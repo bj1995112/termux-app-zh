@@ -1,5 +1,8 @@
-// AI assistants installer: selective install / update of 6 coding agents
+// AI assistants installer: selective install / update of 7 coding agents
 // inside one installed proot-distro container (never in Termux itself).
+// Installed web-capable agents (dsh, OpenCode, Pi) also get a "网页版"
+// button in their row, which starts the web server in a visible session
+// and explains how to reach it (AiAgentUtils.startWebSession).
 //
 // Entry: DistroActivity.showDistroDialog -> "Install AI assistants" per
 // installed container. The list shows each agent's name, a one-line
@@ -82,12 +85,14 @@ public class AiAgentsActivity extends AppCompatActivity {
         final AiAgentUtils.AgentDef def;
         boolean installed;
         String version; // "" when unknown
+        String binPath; // rootfs-relative binary path found, "" when not installed
         boolean selected;
         boolean supported;
 
         AgentRow(AiAgentUtils.AgentDef def) {
             this.def = def;
             this.version = "";
+            this.binPath = "";
             this.supported = true;
         }
 
@@ -142,11 +147,26 @@ public class AiAgentsActivity extends AppCompatActivity {
                     CheckBox check = view.findViewById(R.id.aiagents_row_check);
                     TextView title = view.findViewById(R.id.aiagents_row_title);
                     TextView subtitle = view.findViewById(R.id.aiagents_row_subtitle);
+                    Button webButton = view.findViewById(R.id.aiagents_row_web);
                     title.setText(row.def.displayName);
                     subtitle.setText(subtitleFor(row));
                     check.setChecked(row.selected);
                     check.setEnabled(!row.installed && row.supported);
                     check.setVisibility(row.installed || !row.supported ? View.GONE : View.VISIBLE);
+                    // Web UI button: only for installed web-capable agents.
+                    if (row.installed && row.def.webKind != AiAgentUtils.WebKind.NONE) {
+                        webButton.setVisibility(View.VISIBLE);
+                        webButton.setOnClickListener(v -> {
+                            AiAgentUtils.InstalledAgent agent =
+                                new AiAgentUtils.InstalledAgent(row.def.id, row.def.displayName,
+                                    row.def.command, row.binPath,
+                                    mContainer, mDistroId, mDisplay);
+                            AiAgentUtils.startWebSession(AiAgentsActivity.this, agent, null);
+                        });
+                    } else {
+                        webButton.setVisibility(View.GONE);
+                        webButton.setOnClickListener(null);
+                    }
                 }
                 return view;
             }
@@ -219,7 +239,11 @@ public class AiAgentsActivity extends AppCompatActivity {
                     row.supported = isSupported(def);
                     if (rootfs != null) {
                         row.installed = AiAgentUtils.isInstalled(rootfs, def);
-                        if (row.installed) row.version = AiAgentUtils.probeVersion(rootfs, def);
+                        if (row.installed) {
+                            row.version = AiAgentUtils.probeVersion(rootfs, def);
+                            String found = AiAgentUtils.findBinPath(rootfs, def);
+                            if (found != null) row.binPath = found;
+                        }
                     }
                     detected.add(row);
                 }
