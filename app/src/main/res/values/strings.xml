@@ -274,5 +274,7 @@
     <string name="distro_proot_distro_missing">proot-distro is not installed</string>
     <string name="distro_session_install">Install %1$s</string>
     <string name="distro_session_tools">Tools: %1$s</string>
+    <string name="distro_latest_updated">Latest update %1$s</string>
+    <string name="distro_updated_on">Updated %1$s</string>
 
 </resources>
