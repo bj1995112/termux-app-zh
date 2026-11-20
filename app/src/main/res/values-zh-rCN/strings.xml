@@ -276,4 +276,29 @@
 <string name="distro_installed_title">已安装的 Linux</string>
     <string name="distro_more_in_drawer">还有 %1$s 个…</string>
 
+    <string name="distro_install_ai_agents_for">为 %1$s 安装 AI 助手</string>
+    <string name="aiagents_title">AI 助手</string>
+    <string name="aiagents_desc_codex">OpenAI Codex，终端编程助手（安装器，无需 Node）</string>
+    <string name="aiagents_desc_pi">Pi，开源编程助手（npm，需要 Node 24）</string>
+    <string name="aiagents_desc_agy">Antigravity CLI，谷歌终端编程助手（安装器，无需 Node）</string>
+    <string name="aiagents_desc_dsh">DeepSeek Harness，DeepSeek 编程助手，预览版（npm，需要 Node 24）</string>
+    <string name="aiagents_desc_opencode">OpenCode，开源 AI 编程助手（npm，需要 Node 24）</string>
+    <string name="aiagents_desc_aider">Aider，终端 AI 结对编程（uv 安装器，无需 Node）</string>
+    <string name="aiagents_not_installed">未安装</string>
+    <string name="aiagents_installed">已安装 %1$s</string>
+    <string name="aiagents_installed_unknown">已安装</string>
+    <string name="aiagents_unsupported">该发行版暂不支持</string>
+    <string name="aiagents_status_checking">正在检查已安装的助手…</string>
+    <string name="aiagents_status_summary">已装 %1$d / %2$d 个助手</string>
+    <string name="aiagents_install_selected">安装所选</string>
+    <string name="aiagents_none_selected">没有选中任何助手</string>
+    <string name="aiagents_update_title">更新 %1$s</string>
+    <string name="aiagents_update_confirm">要在这个发行版里更新 %1$s 吗？将在终端会话里运行官方更新。</string>
+    <string name="aiagents_update">更新</string>
+    <string name="aiagents_update_dsh_note">dsh 是预览版，更新前会先显示当前版本和回退命令。</string>
+    <string name="aiagents_session">AI 助手：%1$s</string>
+    <string name="aiagents_no_rootfs">找不到该发行版的文件</string>
+    <string name="aiagents_script_failed">写安装脚本失败：%1$s</string>
+    <string name="aiagents_install_started">正在新会话中安装…</string>
+
 </resources>
