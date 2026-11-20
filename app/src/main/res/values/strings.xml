@@ -249,4 +249,30 @@
     <string name="font_prompt">Choose font</string>
     <string name="writing_failed">Failed to install file:\n\n</string>
 
+<!-- Linux distro manager (built-in, proot-distro based) -->
+    <string name="distro_title">Linux Distributions</string>
+    <string name="action_open_distro">Linux Distros</string>
+    <string name="action_refresh_distro_list">Refresh list</string>
+    <string name="distro_status_loading">Loading version list…</string>
+    <string name="distro_status_updated">List updated %1$s</string>
+    <string name="distro_status_offline">No network, showing cached list</string>
+    <string name="distro_installed">Installed: %1$s</string>
+    <string name="distro_available_versions">Available: %1$s</string>
+    <string name="distro_version_latest">latest</string>
+    <string name="distro_enter">Enter %1$s</string>
+    <string name="distro_install_tools_for">Install tools on %1$s</string>
+    <string name="distro_install_new_version">Install a new version…</string>
+    <string name="distro_choose_version">Choose %1$s version</string>
+    <string name="distro_install_title">Install %1$s</string>
+    <string name="distro_install_confirm">This will download the %1$s image and install it with proot-distro. Continue?</string>
+    <string name="distro_install">Install</string>
+    <string name="distro_tools_title">Tools for %1$s</string>
+    <string name="distro_tools_none_selected">No tools selected</string>
+    <string name="distro_install_started">Installing in a new terminal session…</string>
+    <string name="distro_tools_started">Installing tools in a new terminal session…</string>
+    <string name="distro_install_script_failed">Failed to write install script: %1$s</string>
+    <string name="distro_proot_distro_missing">proot-distro is not installed</string>
+    <string name="distro_session_install">Install %1$s</string>
+    <string name="distro_session_tools">Tools: %1$s</string>
+
 </resources>
