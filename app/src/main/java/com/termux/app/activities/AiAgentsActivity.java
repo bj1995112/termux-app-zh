@@ -1,6 +1,6 @@
-// AI assistants installer: selective install / update of 7 coding agents
+// AI assistants installer: selective install / update of 8 coding agents
 // inside one installed proot-distro container (never in Termux itself).
-// Installed web-capable agents (dsh, OpenCode, Pi) also get a "网页版"
+// Installed web-capable agents (dsh, OpenCode, Pi, Hermes Agent) also get a "网页版"
 // button in their row, which starts the web server in a visible session
 // and explains how to reach it (AiAgentUtils.startWebSession).
 //
@@ -395,6 +395,19 @@ public class AiAgentsActivity extends AppCompatActivity {
                 // Codex sandboxes with bubblewrap; install it best-effort.
                 s.append(installOnePackageCommand(mDistroId, "bubblewrap")).append(" || true\n");
             }
+            if ("hermes".equals(def.id)) {
+                // The installer clones the repo, so git must exist; on
+                // Alpine (musl) its bundled Node also needs the system
+                // libstdc++, or the installer fails outright. The launcher
+                // lands in ~/.local/bin, which is not on PATH in this
+                // script's non-login shell, so export it here for the
+                // checks and the version print below.
+                s.append("  ").append(installOnePackageCommand(mDistroId, "git")).append("\n");
+                if ("alpine".equals(mDistroId)) {
+                    s.append("  apk add libstdc++\n");
+                }
+                s.append("  export PATH=\"$HOME/.local/bin:$PATH\"\n");
+            }
             if (def.needsNode) s.append("if node_ok; then\n");
             s.append("  ").append(update ? def.updateSnippet : def.installSnippet).append("\n");
             if ("codex".equals(def.id)) {
@@ -402,6 +415,9 @@ public class AiAgentsActivity extends AppCompatActivity {
             }
             if ("dsh".equals(def.id) && !update) {
                 s.append("  echo \"提示：dsh 是网页界面，装好后在发行版里跑 dsh web，再用手机浏览器打开 http://127.0.0.1:3080\"\n");
+            }
+            if ("hermes".equals(def.id) && !update) {
+                s.append("  echo \"提示：首次使用先运行 hermes setup 选择模型（需要模型 key 或 Nous Portal 账号）\"\n");
             }
             s.append("  if check_installed ").append(def.command).append(" \"")
                 .append(def.homeBinPath).append("\"; then\n");
