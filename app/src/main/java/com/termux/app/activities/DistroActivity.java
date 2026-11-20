@@ -4,8 +4,10 @@
 // The distro list is fetched at runtime: the 7 supported distros and their
 // Docker Hub image names are the only fixed data. Version numbers come from
 // the Docker Hub tags API, with the last fetched list cached in
-// ~/.termux/distro-list.json as an offline fallback. proot-distro v5 has no
-// alias system, so installs use image references such as "ubuntu:26.04".
+// ~/.termux/distro-list.json as an offline fallback and a bundled last-known
+// list as a first-run fallback, so version numbers are always visible.
+// proot-distro v5 has no alias system, so installs use image references
+// such as "ubuntu:26.04".
 //
 // Install / login / tools install run in a visible terminal session via the
 // same internal TERMUX_SERVICE.ACTION_SERVICE_EXECUTE intent that
@@ -61,6 +63,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -77,8 +80,12 @@ public class DistroActivity extends AppCompatActivity {
     /** Version list cache file, under ~/.termux/. */
     private static final String CACHE_FILE_NAME = "distro-list.json";
 
-    private static final int DOCKER_HUB_CONNECT_TIMEOUT_MS = 10000;
-    private static final int DOCKER_HUB_READ_TIMEOUT_MS = 15000;
+    private static final int DOCKER_HUB_CONNECT_TIMEOUT_MS = 15000;
+    private static final int DOCKER_HUB_READ_TIMEOUT_MS = 30000;
+    /** One retry per image: large tag pages can stall on slow mobile networks. */
+    private static final int DOCKER_HUB_FETCH_ATTEMPTS = 2;
+    /** Tags not updated in this many years are treated as stale (e.g. Leap 42.3). */
+    private static final int STALE_TAG_YEARS = 3;
     private static final int DOCKER_HUB_TAGS_PAGE_SIZE = 100;
 
     /** The `distro` shell command, written to $PREFIX/bin on first use. */
@@ -457,22 +464,24 @@ public class DistroActivity extends AppCompatActivity {
         new Thread() {
             @Override
             public void run() {
-                Map<String, List<VersionOption>> fetchedVersions = new HashMap<>();
-                Map<String, String> fetchedDisplays = new HashMap<>();
-                for (DistroDef distro : DISTROS) {
-                    List<VersionOption> options = fetchVersionsForDistro(distro);
-                    if (options != null && !options.isEmpty()) {
-                        fetchedVersions.put(distro.id, options);
+                boolean anyUpdated = false;
+                for (final DistroDef distro : DISTROS) {
+                    final List<VersionOption> options = fetchVersionsForDistro(distro);
+                    if (options == null || options.isEmpty()) continue;
+                    anyUpdated = true;
+                    runOnUiThread(() -> {
+                        mVersions.put(distro.id, options);
                         for (VersionOption option : options) {
-                            fetchedDisplays.put(option.container,
+                            mContainerDisplayNames.put(option.container,
                                 distro.displayName + " " + option.display);
                         }
-                    }
+                        // Show each distro's versions as soon as they arrive,
+                        // instead of waiting for the slowest fetch.
+                        updateListRows(getString(R.string.distro_status_loading));
+                    });
                 }
-                final boolean updated = !fetchedVersions.isEmpty();
+                final boolean updated = anyUpdated;
                 runOnUiThread(() -> {
-                    mVersions.putAll(fetchedVersions);
-                    mContainerDisplayNames.putAll(fetchedDisplays);
                     if (updated) saveCachedVersions();
                     mListLoading = false;
                     refreshInstalledContainers();
@@ -487,21 +496,37 @@ public class DistroActivity extends AppCompatActivity {
         }.start();
     }
 
+    /** One Docker Hub tag: its name and when its image was last updated (ISO 8601, may be ""). */
+    private static class TagInfo {
+        final String name;
+        final String lastUpdated;
+
+        TagInfo(String name, String lastUpdated) {
+            this.name = name;
+            this.lastUpdated = lastUpdated;
+        }
+    }
+
     private List<VersionOption> fetchVersionsForDistro(DistroDef distro) {
         List<VersionOption> options = new ArrayList<>();
         for (TagSource source : distro.sources) {
-            try {
-                List<String> tags = fetchDockerHubTags(source.image);
-                options.addAll(pickVersions(source, tags));
-            } catch (Exception e) {
-                Log.w(LOG_TAG, "Failed to fetch tags for " + source.image, e);
+            List<TagInfo> tags = null;
+            for (int attempt = 1; attempt <= DOCKER_HUB_FETCH_ATTEMPTS; attempt++) {
+                try {
+                    tags = fetchDockerHubTags(source.image);
+                    break;
+                } catch (Exception e) {
+                    Log.w(LOG_TAG, "Failed to fetch tags for " + source.image
+                        + " (attempt " + attempt + ")", e);
+                }
             }
+            if (tags != null) options.addAll(pickVersions(source, tags));
         }
         return options;
     }
 
-    /** One page of tag names from the Docker Hub API (most recently updated first). */
-    private List<String> fetchDockerHubTags(String image) throws IOException, JSONException {
+    /** One page of tags from the Docker Hub API (most recently updated first). */
+    private List<TagInfo> fetchDockerHubTags(String image) throws IOException, JSONException {
         URL url = new URL("https://hub.docker.com/v2/repositories/" + image
             + "/tags?page_size=" + DOCKER_HUB_TAGS_PAGE_SIZE);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -516,9 +541,10 @@ public class DistroActivity extends AppCompatActivity {
             String body = readStream(connection.getInputStream());
             JSONObject root = new JSONObject(body);
             JSONArray results = root.getJSONArray("results");
-            List<String> tags = new ArrayList<>();
+            List<TagInfo> tags = new ArrayList<>();
             for (int i = 0; i < results.length(); i++) {
-                tags.add(results.getJSONObject(i).getString("name"));
+                JSONObject tag = results.getJSONObject(i);
+                tags.add(new TagInfo(tag.getString("name"), tag.optString("last_updated", "")));
             }
             return tags;
         } finally {
@@ -526,21 +552,19 @@ public class DistroActivity extends AppCompatActivity {
         }
     }
 
-    private List<VersionOption> pickVersions(TagSource source, List<String> tags) {
+    private List<VersionOption> pickVersions(TagSource source, List<TagInfo> tags) {
         List<VersionOption> options = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (TagInfo tag : tags) names.add(tag.name);
         switch (source.filter) {
             case ROLLING:
-                if (tags.contains("latest")) {
+                if (names.contains("latest")) {
                     options.add(new VersionOption(source.displayPrefix + mLatestLabel,
                         source.image + ":latest"));
                 }
                 break;
             case DOTTED_VERSION: {
-                List<String> versions = new ArrayList<>();
-                for (String tag : tags) {
-                    if (tag.matches("\\d+\\.\\d+")) versions.add(tag);
-                }
-                sortVersionStringsDescending(versions);
+                List<String> versions = freshVersions(tags, "\\d+\\.\\d+");
                 for (int i = 0; i < Math.min(3, versions.size()); i++) {
                     options.add(new VersionOption(source.displayPrefix + versions.get(i),
                         source.image + ":" + versions.get(i)));
@@ -548,22 +572,17 @@ public class DistroActivity extends AppCompatActivity {
                 break;
             }
             case INTEGER_VERSION: {
-                List<Integer> versions = new ArrayList<>();
-                for (String tag : tags) {
-                    if (tag.matches("\\d+")) versions.add(Integer.parseInt(tag));
-                }
-                Collections.sort(versions, Collections.reverseOrder());
+                List<String> versions = freshVersions(tags, "\\d+");
                 for (int i = 0; i < Math.min(3, versions.size()); i++) {
-                    String version = String.valueOf(versions.get(i));
-                    options.add(new VersionOption(source.displayPrefix + version,
-                        source.image + ":" + version));
+                    options.add(new VersionOption(source.displayPrefix + versions.get(i),
+                        source.image + ":" + versions.get(i)));
                 }
                 break;
             }
             case DEBIAN_CODENAME: {
                 Set<String> coveredVersions = new HashSet<>();
                 for (String codename : DEBIAN_CODENAMES) {
-                    if (!tags.contains(codename)) continue;
+                    if (!names.contains(codename)) continue;
                     String version = DEBIAN_CODENAME_VERSIONS.get(codename);
                     String display = version != null ? codename + " (" + version + ")" : codename;
                     options.add(new VersionOption(source.displayPrefix + display,
@@ -572,7 +591,7 @@ public class DistroActivity extends AppCompatActivity {
                 }
                 // Numeric tags not already covered by a codename, newest first.
                 List<Integer> numerics = new ArrayList<>();
-                for (String tag : tags) {
+                for (String tag : names) {
                     if (tag.matches("\\d+")) numerics.add(Integer.parseInt(tag));
                 }
                 Collections.sort(numerics, Collections.reverseOrder());
@@ -589,12 +608,97 @@ public class DistroActivity extends AppCompatActivity {
         return options;
     }
 
-    /** Offline fallback: only "latest" per image, which proot-distro can always install. */
+    /**
+     * Tag names matching the pattern, dropping images not updated in the last
+     * STALE_TAG_YEARS years (e.g. openSUSE Leap 42.3, untouched since 2019),
+     * newest version first. If the freshness filter leaves nothing, the
+     * unfiltered list is used so a stale mirror never hides every version.
+     */
+    private List<String> freshVersions(List<TagInfo> tags, String pattern) {
+        String cutoff = freshnessCutoffDate();
+        List<String> fresh = new ArrayList<>();
+        List<String> all = new ArrayList<>();
+        for (TagInfo tag : tags) {
+            if (!tag.name.matches(pattern)) continue;
+            all.add(tag.name);
+            if (tag.lastUpdated.length() < 10
+                || tag.lastUpdated.substring(0, 10).compareTo(cutoff) >= 0) {
+                fresh.add(tag.name);
+            }
+        }
+        List<String> versions = fresh.isEmpty() ? all : fresh;
+        sortVersionStringsDescending(versions);
+        return versions;
+    }
+
+    /** Today minus STALE_TAG_YEARS, as yyyy-MM-dd (lexicographic compare works for ISO dates). */
+    private static String freshnessCutoffDate() {
+        Calendar cal = Calendar.getInstance();
+        cal.add(Calendar.YEAR, -STALE_TAG_YEARS);
+        return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(cal.getTime());
+    }
+
+    /**
+     * Last-known versions, bundled in the app so version numbers are always
+     * shown even when the network fetch fails and there is no cache yet.
+     * These are real image refs (e.g. ubuntu:26.04) that proot-distro can
+     * install; the live fetch replaces them whenever it succeeds.
+     * Last verified 2026-11-20.
+     */
     private List<VersionOption> fallbackOptions(DistroDef distro) {
         List<VersionOption> options = new ArrayList<>();
-        for (TagSource source : distro.sources) {
-            options.add(new VersionOption(source.displayPrefix + mLatestLabel,
-                source.image + ":latest"));
+        switch (distro.id) {
+            case "ubuntu":
+                options.add(new VersionOption("26.10", "ubuntu:26.10"));
+                options.add(new VersionOption("26.04", "ubuntu:26.04"));
+                options.add(new VersionOption("25.10", "ubuntu:25.10"));
+                break;
+            case "debian":
+                options.add(new VersionOption("trixie (13)", "debian:trixie"));
+                options.add(new VersionOption("bookworm (12)", "debian:bookworm"));
+                break;
+            case "arch":
+                options.add(new VersionOption(mLatestLabel, "archlinux:latest"));
+                break;
+            case "alpine":
+                options.add(new VersionOption("3.24", "alpine:3.24"));
+                options.add(new VersionOption("3.23", "alpine:3.23"));
+                options.add(new VersionOption("3.22", "alpine:3.22"));
+                break;
+            case "fedora":
+                options.add(new VersionOption("46", "fedora:46"));
+                options.add(new VersionOption("45", "fedora:45"));
+                options.add(new VersionOption("44", "fedora:44"));
+                break;
+            case "opensuse":
+                options.add(new VersionOption("Leap 16.1", "opensuse/leap:16.1"));
+                options.add(new VersionOption("Leap 16.0", "opensuse/leap:16.0"));
+                options.add(new VersionOption("Leap 15.6", "opensuse/leap:15.6"));
+                options.add(new VersionOption("Tumbleweed " + mLatestLabel,
+                    "opensuse/tumbleweed:latest"));
+                break;
+            case "void":
+                options.add(new VersionOption(mLatestLabel, "voidlinux/voidlinux:latest"));
+                break;
+            default:
+                for (TagSource source : distro.sources) {
+                    options.add(new VersionOption(source.displayPrefix + mLatestLabel,
+                        source.image + ":latest"));
+                }
+                break;
+        }
+        return options;
+    }
+
+    /** Fetched versions when available, otherwise the bundled last-known versions. */
+    private List<VersionOption> optionsFor(DistroDef distro) {
+        List<VersionOption> options = mVersions.get(distro.id);
+        if (options == null || options.isEmpty()) options = fallbackOptions(distro);
+        for (VersionOption option : options) {
+            if (!mContainerDisplayNames.containsKey(option.container)) {
+                mContainerDisplayNames.put(option.container,
+                    distro.displayName + " " + option.display);
+            }
         }
         return options;
     }
@@ -661,8 +765,8 @@ public class DistroActivity extends AppCompatActivity {
             for (String container : installed) names.add(displayNameForContainer(container));
             return getString(R.string.distro_installed, joinWithComma(names));
         }
-        List<VersionOption> options = mVersions.get(distro.id);
-        if (options != null && !options.isEmpty()) {
+        List<VersionOption> options = optionsFor(distro);
+        if (!options.isEmpty()) {
             List<String> versions = new ArrayList<>();
             for (VersionOption option : options) versions.add(option.display);
             return getString(R.string.distro_available_versions, joinWithComma(versions));
@@ -722,10 +826,7 @@ public class DistroActivity extends AppCompatActivity {
     }
 
     private void showVersionDialog(final DistroDef distro) {
-        List<VersionOption> options = mVersions.get(distro.id);
-        if (options == null || options.isEmpty()) {
-            options = fallbackOptions(distro);
-        }
+        List<VersionOption> options = optionsFor(distro);
         final List<VersionOption> finalOptions = options;
         String[] displays = new String[options.size()];
         for (int i = 0; i < options.size(); i++) displays[i] = options.get(i).display;
