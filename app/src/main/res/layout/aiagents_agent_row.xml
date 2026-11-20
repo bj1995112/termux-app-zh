@@ -38,4 +38,14 @@
 
     </LinearLayout>
 
+    <Button
+        android:id="@+id/aiagents_row_web"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical"
+        android:focusable="false"
+        android:text="@string/aiagents_web_open"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
 </LinearLayout>
