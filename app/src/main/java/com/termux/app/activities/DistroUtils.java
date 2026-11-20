@@ -254,6 +254,11 @@ public final class DistroUtils {
             Toast.makeText(context, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
             return;
         }
+        // Bring the container's prompt up to date with the theme chosen in
+        // Settings > 命令行样式 (no-op when no theme was ever picked, the
+        // container is not bash, or it is already in sync). This also covers
+        // newly installed distros: they get the current theme on first entry.
+        PromptThemeSync.syncCurrentThemeToContainer(container);
         startSessionWithExecutable(context, prootDistro, new String[]{"login", container},
             display, display);
     }
