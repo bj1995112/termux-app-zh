@@ -23,21 +23,28 @@
 
 package com.termux.app.activities;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.widget.Toast;
 
 import com.termux.R;
 import com.termux.shared.termux.TermuxConstants;
+import com.termux.shared.settings.preferences.SharedPreferenceUtils;
 
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -48,6 +55,15 @@ import java.util.List;
 public final class AiAgentUtils {
 
     private static final String LOG_TAG = "AiAgentUtils";
+
+    /** SharedPreferences file for AI-agent UI state (one-time hints). */
+    private static final String AI_AGENTS_PREFS_NAME = "ai_agents";
+
+    /** Set once the first web-launch battery hint has been shown. */
+    private static final String PREF_WEB_BATTERY_HINT_SHOWN = "web_battery_hint_shown";
+
+    /** Timeout for the pre-dialog web-port probe (loopback, fails fast). */
+    private static final int WEB_PORT_PROBE_TIMEOUT_MS = 800;
 
     /** Maximum rows shown in the drawer; more are reached from DistroActivity. */
     public static final int MAX_DRAWER_AGENT_ROWS = 5;
@@ -101,12 +117,15 @@ public final class AiAgentUtils {
         final String updateSnippet;  // shell lines run inside the container (update)
         final WebKind webKind;       // NONE when the agent has no web UI
         final int webPort;           // fixed web port (3080 dsh, 4096 opencode), 0 when none
+        // false when the agent has no terminal/TUI entry: dsh is web-only
+        // (upstream documents only `dsh web`; bare `dsh` is undocumented).
+        final boolean terminalEntry;
 
         AgentDef(String id, String displayName, int descriptionRes, boolean needsNode,
                  String command, String homeBinPath, String[] binPaths,
                  VersionKind versionKind, String npmPackage,
                  String installSnippet, String updateSnippet,
-                 WebKind webKind, int webPort) {
+                 WebKind webKind, int webPort, boolean terminalEntry) {
             this.id = id;
             this.displayName = displayName;
             this.descriptionRes = descriptionRes;
@@ -120,6 +139,7 @@ public final class AiAgentUtils {
             this.updateSnippet = updateSnippet;
             this.webKind = webKind;
             this.webPort = webPort;
+            this.terminalEntry = terminalEntry;
         }
     }
 
@@ -139,49 +159,49 @@ public final class AiAgentUtils {
             VersionKind.CODEX_RELEASES, null,
             "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
             "codex update || curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
-            WebKind.NONE, 0),
+            WebKind.NONE, 0, true),
         new AgentDef("pi", "Pi", R.string.aiagents_desc_pi, true, "pi",
             "",
             new String[]{"usr/bin/pi", "usr/local/bin/pi"},
             VersionKind.NPM_PACKAGE_JSON, "@earendil-works/pi-coding-agent",
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-            WebKind.PI, 0),
+            WebKind.PI, 0, true),
         new AgentDef("agy", "Antigravity CLI", R.string.aiagents_desc_agy, false, "agy",
             ".local/bin/agy",
             new String[]{"root/.local/bin/agy"},
             VersionKind.NONE, null,
             "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
             "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
-            WebKind.NONE, 0),
+            WebKind.NONE, 0, true),
         new AgentDef("dsh", "DeepSeek Harness", R.string.aiagents_desc_dsh, true, "dsh",
             "",
             new String[]{"usr/bin/dsh", "usr/local/bin/dsh"},
             VersionKind.NPM_PACKAGE_JSON, "@deepseek-ai/dsh",
             "npm install -g @deepseek-ai/dsh",
             "old_ver=$(npm list -g @deepseek-ai/dsh --depth=0 2>/dev/null | grep -oE '@deepseek-ai/dsh@[0-9][^ ]*' | cut -d@ -f3); if [ -n \"$old_ver\" ]; then echo \"当前版本：$old_ver；如需回退：npm install -g @deepseek-ai/dsh@$old_ver\"; fi; npm install -g @deepseek-ai/dsh",
-            WebKind.DSH, 3080),
+            WebKind.DSH, 3080, false),
         new AgentDef("opencode", "OpenCode", R.string.aiagents_desc_opencode, true, "opencode",
             "",
             new String[]{"usr/bin/opencode", "usr/local/bin/opencode"},
             VersionKind.NPM_PACKAGE_JSON, "@opencode/cli",
             "npm install -g @opencode/cli",
             "npm install -g @opencode/cli",
-            WebKind.OPENCODE, 4096),
+            WebKind.OPENCODE, 4096, true),
         new AgentDef("aider", "Aider", R.string.aiagents_desc_aider, false, "aider",
             ".local/bin/aider",
             new String[]{"root/.local/bin/aider"},
             VersionKind.AIDER_DIST_INFO, null,
             "curl -LsSf https://aider.chat/install.sh | sh",
             "aider --upgrade",
-            WebKind.NONE, 0),
+            WebKind.NONE, 0, true),
         new AgentDef("claude", "Claude Code", R.string.aiagents_desc_claude, false, "claude",
             ".local/bin/claude",
             new String[]{"root/.local/bin/claude"},
             VersionKind.CLAUDE_VERSIONS, null,
             "curl -fsSL https://claude.ai/install.sh | bash",
             "claude update",
-            WebKind.NONE, 0)
+            WebKind.NONE, 0, true)
     );
 
     /** AgentDef for an id, or null when unknown. */
@@ -199,6 +219,15 @@ public final class AiAgentUtils {
     public static boolean hasWeb(String id) {
         AgentDef def = findDef(id);
         return def != null && def.webKind != WebKind.NONE;
+    }
+
+    /** Whether the agent has a terminal entry (false for dsh: upstream
+     * documents only `dsh web`, no TUI). TermuxActivity lives in another
+     * package and cannot read AgentDef fields directly, so launch paths
+     * ask here. Unknown ids return false (safe default: no terminal). */
+    public static boolean hasTerminalEntry(String id) {
+        AgentDef def = findDef(id);
+        return def != null && def.terminalEntry;
     }
 
     /** One installed agent inside one installed container. */
@@ -450,10 +479,27 @@ public final class AiAgentUtils {
      * VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY),
      * hiding the dialog behind the terminal until the user presses Back.
      * The server runs while the session is open; closing the session stops
-     * it (proot has no systemd, so there is no background daemon). There
-     * is deliberately no server-running-state detection in v1: the app
-     * cannot probe inside the container without in-container exec, so it
-     * never claims a server is up — it only starts one.
+     * it (proot has no systemd, so there is no background daemon). For
+     * OpenCode the app probes 127.0.0.1:4096 from its own process before
+     * showing the dialog (proot shares the phone's network namespace, so
+     * no in-container exec is needed): when a server is already running,
+     * the dialog also offers "Restart server", which starts a session
+     * whose script first kills the old serve and then starts a fresh one
+     * with the stable password. There is deliberately NO auto-kill: an
+     * accidental tap must never kill a running server, so the restart is
+     * opt-in only. The normal launch keeps the guarded script (skip if a
+     * server is already listening). A server started before the stable
+     * password (Build #83) still holds its old random password, so the
+     * restart is how the dialog password and the running server are
+     * brought back in sync.
+     *
+     * The first web launch (any of the three agents) also appends a
+     * one-time battery hint to the dialog: the server only stays up while
+     * Termux keeps running in the background, and some phones (Vivo and
+     * other aggressive vendors) freeze Termux when it is backgrounded,
+     * which stalls the web UI until Termux is foregrounded again. The
+     * hint is shown at most once (SharedPreferences flag) and never
+     * blocks or delays the launch.
      *
      * The three agents differ in what the app can open by itself:
      * - dsh: `dsh web` serves :3080, but the startup URL carries a fresh
@@ -595,39 +641,124 @@ public final class AiAgentUtils {
         final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
             new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
             sessionName, sessionName);
-        showWebDialog(context, def, agent, webPassword, startSession, onDialogDismissed);
+        // OpenCode only: the same script with a "restart" argument first
+        // kills any old serve, then starts a fresh one with the stable
+        // password. It is only started from the dialog's opt-in
+        // "Restart server" action, never automatically.
+        final Runnable startRestartSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
+            new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName, "restart"},
+            sessionName, sessionName);
+        if (def.webKind == WebKind.OPENCODE) {
+            // Probe the port off the UI thread so the dialog can offer
+            // "Restart server" only when a server may already be running.
+            probeAndShowWebDialog(context, def, agent, webPassword,
+                startSession, startRestartSession, onDialogDismissed);
+        } else {
+            showWebDialog(context, def, agent, webPassword, startSession,
+                null, false, onDialogDismissed);
+        }
+    }
+
+    /**
+     * Probe whether something is listening on a web port, from the app
+     * process (same network namespace as the container — proot shares
+     * it), so the dialog can offer "Restart server" only when a server
+     * may already be running. TRUE = a server answered, FALSE = the port
+     * is definitely closed (connection refused), null = unknown (e.g.
+     * timed out): the restart action is shown then too, since it is
+     * harmless when nothing is running (it just starts a fresh server).
+     */
+    private static Boolean probeWebPort(int port) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), WEB_PORT_PROBE_TIMEOUT_MS);
+            return Boolean.TRUE;
+        } catch (java.net.ConnectException e) {
+            return Boolean.FALSE;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Web port probe failed", e);
+            return null;
+        }
+    }
+
+    /** Probe the OpenCode port off the UI thread, then show the web dialog on it. */
+    private static void probeAndShowWebDialog(final Context context, final AgentDef def,
+                                              final InstalledAgent agent, final String webPassword,
+                                              final Runnable onStartSession,
+                                              final Runnable onStartRestartSession,
+                                              final Runnable onDialogDismissed) {
+        new Thread(() -> {
+            final Boolean running = probeWebPort(def.webPort);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (context instanceof Activity && ((Activity) context).isFinishing()) return;
+                showWebDialog(context, def, agent, webPassword, onStartSession,
+                    onStartRestartSession, running != Boolean.FALSE, onDialogDismissed);
+            });
+        }).start();
+    }
+
+    /**
+     * The one-time battery hint for web launches, shown as a note inside
+     * the web dialog. Returns the hint text the first time any web UI is
+     * launched (and marks it shown), null afterwards. The flag lives in a
+     * private SharedPreferences file so it survives app updates.
+     */
+    private static String consumeWebBatteryHint(Context context) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            context, AI_AGENTS_PREFS_NAME);
+        if (prefs.getBoolean(PREF_WEB_BATTERY_HINT_SHOWN, false)) return null;
+        prefs.edit().putBoolean(PREF_WEB_BATTERY_HINT_SHOWN, true).apply();
+        return context.getString(R.string.aiagents_web_battery_hint);
     }
 
     /**
      * Explanation dialog for a web launch; OpenCode also gets an "Open browser" button.
      * The positive button starts the session (and, for OpenCode, opens the
      * browser); Cancel starts nothing. The dismiss listener still runs
-     * onDialogDismissed in every case, including Cancel.
+     * onDialogDismissed in every case, including Cancel. OpenCode shows a
+     * neutral "Restart server" button only when showRestart is true (a
+     * server may already be running, probed before the dialog): it starts
+     * the same script with a "restart" argument and opens the browser.
+     * The first web launch appends the one-time battery hint to the
+     * message (see consumeWebBatteryHint).
      */
     private static void showWebDialog(final Context context, final AgentDef def,
                                       final InstalledAgent agent, final String webPassword,
                                       final Runnable onStartSession,
+                                      final Runnable onStartRestartSession,
+                                      final boolean showRestart,
                                       final Runnable onDialogDismissed) {
         AlertDialog.Builder builder = new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
             .setOnDismissListener(dialog -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             });
+        final String batteryHint = consumeWebBatteryHint(context);
         switch (def.webKind) {
-            case DSH:
-                builder.setMessage(R.string.aiagents_web_dsh_msg)
+            case DSH: {
+                String message = context.getString(R.string.aiagents_web_dsh_msg);
+                if (batteryHint != null) message += "\n\n" + batteryHint;
+                builder.setMessage(message)
                     .setPositiveButton(android.R.string.ok, (dialog, which) -> {
                         if (onStartSession != null) onStartSession.run();
                     });
                 break;
-            case PI:
-                builder.setMessage(R.string.aiagents_web_pi_msg)
+            }
+            case PI: {
+                String message = context.getString(R.string.aiagents_web_pi_msg);
+                if (batteryHint != null) message += "\n\n" + batteryHint;
+                builder.setMessage(message)
                     .setPositiveButton(android.R.string.ok, (dialog, which) -> {
                         if (onStartSession != null) onStartSession.run();
                     });
                 break;
-            case OPENCODE:
-                builder.setMessage(context.getString(R.string.aiagents_web_opencode_msg, webPassword))
+            }
+            case OPENCODE: {
+                String message = context.getString(R.string.aiagents_web_opencode_msg, webPassword);
+                if (showRestart) {
+                    message += "\n" + context.getString(R.string.aiagents_web_restart_note);
+                }
+                if (batteryHint != null) message += "\n\n" + batteryHint;
+                builder.setMessage(message)
                     .setPositiveButton(R.string.aiagents_web_open_browser, (dialog, which) -> {
                         if (onStartSession != null) onStartSession.run();
                         Intent intent = new Intent(Intent.ACTION_VIEW,
@@ -635,7 +766,16 @@ public final class AiAgentUtils {
                         context.startActivity(intent);
                     })
                     .setNegativeButton(android.R.string.cancel, null);
+                if (showRestart) {
+                    builder.setNeutralButton(R.string.aiagents_web_restart_server, (dialog, which) -> {
+                        if (onStartRestartSession != null) onStartRestartSession.run();
+                        Intent intent = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("http://127.0.0.1:" + def.webPort));
+                        context.startActivity(intent);
+                    });
+                }
                 break;
+            }
             default:
                 return;
         }
@@ -663,6 +803,30 @@ public final class AiAgentUtils {
                 s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("export OPENCODE_PASSWORD=\"").append(webPassword).append("\"\n");
                 s.append("export OPENCODE_SERVER_PASSWORD=\"").append(webPassword).append("\"\n");
+                // Opt-in restart (only when the script is run with a
+                // "restart" argument, i.e. from the dialog's "Restart
+                // server" action — never automatically): kill any old
+                // serve first, so a server started before the stable
+                // password (with a random password) cannot keep holding
+                // the port while the dialog shows the new one. The pkill
+                // pattern matches only our own serve invocation
+                // ("opencode serve --hostname 127.0.0.1 --port 4096");
+                // the script's own cmdline is "bash /tmp/termux-web-*.sh"
+                // and does not match. If pkill is missing, or the port
+                // never frees, the guard below prints the already-running
+                // message instead of starting a second server.
+                s.append("if [ \"$1\" = \"restart\" ]; then\n");
+                s.append("    echo \"正在重启 OpenCode 网页版…\"\n");
+                s.append("    if command -v pkill >/dev/null 2>&1; then\n");
+                s.append("        pkill -f \"opencode serve --hostname 127.0.0.1 --port ").append(def.webPort).append("\" 2>/dev/null || true\n");
+                s.append("        for i in 1 2 3 4 5 6 7 8 9 10; do\n");
+                s.append("            (exec 3<>/dev/tcp/127.0.0.1/").append(def.webPort).append(") 2>/dev/null || break\n");
+                s.append("            sleep 1\n");
+                s.append("        done\n");
+                s.append("    else\n");
+                s.append("        echo \"没有找到 pkill，无法停掉旧服务，改用已有服务。\"\n");
+                s.append("    fi\n");
+                s.append("fi\n");
                 // If a server is already listening on the port (e.g. the
                 // user tapped web launch twice), do not start a second one:
                 // it would fail to bind and the session would exit. The
@@ -709,6 +873,7 @@ public final class AiAgentUtils {
         "#   ai            list installed assistants\n" +
         "#   ai list       same as above\n" +
         "#   ai <name>     launch an assistant (extra arguments are passed through)\n" +
+        "#   ai dsh        same as `ai dsh web` (dsh has no terminal entry)\n" +
         "#   ai -h|--help  show this help\n" +
         "# Detection scans each container rootfs for the agent binaries. The table\n" +
         "# below must stay in sync with AiAgentUtils.AGENTS (same binary paths).\n" +
@@ -738,6 +903,7 @@ public final class AiAgentUtils {
         "    echo \"  ai list       同上\"\n" +
         "    echo \"  ai codex      在装有 Codex 的发行版里启动 Codex\"\n" +
         "    echo \"  ai dsh web    启动 dsh 网页版（地址在会话里，带 token）\"\n" +
+        "    echo \"  ai dsh      同上（dsh 没有终端入口，只提供网页版）\"\n" +
         "    echo \"  ai -h         显示帮助\"\n" +
         "    echo \"助手：codex、pi、agy、dsh、opencode、aider、claude\"\n" +
         "    echo \"网页版：dsh、opencode、pi（ai <助手名> web）\"\n" +
@@ -839,6 +1005,14 @@ public final class AiAgentUtils {
         "if ! command -v proot-distro >/dev/null 2>&1; then\n" +
         "    echo \"没有安装 proot-distro，请先执行：pkg install proot-distro\"\n" +
         "    exit 1\n" +
+        "fi\n" +
+        "# dsh has no terminal entry (upstream documents only `dsh web`), so\n" +
+        "# `ai dsh` means `ai dsh web`. Extra arguments are ignored.\n" +
+        "if [ \"$agent_id\" = \"dsh\" ] && [ \"$1\" != \"web\" ]; then\n" +
+        "    if [ -n \"$1\" ]; then\n" +
+        "        echo \"dsh 没有终端入口，只提供网页版；多余的参数已忽略。\"\n" +
+        "    fi\n" +
+        "    set -- web\n" +
         "fi\n" +
         "# Web UI: ai <name> web starts the agent's web server in this session\n" +
         "# and prints how to reach it. A shell command cannot open the phone\n" +
