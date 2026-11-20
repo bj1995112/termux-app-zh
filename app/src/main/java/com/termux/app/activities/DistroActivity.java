@@ -22,6 +22,7 @@
 package com.termux.app.activities;
 
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.os.Bundle;
 import android.util.AtomicFile;
 import android.util.Log;
@@ -787,6 +788,8 @@ public class DistroActivity extends AppCompatActivity {
             actions.add(() -> startLoginSession(container, display));
             items.add(getString(R.string.distro_install_tools_for, display));
             actions.add(() -> showToolsDialog(distro, container, display));
+            items.add(getString(R.string.distro_install_ai_agents_for, display));
+            actions.add(() -> openAiAgents(distro, container, display));
         }
         items.add(getString(R.string.distro_install_new_version));
         actions.add(() -> showVersionDialog(distro));
@@ -954,6 +957,15 @@ public class DistroActivity extends AppCompatActivity {
         script.append("fi\n");
         script.append("read -r -p \"按回车关闭此会话\"\n");
         return script.toString();
+    }
+
+    /** Open the AI assistant installer for one installed container. */
+    private void openAiAgents(DistroDef distro, String container, String display) {
+        Intent intent = new Intent(this, AiAgentsActivity.class);
+        intent.putExtra(AiAgentsActivity.EXTRA_CONTAINER_NAME, container);
+        intent.putExtra(AiAgentsActivity.EXTRA_DISTRO_ID, distro.id);
+        intent.putExtra(AiAgentsActivity.EXTRA_DISPLAY_NAME, display);
+        startActivity(intent);
     }
 
     private void startLoginSession(String container, String display) {
