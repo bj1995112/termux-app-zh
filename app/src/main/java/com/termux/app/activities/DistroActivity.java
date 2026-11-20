@@ -978,18 +978,31 @@ public class DistroActivity extends AppCompatActivity {
 
     /** Quick start: list this container's installed agents; tapping one
      * opens a terminal session that runs it directly, then closes this
-     * screen (same as entering the distro). */
+     * screen (same as entering the distro). Web-capable agents
+     * (dsh, OpenCode, Pi) get an extra "打开 X 网页版" item, which starts
+     * the web server in a visible session and shows how to reach it; this
+     * screen closes only after that dialog is dismissed. */
     private void showQuickStartDialog(final DistroDef distro, final String container,
                                       final String display,
                                       final List<AiAgentUtils.InstalledAgent> agents) {
-        String[] names = new String[agents.size()];
-        for (int i = 0; i < agents.size(); i++) names[i] = agents.get(i).displayName;
+        List<String> names = new ArrayList<>();
+        List<Runnable> actions = new ArrayList<>();
+        for (final AiAgentUtils.InstalledAgent agent : agents) {
+            names.add(agent.displayName);
+            actions.add(() -> {
+                AiAgentUtils.startAgentSession(DistroActivity.this, agent);
+                finish();
+            });
+            AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
+            if (def != null && def.webKind != AiAgentUtils.WebKind.NONE) {
+                names.add(getString(R.string.aiagents_web_quick_item, agent.displayName));
+                actions.add(() -> AiAgentUtils.startWebSession(DistroActivity.this, agent,
+                    () -> finish()));
+            }
+        }
         new AlertDialog.Builder(this)
             .setTitle(getString(R.string.aiagents_quick_start_title, display))
-            .setItems(names, (dialog, which) -> {
-                AiAgentUtils.startAgentSession(DistroActivity.this, agents.get(which));
-                finish();
-            })
+            .setItems(names.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
             .setNegativeButton(android.R.string.cancel, null)
             .show();
     }
