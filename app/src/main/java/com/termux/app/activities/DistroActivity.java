@@ -239,6 +239,8 @@ public class DistroActivity extends AppCompatActivity {
 
         ensureDistroCommand();
 
+        AiAgentUtils.ensureAiCommand();
+
         mLatestLabel = getString(R.string.distro_version_latest);
 
         mDistroListView = findViewById(R.id.distro_list);
@@ -790,6 +792,12 @@ public class DistroActivity extends AppCompatActivity {
             actions.add(() -> showToolsDialog(distro, container, display));
             items.add(getString(R.string.distro_install_ai_agents_for, display));
             actions.add(() -> openAiAgents(distro, container, display));
+            List<AiAgentUtils.InstalledAgent> quickAgents =
+                AiAgentUtils.detectInstalledAgentsForContainer(container);
+            if (!quickAgents.isEmpty()) {
+                items.add(getString(R.string.distro_quick_start_for, display));
+                actions.add(() -> showQuickStartDialog(distro, container, display, quickAgents));
+            }
         }
         items.add(getString(R.string.distro_install_new_version));
         actions.add(() -> showVersionDialog(distro));
@@ -966,6 +974,24 @@ public class DistroActivity extends AppCompatActivity {
         intent.putExtra(AiAgentsActivity.EXTRA_DISTRO_ID, distro.id);
         intent.putExtra(AiAgentsActivity.EXTRA_DISPLAY_NAME, display);
         startActivity(intent);
+    }
+
+    /** Quick start: list this container's installed agents; tapping one
+     * opens a terminal session that runs it directly, then closes this
+     * screen (same as entering the distro). */
+    private void showQuickStartDialog(final DistroDef distro, final String container,
+                                      final String display,
+                                      final List<AiAgentUtils.InstalledAgent> agents) {
+        String[] names = new String[agents.size()];
+        for (int i = 0; i < agents.size(); i++) names[i] = agents.get(i).displayName;
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_quick_start_title, display))
+            .setItems(names, (dialog, which) -> {
+                AiAgentUtils.startAgentSession(DistroActivity.this, agents.get(which));
+                finish();
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
     }
 
     private void startLoginSession(String container, String display) {
