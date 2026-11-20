@@ -979,7 +979,7 @@ public class DistroActivity extends AppCompatActivity {
     /** Quick start: list this container's installed agents; tapping one
      * opens a terminal session that runs it directly, then closes this
      * screen (same as entering the distro). Web-capable agents
-     * (dsh, OpenCode, Pi) get an extra "打开 X 网页版" item, which starts
+     * (dsh, OpenCode, Pi, Hermes Agent) get an extra "打开 X 网页版" item, which starts
      * the web server in a visible session and shows how to reach it; this
      * screen closes only after that dialog is dismissed. dsh has no
      * terminal entry (upstream documents only `dsh web`), so it lists only
