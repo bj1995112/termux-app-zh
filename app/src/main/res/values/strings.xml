@@ -57,6 +57,9 @@
 
     <string name="title_rename_session">Set session name</string>
     <string name="action_rename_session_confirm">Set</string>
+    <string name="session_menu_rename">Rename session</string>
+    <string name="session_menu_delete">Delete session</string>
+    <string name="session_delete_confirm_message">Delete this session? Any running process will be stopped.</string>
     <string name="title_create_named_session">New named session</string>
     <string name="action_create_named_session_confirm">Create</string>
 
@@ -236,13 +239,6 @@
     <string name="termux_widget_preferences_summary">Preferences for &TERMUX_WIDGET_APP_NAME; app</string>
 
 
-
-    <!-- About Preference -->
-    <string name="about_preference_title">About</string>
-
-    <!-- Donate Preference -->
-    <string name="donate_preference_title">Donate</string>
-
     <!-- Built-in styling chooser (ported from Termux:Styling) -->
     <string name="app_name">Termux:Styling</string>
     <string name="color_prompt">Choose color</string>
@@ -318,11 +314,16 @@
     <string name="aiagents_web_pi_msg">Started in a new session. The first launch downloads the official pi-webapp, so give it a moment. Find the token-bearing local address printed in the session output and open it in your browser; you can also run "npx pi-webapp status" in the session to show the address.</string>
     <string name="aiagents_web_opencode_msg">Address: http://127.0.0.1:4096\nPassword: %1$s\nThe password stays the same every time, so the browser stays signed in after the first login.\nWait until the session shows "server listening", then tap Open browser.</string>
     <string name="aiagents_web_open_browser">Open browser</string>
+    <string name="aiagents_web_restart_server">Restart server</string>
+    <string name="aiagents_web_restart_note">A server is already running. If the password does not work, tap Restart server to restart it with the fixed password. It takes a few seconds; if the browser cannot connect yet, wait and refresh.</string>
+    <string name="aiagents_web_battery_hint">Tip: the web server only stays up while Termux keeps running in the background. If the web UI freezes, set Termux battery to Unrestricted (Settings → Apps → Termux → Battery); some phones freeze background apps otherwise.</string>
     <string name="aiagents_web_session">%1$s Web (%2$s)</string>
     <string name="aiagents_web_script_failed">Failed to write web launch script: %1$s</string>
     <string name="aiagents_web_quick_item">Open %1$s in browser</string>
 
     <string name="prompt_style_title">Command-Line Style</string>
+    <string name="welcome_message_title">Show welcome message at startup</string>
+    <string name="welcome_message_summary">Show the welcome message when a new session starts</string>
     <string name="prompt_theme_section_title">Prompt theme</string>
     <string name="prompt_new_session_note">New sessions pick the theme up automatically.</string>
     <string name="prompt_color_section_title">Prompt colour</string>
