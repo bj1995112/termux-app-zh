@@ -83,10 +83,15 @@ public final class AiAgentUtils {
         /** uv tool metadata: ~/.local/share/uv/tools/aider-chat/.../aider_chat-*.dist-info/METADATA. */
         AIDER_DIST_INFO,
         /** ~/.local/share/claude/versions/<version>/ directory names. */
-        CLAUDE_VERSIONS
+        CLAUDE_VERSIONS,
+        /** ~/.hermes/hermes-agent/install-stamp.json "displayVersion"
+         * (the source-install stamp written by install.sh / `hermes update`;
+         * "0.23.3", or "0.23.3+12.gabc1234" when the checkout sits ahead of
+         * the tag). "unknown" or a missing stamp means no version. */
+        HERMES_STAMP
     }
 
-    /** Which agents can be opened in the phone browser (v1: dsh, OpenCode, Pi only). */
+    /** Which agents can be opened in the phone browser (v1: dsh, OpenCode, Pi, Hermes). */
     public enum WebKind {
         /** No web UI: terminal only. */
         NONE,
@@ -99,7 +104,12 @@ public final class AiAgentUtils {
         /** Official pi-webapp (`npx pi-webapp`): no fixed port, the launcher
          * prints a token-bearing local address, so the app cannot open it
          * by itself (see startWebSession). */
-        PI
+        PI,
+        /** `hermes dashboard`: built-in web UI on fixed port 9119, binds
+         * 127.0.0.1 only and needs no password on loopback, so the app can
+         * open http://127.0.0.1:9119 directly. First run downloads pnpm
+         * and builds the web UI's JavaScript dependencies. */
+        HERMES
     }
 
     /** One AI assistant that can be installed into a container. */
@@ -152,6 +162,19 @@ public final class AiAgentUtils {
     // verified 2026-11-21 against Anthropic docs: the installer is
     // https://claude.ai/install.sh (claude.com/install.sh is a 404), the
     // binary is ~/.local/bin/claude, update is `claude update`, no Node needed.
+    // Hermes Agent facts verified 2026-11-21 against the official repo
+    // (NousResearch/hermes-agent) and docs (hermes-agent.nousresearch.com):
+    // install.sh (2585 lines) clones the repo and bundles Python 3.14 +
+    // Node via its own PM, supports aarch64 (uv aarch64 pin, arm64|aarch64
+    // arch mapping), needs git + curl; the launcher is published to
+    // ~/.local/bin/hermes (hermes_cli/_launchers.py expose_cli) with the
+    // real launcher at ~/.hermes/hermes-agent/.hermes/bin/hermes; the
+    // version comes from ~/.hermes/hermes-agent/install-stamp.json
+    // "displayVersion" (pyproject.toml says "0.0.0", a placeholder);
+    // `hermes dashboard` serves the built-in web UI on 127.0.0.1:9119
+    // (no password on loopback; first run builds the JS deps via pnpm);
+    // update is `hermes update`; the official Termux APT package is
+    // currently broken per the official Termux guide, so it is NOT used.
     public static final List<AgentDef> AGENTS = Arrays.asList(
         new AgentDef("codex", "Codex", R.string.aiagents_desc_codex, false, "codex",
             ".local/bin/codex",
@@ -201,7 +224,22 @@ public final class AiAgentUtils {
             VersionKind.CLAUDE_VERSIONS, null,
             "curl -fsSL https://claude.ai/install.sh | bash",
             "claude update",
-            WebKind.NONE, 0, true)
+            WebKind.NONE, 0, true),
+        new AgentDef("hermes", "Hermes Agent", R.string.aiagents_desc_hermes, false, "hermes",
+            ".local/bin/hermes",
+            new String[]{"root/.local/bin/hermes",
+                "root/.hermes/hermes-agent/.hermes/bin/hermes"},
+            VersionKind.HERMES_STAMP, null,
+            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh"
+                + " && bash /tmp/hermes-install.sh --channel stable --non-interactive"
+                + " --skip-browser --skip-computer-use",
+            // Absolute path: the install script runs in a non-login shell
+            // where ~/.local/bin is not on PATH (AiAgentsActivity exports it
+            // for the install session, but the update must not depend on
+            // that); fall back to the real launcher inside the checkout.
+            "\"$HOME/.local/bin/hermes\" update"
+                + " || \"$HOME/.hermes/hermes-agent/.hermes/bin/hermes\" update",
+            WebKind.HERMES, 9119, true)
     );
 
     /** AgentDef for an id, or null when unknown. */
@@ -348,11 +386,37 @@ public final class AiAgentUtils {
                         new File(rootfs, "root/.local/share/claude/versions"));
                 case AIDER_DIST_INFO:
                     return probeAiderVersion(rootfs);
+                case HERMES_STAMP:
+                    return probeHermesVersion(rootfs);
                 default:
                     return "";
             }
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to probe version for " + def.id, e);
+            return "";
+        }
+    }
+
+    /** Installed Hermes version from the source-install stamp written by
+     * install.sh / `hermes update` at
+     * ~/.hermes/hermes-agent/install-stamp.json ("displayVersion":
+     * "0.23.3", or "0.23.3+12.gabc1234" when the checkout sits ahead of
+     * the tag; "unknown" or a missing/unreadable stamp means no version,
+     * same as agy). pyproject.toml in the checkout is NOT a version
+     * source: it says "0.0.0" (placeholder). */
+    private static String probeHermesVersion(File rootfs) {
+        try {
+            File stamp = new File(rootfs, "root/.hermes/hermes-agent/install-stamp.json");
+            if (!stamp.isFile()) return "";
+            JSONObject json = new JSONObject(DistroUtils.readFile(stamp));
+            String version = json.optString("displayVersion", "");
+            if (version.isEmpty() || "unknown".equals(version)) {
+                version = json.optString("baseVersion", "");
+            }
+            if (version.isEmpty() || "unknown".equals(version)) return "";
+            return version;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read Hermes install stamp", e);
             return "";
         }
     }
@@ -493,7 +557,7 @@ public final class AiAgentUtils {
      * restart is how the dialog password and the running server are
      * brought back in sync.
      *
-     * The first web launch (any of the three agents) also appends a
+     * The first web launch (any of the four agents) also appends a
      * one-time battery hint to the dialog: the server only stays up while
      * Termux keeps running in the background, and some phones (Vivo and
      * other aggressive vendors) freeze Termux when it is backgrounded,
@@ -501,7 +565,7 @@ public final class AiAgentUtils {
      * hint is shown at most once (SharedPreferences flag) and never
      * blocks or delays the launch.
      *
-     * The three agents differ in what the app can open by itself:
+     * The four agents differ in what the app can open by itself:
      * - dsh: `dsh web` serves :3080, but the startup URL carries a fresh
      *   per-start session token, so the app cannot build a working URL.
      *   The dialog tells the user to copy the token URL from the session.
@@ -526,6 +590,19 @@ public final class AiAgentUtils {
      *   stops the launcher from trying to open a browser inside the
      *   container. The launcher may exit after starting its background
      *   service, so the script keeps the session open with a read prompt.
+     * - Hermes: `hermes dashboard` serves the built-in web UI on fixed
+     *   port 9119, binds 127.0.0.1 only and needs no password on
+     *   loopback, so the app opens http://127.0.0.1:9119 directly, like
+     *   OpenCode. The first run downloads pnpm and builds the web UI's
+     *   JavaScript dependencies, so the dialog says to give it a moment.
+     *   The script resolves the `hermes` binary itself (~/.local/bin
+     *   first, the launcher inside the checkout as fallback) because
+     *   ~/.local/bin is not on PATH in the script shell. If a dashboard
+     *   is already listening on 9119 (e.g. the user tapped web launch
+     *   twice), the script prints so and exits instead of starting a
+     *   second one. No restart action in v1: there is no password to
+     *   resync, and `hermes dashboard --stop` can stop a running
+     *   dashboard from a session if ever needed.
      *
      * @param onDialogDismissed run when the explanation dialog is closed
      *        (DistroActivity passes finish() here); null is fine.
@@ -752,6 +829,22 @@ public final class AiAgentUtils {
                     });
                 break;
             }
+            case HERMES: {
+                // Fixed address, no password on loopback: open the browser
+                // directly, like OpenCode. No restart button in v1 (there
+                // is no password to resync).
+                String message = context.getString(R.string.aiagents_web_hermes_msg);
+                if (batteryHint != null) message += "\n\n" + batteryHint;
+                builder.setMessage(message)
+                    .setPositiveButton(R.string.aiagents_web_open_browser, (dialog, which) -> {
+                        if (onStartSession != null) onStartSession.run();
+                        Intent intent = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("http://127.0.0.1:" + def.webPort));
+                        context.startActivity(intent);
+                    })
+                    .setNegativeButton(android.R.string.cancel, null);
+                break;
+            }
             case OPENCODE: {
                 String message = context.getString(R.string.aiagents_web_opencode_msg, webPassword);
                 if (showRestart) {
@@ -853,6 +946,31 @@ public final class AiAgentUtils {
                 s.append("echo \"Pi 网页版服务运行中，关闭此会话即停止。\"\n");
                 s.append("read -r -p \"按回车关闭此会话\"\n");
                 break;
+            case HERMES:
+                s.append("echo \"正在启动 Hermes Agent 网页版（").append(agent.distroDisplay).append("）…\"\n");
+                s.append("echo \"地址：http://127.0.0.1:").append(def.webPort).append("\"\n");
+                s.append("echo \"不需要密码（只监听本机）。第一次启动会先下载 pnpm、编译网页界面，稍等一会。\"\n");
+                // The `hermes` launcher lives in ~/.local/bin, which is not
+                // on PATH in this script's non-login shell, so resolve it
+                // explicitly: the convenience in ~/.local/bin first, the
+                // real launcher inside the checkout as fallback.
+                s.append("HERMES_BIN=\"$HOME/.local/bin/hermes\"\n");
+                s.append("[ -x \"$HERMES_BIN\" ] || HERMES_BIN=\"$HOME/.hermes/hermes-agent/.hermes/bin/hermes\"\n");
+                s.append("[ -x \"$HERMES_BIN\" ] || { echo \"没有找到 hermes，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                // If a dashboard is already listening on the port (e.g. the
+                // user tapped web launch twice), do not start a second one:
+                // just point at the browser instead. No restart action in
+                // v1 (no password to resync); `hermes dashboard --stop`
+                // stops a running dashboard from a session if needed.
+                s.append("if (exec 3<>/dev/tcp/127.0.0.1/").append(def.webPort).append(") 2>/dev/null; then\n");
+                s.append("    echo \"Hermes 网页版已经在运行，直接在浏览器里打开上面的地址即可。\"\n");
+                s.append("    read -r -p \"按回车关闭此会话\"\n");
+                s.append("    exit 0\n");
+                s.append("fi\n");
+                s.append("\"$HERMES_BIN\" dashboard --host 127.0.0.1 --port ").append(def.webPort).append(" --no-open\n");
+                s.append("echo \"Hermes 网页版已停止。\"\n");
+                s.append("read -r -p \"按回车关闭此会话\"\n");
+                break;
             default:
                 break;
         }
@@ -895,6 +1013,8 @@ public final class AiAgentUtils {
         "opencode|OpenCode|usr/local/bin/opencode\n" +
         "aider|Aider|root/.local/bin/aider\n" +
         "claude|Claude Code|root/.local/bin/claude\n" +
+        "hermes|Hermes Agent|root/.local/bin/hermes\n" +
+        "hermes|Hermes Agent|root/.hermes/hermes-agent/.hermes/bin/hermes\n" +
         "'\n" +
         "\n" +
         "usage() {\n" +
@@ -903,10 +1023,11 @@ public final class AiAgentUtils {
         "    echo \"  ai list       同上\"\n" +
         "    echo \"  ai codex      在装有 Codex 的发行版里启动 Codex\"\n" +
         "    echo \"  ai dsh web    启动 dsh 网页版（地址在会话里，带 token）\"\n" +
+        "    echo \"  ai hermes web  打开 Hermes 网页版（http://127.0.0.1:9119）\"\n" +
         "    echo \"  ai dsh      同上（dsh 没有终端入口，只提供网页版）\"\n" +
         "    echo \"  ai -h         显示帮助\"\n" +
-        "    echo \"助手：codex、pi、agy、dsh、opencode、aider、claude\"\n" +
-        "    echo \"网页版：dsh、opencode、pi（ai <助手名> web）\"\n" +
+        "    echo \"助手：codex、pi、agy、dsh、opencode、aider、claude、hermes\"\n" +
+        "    echo \"网页版：dsh、opencode、pi、hermes（ai <助手名> web）\"\n" +
         "}\n" +
         "\n" +
         "# Print one line per installed agent: id|display|container|/absolute/path.\n" +
@@ -947,7 +1068,7 @@ public final class AiAgentUtils {
         "    fi\n" +
         "    printf '%s\\n' \"$installed\" | while IFS='|' read -r id display container path; do\n" +
         "        case \"$id\" in\n" +
-        "            dsh|opencode|pi) tag=\" · 网页版\" ;;\n" +
+        "            dsh|opencode|pi|hermes) tag=\" · 网页版\" ;;\n" +
         "            *) tag=\"\" ;;\n" +
         "        esac\n" +
         "        printf '%s — %s%s\\n' \"$display\" \"$container\" \"$tag\"\n" +
@@ -1036,8 +1157,13 @@ public final class AiAgentUtils {
         "            echo \"地址在会话里（带 token 的链接），复制到浏览器打开；也可以跑 npx pi-webapp status 查看地址。\"\n" +
         "            exec proot-distro login \"$container\" -- bash -c 'PI_WEBAPP_AUTO_OPEN=0 npx -y pi-webapp; echo \"Pi 网页版服务运行中，关闭此会话即停止。\"; read -r -p \"按回车关闭此会话\"'\n" +
         "            ;;\n" +
+        "        hermes)\n" +
+        "            echo \"启动 Hermes Agent 网页版（$container）…\"\n" +
+        "            echo \"地址：http://127.0.0.1:9119，第一次启动会先下载 pnpm、编译网页界面，稍等一会。\"\n" +
+        "            exec proot-distro login \"$container\" -- \"$path\" dashboard --host 127.0.0.1 --port 9119 --no-open \"$@\"\n" +
+        "            ;;\n" +
         "        *)\n" +
-        "            echo \"“$display”没有网页版。带网页版的助手：dsh、opencode、pi。\"\n" +
+        "            echo \"“$display”没有网页版。带网页版的助手：dsh、opencode、pi、hermes。\"\n" +
         "            exit 1\n" +
         "            ;;\n" +
         "    esac\n" +
