@@ -54,8 +54,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class AiAgentsActivity extends AppCompatActivity {
@@ -85,6 +87,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         final AiAgentUtils.AgentDef def;
         boolean installed;
         String version; // "" when unknown
+        String latestVersion; // "" when unknown / not checked yet
         String binPath; // rootfs-relative binary path found, "" when not installed
         boolean selected;
         boolean supported;
@@ -92,6 +95,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         AgentRow(AiAgentUtils.AgentDef def) {
             this.def = def;
             this.version = "";
+            this.latestVersion = "";
             this.binPath = "";
             this.supported = true;
         }
@@ -109,9 +113,15 @@ public class AiAgentsActivity extends AppCompatActivity {
     private ListView mAgentListView;
     private TextView mStatusView;
     private Button mInstallButton;
+    private Button mCheckUpdatesButton;
     private ArrayAdapter<AgentRow> mAdapter;
     private final List<AgentRow> mRows = new ArrayList<>();
     private boolean mDetecting;
+    private boolean mCheckingUpdates;
+
+    /** Latest versions from the last check (agent id -> version), loaded
+     * from the cache on start and refreshed by checkUpdatesInBackground. */
+    private final Map<String, String> mLatestVersions = new HashMap<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -135,6 +145,8 @@ public class AiAgentsActivity extends AppCompatActivity {
         mAgentListView = findViewById(R.id.aiagents_list);
         mStatusView = findViewById(R.id.aiagents_status);
         mInstallButton = findViewById(R.id.aiagents_install_button);
+        mCheckUpdatesButton = findViewById(R.id.aiagents_check_updates_button);
+        mCheckUpdatesButton.setOnClickListener(v -> checkUpdatesInBackground());
         mAdapter = new ArrayAdapter<AgentRow>(this, R.layout.aiagents_agent_row, mRows) {
             @Override
             public View getView(int position, View convertView, ViewGroup parent) {
@@ -179,13 +191,20 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return;
             }
             if (row.installed) {
-                showUpdateDialog(row.def);
+                showUpdateDialog(row);
                 return;
             }
             row.selected = !row.selected;
             mAdapter.notifyDataSetChanged();
         });
         mInstallButton.setOnClickListener(v -> installSelected());
+
+        // Cached latest versions (checked within the last day) apply to
+        // the rows as soon as detection finishes, without re-fetching.
+        AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
+        if (AiAgentUtils.isUpdateCacheValid(cache.checkedAt)) {
+            mLatestVersions.putAll(cache.latest);
+        }
 
         detectAgentsInBackground();
     }
@@ -210,6 +229,10 @@ public class AiAgentsActivity extends AppCompatActivity {
         }
         if (row.installed) {
             if (row.version != null && !row.version.isEmpty()) {
+                if (AiAgentUtils.isNewerVersionAvailable(row.version, row.latestVersion)) {
+                    return desc + "\n" + getString(R.string.aiagents_installed_with_update,
+                        row.version, row.latestVersion);
+                }
                 return desc + "\n" + getString(R.string.aiagents_installed, row.version);
             }
             return desc + "\n" + getString(R.string.aiagents_installed_unknown);
@@ -251,9 +274,11 @@ public class AiAgentsActivity extends AppCompatActivity {
                     mDetecting = false;
                     mRows.clear();
                     mRows.addAll(detected);
+                    applyLatestVersionsToRows();
                     mAdapter.notifyDataSetChanged();
                     int installed = 0;
                     for (AgentRow row : mRows) if (row.installed) installed++;
+                    mCheckUpdatesButton.setEnabled(installed > 0 && !mCheckingUpdates);
                     updateStatus(getString(R.string.aiagents_status_summary, installed, mRows.size()));
                 });
             }
@@ -266,6 +291,86 @@ public class AiAgentsActivity extends AppCompatActivity {
         if (def.needsNode && !NODE_VERIFIED.contains(mDistroId)) return false;
         if ("agy".equals(def.id) && "alpine".equals(mDistroId)) return false;
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Update detection (latest versions, cached one day)
+    // ------------------------------------------------------------------
+
+    /** Copy the known latest versions (cache + last check) into the
+     * current rows, matched by agent id. Runs on the UI thread; called
+     * after detection replaces mRows and after a check finishes. */
+    private void applyLatestVersionsToRows() {
+        for (AgentRow row : mRows) {
+            String latest = mLatestVersions.get(row.def.id);
+            row.latestVersion = latest == null ? "" : latest;
+        }
+    }
+
+    /** Check for updates of the agents installed in this container.
+     * Only runs on an explicit tap (never automatically): the button is
+     * disabled while a check is running and when nothing is installed.
+     * Fetches run on a background thread; rows are matched by agent id
+     * on the UI thread, so a detection running in parallel cannot leave
+     * stale row references behind. Failures are silent — a failed agent
+     * keeps its cached value and shows no badge. */
+    private void checkUpdatesInBackground() {
+        if (mCheckingUpdates) return;
+        List<AiAgentUtils.AgentDef> installed = new ArrayList<>();
+        for (AgentRow row : mRows) {
+            if (row.installed) installed.add(row.def);
+        }
+        if (installed.isEmpty()) return;
+        mCheckingUpdates = true;
+        mCheckUpdatesButton.setEnabled(false);
+        updateStatus(getString(R.string.aiagents_checking_updates));
+        new Thread() {
+            @Override
+            public void run() {
+                Map<String, String> fetched = new HashMap<>();
+                for (AiAgentUtils.AgentDef def : installed) {
+                    String latest = AiAgentUtils.fetchLatestVersion(def, mDistroId);
+                    if (!latest.isEmpty()) fetched.put(def.id, latest);
+                }
+                boolean anyFetched = !fetched.isEmpty();
+                final Map<String, String> merged;
+                if (anyFetched) {
+                    merged = new HashMap<>();
+                    AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
+                    merged.putAll(cache.latest);
+                    merged.putAll(fetched);
+                    AiAgentUtils.saveUpdateCache(merged);
+                } else {
+                    merged = null;
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    mCheckingUpdates = false;
+                    if (merged != null) {
+                        mLatestVersions.clear();
+                        mLatestVersions.putAll(merged);
+                    }
+                    applyLatestVersionsToRows();
+                    mAdapter.notifyDataSetChanged();
+                    int installedCount = 0;
+                    boolean anyUpdate = false;
+                    for (AgentRow row : mRows) {
+                        if (!row.installed) continue;
+                        installedCount++;
+                        if (AiAgentUtils.isNewerVersionAvailable(row.version, row.latestVersion)) {
+                            anyUpdate = true;
+                        }
+                    }
+                    mCheckUpdatesButton.setEnabled(installedCount > 0);
+                    updateStatus(getString(R.string.aiagents_status_summary,
+                        installedCount, mRows.size()));
+                    if (anyFetched && !anyUpdate) {
+                        Toast.makeText(AiAgentsActivity.this,
+                            R.string.aiagents_no_updates, Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        }.start();
     }
 
     // ------------------------------------------------------------------
@@ -284,7 +389,8 @@ public class AiAgentsActivity extends AppCompatActivity {
         startAgentSession(selected, false);
     }
 
-    private void showUpdateDialog(final AiAgentUtils.AgentDef def) {
+    private void showUpdateDialog(final AgentRow row) {
+        final AiAgentUtils.AgentDef def = row.def;
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
             .setTitle(getString(R.string.aiagents_update_title, def.displayName))
             .setNegativeButton(android.R.string.cancel, null)
@@ -293,12 +399,15 @@ public class AiAgentsActivity extends AppCompatActivity {
                 single.add(def);
                 startAgentSession(single, true);
             });
-        if ("dsh".equals(def.id)) {
-            builder.setMessage(getString(R.string.aiagents_update_confirm, def.displayName)
-                + "\n" + getString(R.string.aiagents_update_dsh_note));
-        } else {
-            builder.setMessage(getString(R.string.aiagents_update_confirm, def.displayName));
+        String message = getString(R.string.aiagents_update_confirm, def.displayName);
+        if (AiAgentUtils.isNewerVersionAvailable(row.version, row.latestVersion)) {
+            message += "\n" + getString(R.string.aiagents_update_new_version,
+                row.latestVersion, row.version);
         }
+        if ("dsh".equals(def.id)) {
+            message += "\n" + getString(R.string.aiagents_update_dsh_note);
+        }
+        builder.setMessage(message);
         builder.show();
     }
 
@@ -376,6 +485,25 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("  [ -n \"$2\" ] && [ -x \"$HOME/$2\" ] && return 0\n");
         s.append("  return 1\n");
         s.append("}\n");
+        s.append("record_agy_version() {\n");
+        s.append("  # The agy installer prints the version it installs but writes no\n");
+        s.append("  # version file, so the \"AI 助手\" list cannot tell an installed agy\n");
+        s.append("  # from its latest version. Record what the release server reports\n");
+        s.append("  # right after a good install, in the same .termux-aiagents dir as\n");
+        s.append("  # the OpenCode web password. Only called from the installed branch\n");
+        s.append("  # below: a failed install must not claim the new version.\n");
+        s.append("  manifest_url=\"https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json\"\n");
+        s.append("  if [ -f /lib/libc.musl-aarch64.so.1 ] || ldd /bin/ls 2>/dev/null | grep -q musl; then\n");
+        s.append("    manifest_url=\"https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64_musl.json\"\n");
+        s.append("  fi\n");
+        s.append("  ver=$(curl -fsSL --max-time 15 \"$manifest_url\" 2>/dev/null | grep -oE '\"version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' | head -1 | cut -d'\"' -f4)\n");
+        s.append("  case \"$ver\" in\n");
+        s.append("    [0-9]*.[0-9]*)\n");
+        s.append("      mkdir -p \"$HOME/.termux-aiagents/versions\" 2>/dev/null\n");
+        s.append("      printf '%s' \"$ver\" > \"$HOME/.termux-aiagents/versions/agy\" 2>/dev/null || true\n");
+        s.append("      ;;\n");
+        s.append("  esac\n");
+        s.append("}\n");
         s.append(ensureCurlCommand(mDistroId)).append("\n");
         boolean needsNode = false;
         for (AiAgentUtils.AgentDef def : agents) if (def.needsNode) needsNode = true;
@@ -423,6 +551,9 @@ public class AiAgentsActivity extends AppCompatActivity {
                 .append(def.homeBinPath).append("\"; then\n");
             s.append("    echo \"").append(def.displayName).append(" 已装好\"\n");
             s.append("    ").append(def.command).append(" --version 2>/dev/null || true\n");
+            if ("agy".equals(def.id)) {
+                s.append("    record_agy_version\n");
+            }
             s.append("  else\n");
             s.append("    failed=\"$failed ").append(def.displayName).append("\"\n");
             s.append("  fi\n");
