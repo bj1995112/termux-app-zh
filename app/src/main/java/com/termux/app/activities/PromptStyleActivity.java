@@ -43,7 +43,6 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.ForegroundColorSpan;
-import android.util.AtomicFile;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.LayoutInflater;
@@ -66,7 +65,6 @@ import com.termux.shared.theme.NightMode;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -87,8 +85,6 @@ public class PromptStyleActivity extends AppCompatActivity {
 
     private static final String ASSET_NAME = "prompt-theme-base.sh";
     private static final String PROMPT_THEME_FILE_NAME = "prompt-theme.sh";
-    private static final String BASHRC_MARKER_BEGIN = "# BEGIN TERMUX_PROMPT_THEME";
-    private static final String BASHRC_MARKER_END = "# END TERMUX_PROMPT_THEME";
 
     private static final int THEME_COUNT = 24;
 
@@ -229,10 +225,12 @@ public class PromptStyleActivity extends AppCompatActivity {
         mAccent = 0; // a new theme starts with its own default colour
         mPrefs.edit().putInt(KEY_THEME_ID, mThemeId)
             .putInt(KEY_ACCENT, mAccent).apply();
-        if (writePromptThemeFile()) {
+        String content = writePromptThemeFile();
+        if (content != null) {
             Toast.makeText(this,
                 getString(R.string.prompt_theme_selected, getString(THEME_NAME_RES[themeId - 1])),
                 Toast.LENGTH_SHORT).show();
+            syncThemeToDistrosAsync(content);
         }
         buildThemeRows();
         buildColorGrid();
@@ -273,11 +271,25 @@ public class PromptStyleActivity extends AppCompatActivity {
         if (code == effectiveAccent()) return;
         mAccent = code;
         mPrefs.edit().putInt(KEY_ACCENT, mAccent).apply();
-        if (writePromptThemeFile()) {
+        String content = writePromptThemeFile();
+        if (content != null) {
             Toast.makeText(this, R.string.prompt_applied, Toast.LENGTH_SHORT).show();
+            syncThemeToDistrosAsync(content);
         }
         buildThemeRows();
         buildColorGrid();
+    }
+
+    /** Sync the new theme to all installed distros on a background thread. */
+    private void syncThemeToDistrosAsync(final String content) {
+        new Thread(() -> {
+            int synced = PromptThemeSync.syncThemeToAllDistros(content);
+            if (synced > 0) {
+                runOnUiThread(() -> Toast.makeText(PromptStyleActivity.this,
+                    getString(R.string.prompt_sync_distros, synced),
+                    Toast.LENGTH_SHORT).show());
+            }
+        }).start();
     }
 
     // ---------- terminal display options ----------
@@ -471,6 +483,8 @@ public class PromptStyleActivity extends AppCompatActivity {
         mPrefs.edit().putInt(KEY_THEME_ID, mThemeId)
             .putInt(KEY_ACCENT, mAccent).apply();
         removePromptTheme();
+        // Also remove the theme from every installed distro (background thread).
+        new Thread(() -> PromptThemeSync.removeThemeFromAllDistros()).start();
         writeTermuxProperty(TermuxPropertyConstants.KEY_TERMINAL_CURSOR_STYLE, "block");
         writeTermuxProperty(TermuxPropertyConstants.KEY_TERMINAL_CURSOR_BLINK_RATE, "0");
         writeTermuxProperty(TermuxPropertyConstants.KEY_TERMINAL_MARGIN_HORIZONTAL, "3");
@@ -505,50 +519,54 @@ public class PromptStyleActivity extends AppCompatActivity {
         }
     }
 
-    /** Write ~/.termux/prompt-theme.sh for the current theme + colour. */
-    private boolean writePromptThemeFile() {
+    /** The substituted asset text for the current theme + colour, or null when the asset cannot be read. */
+    private String buildThemeContent() {
         String asset = readAssetText();
-        if (asset == null) {
+        if (asset == null) return null;
+        return asset.replace("__THEME_ID__", String.valueOf(mThemeId))
+            .replace("__ACCENT__", String.valueOf(effectiveAccent()));
+    }
+
+    /**
+     * Write ~/.termux/prompt-theme.sh for the current theme + colour.
+     * Returns the written content, or null on failure. Callers sync the
+     * returned content to the installed distros.
+     */
+    private String writePromptThemeFile() {
+        String content = buildThemeContent();
+        if (content == null) {
             Toast.makeText(this, getString(R.string.prompt_write_failed, ASSET_NAME),
                 Toast.LENGTH_LONG).show();
-            return false;
+            return null;
         }
-        String content = asset.replace("__THEME_ID__", String.valueOf(mThemeId))
-            .replace("__ACCENT__", String.valueOf(effectiveAccent()));
         File termuxDir = TermuxConstants.TERMUX_DATA_HOME_DIR;
         if (!(termuxDir.isDirectory() || termuxDir.mkdirs())) {
             Toast.makeText(this, getString(R.string.prompt_write_failed,
                     termuxDir.getAbsolutePath()), Toast.LENGTH_LONG).show();
-            return false;
+            return null;
         }
         File themeFile = new File(termuxDir, PROMPT_THEME_FILE_NAME);
-        if (!writeFileAtomically(themeFile, content)) {
+        if (!PromptThemeSync.writeFileAtomically(themeFile, content)) {
             Toast.makeText(this, getString(R.string.prompt_write_failed,
                     themeFile.getAbsolutePath()), Toast.LENGTH_LONG).show();
-            return false;
+            return null;
         }
-        return ensureBashrcMarker();
+        if (!ensureBashrcMarker()) {
+            Toast.makeText(this, getString(R.string.prompt_write_failed,
+                    new File(TermuxConstants.TERMUX_HOME_DIR, ".bashrc").getAbsolutePath()),
+                Toast.LENGTH_LONG).show();
+            return null;
+        }
+        return content;
     }
 
     /** Append the guarded source block to ~/.bashrc once, if not present. */
     private boolean ensureBashrcMarker() {
         File bashrc = new File(TermuxConstants.TERMUX_HOME_DIR, ".bashrc");
-        String content = readFileOrEmpty(bashrc);
-        if (content.contains(BASHRC_MARKER_BEGIN)) return true;
-        StringBuilder builder = new StringBuilder(content);
-        if (builder.length() > 0 && builder.charAt(builder.length() - 1) != '\n') {
-            builder.append('\n');
+        if (PromptThemeSync.readFileOrEmpty(bashrc).contains(PromptThemeSync.BASHRC_MARKER_BEGIN)) {
+            return true;
         }
-        builder.append("# termux-app-zh prompt theme (managed, do not edit between the markers)\n");
-        builder.append(BASHRC_MARKER_BEGIN).append('\n');
-        builder.append("[ -f \"$HOME/.termux/prompt-theme.sh\" ] && . \"$HOME/.termux/prompt-theme.sh\"\n");
-        builder.append(BASHRC_MARKER_END).append('\n');
-        if (!writeFileAtomically(bashrc, builder.toString())) {
-            Toast.makeText(this, getString(R.string.prompt_write_failed,
-                    bashrc.getAbsolutePath()), Toast.LENGTH_LONG).show();
-            return false;
-        }
-        return true;
+        return PromptThemeSync.ensureBashrcMarker(bashrc);
     }
 
     /** Delete prompt-theme.sh and strip the marker block from ~/.bashrc. */
@@ -557,26 +575,7 @@ public class PromptStyleActivity extends AppCompatActivity {
         if (themeFile.isFile() && !themeFile.delete()) {
             Log.w(LOG_TAG, "Failed to delete " + themeFile.getAbsolutePath());
         }
-        File bashrc = new File(TermuxConstants.TERMUX_HOME_DIR, ".bashrc");
-        String content = readFileOrEmpty(bashrc);
-        if (!content.contains(BASHRC_MARKER_BEGIN)) return;
-        String[] lines = content.split("\n", -1);
-        StringBuilder builder = new StringBuilder();
-        boolean inBlock = false;
-        for (String line : lines) {
-            if (line.equals(BASHRC_MARKER_BEGIN)) {
-                inBlock = true;
-                continue;
-            }
-            if (inBlock) {
-                if (line.equals(BASHRC_MARKER_END)) inBlock = false;
-                continue;
-            }
-            // Also drop the managed comment line directly above the block.
-            if (line.startsWith("# termux-app-zh prompt theme (managed,")) continue;
-            builder.append(line).append('\n');
-        }
-        writeFileAtomically(bashrc, builder.toString());
+        PromptThemeSync.removeBashrcMarker(new File(TermuxConstants.TERMUX_HOME_DIR, ".bashrc"));
     }
 
     /**
@@ -637,38 +636,14 @@ public class PromptStyleActivity extends AppCompatActivity {
         sendBroadcast(reloadIntent);
     }
 
-    // ---------- small file helpers (same AtomicFile pattern as TermuxStyleActivity) ----------
+    // ---------- small file helpers (shared implementation in PromptThemeSync) ----------
 
     private String readFileOrEmpty(File file) {
-        if (!file.isFile()) return "";
-        try {
-            byte[] bytes = new byte[(int) file.length()];
-            try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
-                int read = 0;
-                while (read < bytes.length) {
-                    int n = in.read(bytes, read, bytes.length - read);
-                    if (n == -1) break;
-                    read += n;
-                }
-            }
-            return new String(bytes, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            Log.w(LOG_TAG, "Failed to read " + file.getAbsolutePath(), e);
-            return "";
-        }
+        return PromptThemeSync.readFileOrEmpty(file);
     }
 
     private boolean writeFileAtomically(File file, String content) {
-        try {
-            AtomicFile atomicFile = new AtomicFile(file);
-            FileOutputStream out = atomicFile.startWrite();
-            out.write(content.getBytes(StandardCharsets.UTF_8));
-            atomicFile.finishWrite(out);
-            return true;
-        } catch (IOException e) {
-            Log.w(LOG_TAG, "Failed to write " + file.getAbsolutePath(), e);
-            return false;
-        }
+        return PromptThemeSync.writeFileAtomically(file, content);
     }
 
     // ---------- PS1 preview rendering ----------
