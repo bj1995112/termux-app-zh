@@ -37,6 +37,7 @@ import com.termux.shared.android.PermissionUtils;
 import com.termux.shared.data.DataUtils;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY;
+import com.termux.app.activities.DistroActivity;
 import com.termux.app.activities.HelpActivity;
 import com.termux.app.activities.SettingsActivity;
 import com.termux.app.activities.TermuxStyleActivity;
@@ -249,6 +250,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setNewSessionButtonView();
 
         setToggleKeyboardView();
+
+        setDistroButtonView();
+
+        DistroActivity.ensureDistroCommand();
 
         registerForContextMenu(mTerminalView);
 
@@ -590,6 +595,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         findViewById(R.id.toggle_keyboard_button).setOnLongClickListener(v -> {
             toggleTerminalToolbar();
             return true;
+        });
+    }
+
+    private void setDistroButtonView() {
+        findViewById(R.id.distro_button).setOnClickListener(v -> {
+            ActivityUtils.startActivity(this, new Intent(this, DistroActivity.class));
+            getDrawer().closeDrawers();
         });
     }
 
