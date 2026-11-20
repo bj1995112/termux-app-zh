@@ -20,8 +20,10 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.RelativeLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.termux.R;
@@ -38,6 +40,7 @@ import com.termux.shared.data.DataUtils;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY;
 import com.termux.app.activities.DistroActivity;
+import com.termux.app.activities.DistroUtils;
 import com.termux.app.activities.HelpActivity;
 import com.termux.app.activities.SettingsActivity;
 import com.termux.app.activities.TermuxStyleActivity;
@@ -66,6 +69,7 @@ import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.viewpager.widget.ViewPager;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * A terminal emulator activity.
@@ -252,6 +256,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setToggleKeyboardView();
 
         setDistroButtonView();
+
+        setInstalledDistrosView();
 
         DistroActivity.ensureDistroCommand();
 
@@ -603,6 +609,66 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             ActivityUtils.startActivity(this, new Intent(this, DistroActivity.class));
             getDrawer().closeDrawers();
         });
+    }
+
+    /** Installed-distros section in the drawer: rebuild on open, tap to enter. */
+    private void setInstalledDistrosView() {
+        getDrawer().addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+            @Override
+            public void onDrawerOpened(View drawerView) {
+                refreshInstalledDistrosInDrawer();
+            }
+        });
+        refreshInstalledDistrosInDrawer();
+    }
+
+    private void refreshInstalledDistrosInDrawer() {
+        LinearLayout container = findViewById(R.id.installed_distros_container);
+        LinearLayout rows = findViewById(R.id.installed_distros_rows);
+        if (container == null || rows == null) return;
+        rows.removeAllViews();
+        List<DistroUtils.InstalledDistro> installed = DistroUtils.getInstalledDistros();
+        if (installed.isEmpty()) {
+            container.setVisibility(View.GONE);
+            return;
+        }
+        container.setVisibility(View.VISIBLE);
+        int shown = Math.min(installed.size(), DistroUtils.MAX_DRAWER_DISTRO_ROWS);
+        for (int i = 0; i < shown; i++) {
+            final DistroUtils.InstalledDistro distro = installed.get(i);
+            TextView row = (TextView) getLayoutInflater()
+                .inflate(R.layout.item_terminal_sessions_list, rows, false);
+            row.setText(distro.display);
+            row.setOnClickListener(v -> {
+                getDrawer().closeDrawers();
+                DistroUtils.startLoginSession(TermuxActivity.this, distro.container, distro.display);
+            });
+            row.setLongClickable(true);
+            row.setOnLongClickListener(v -> {
+                openDistroForContainer(distro.container);
+                return true;
+            });
+            rows.addView(row);
+        }
+        if (installed.size() > DistroUtils.MAX_DRAWER_DISTRO_ROWS) {
+            TextView moreRow = (TextView) getLayoutInflater()
+                .inflate(R.layout.item_terminal_sessions_list, rows, false);
+            moreRow.setText(getString(R.string.distro_more_in_drawer,
+                installed.size() - DistroUtils.MAX_DRAWER_DISTRO_ROWS));
+            moreRow.setOnClickListener(v -> {
+                ActivityUtils.startActivity(this, new Intent(this, DistroActivity.class));
+                getDrawer().closeDrawers();
+            });
+            rows.addView(moreRow);
+        }
+    }
+
+    /** Long-press on a drawer distro row: open DistroActivity at that distro's options dialog. */
+    private void openDistroForContainer(String container) {
+        Intent intent = new Intent(this, DistroActivity.class);
+        intent.putExtra(DistroActivity.EXTRA_CONTAINER_NAME, container);
+        ActivityUtils.startActivity(this, intent);
+        getDrawer().closeDrawers();
     }
 
 
