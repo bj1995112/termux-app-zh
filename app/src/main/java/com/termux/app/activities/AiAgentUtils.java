@@ -39,11 +39,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 
 public final class AiAgentUtils {
 
@@ -191,6 +191,14 @@ public final class AiAgentUtils {
             if (def.id.equals(id)) return def;
         }
         return null;
+    }
+
+    /** Whether the agent has a web UI (dsh, OpenCode, Pi). TermuxActivity
+     * lives in another package and cannot read AgentDef.webKind directly,
+     * so the drawer menu asks here. */
+    public static boolean hasWeb(String id) {
+        AgentDef def = findDef(id);
+        return def != null && def.webKind != WebKind.NONE;
     }
 
     /** One installed agent inside one installed container. */
@@ -453,11 +461,18 @@ public final class AiAgentUtils {
      *   The dialog tells the user to copy the token URL from the session.
      * - OpenCode (v2): there is NO `opencode web` command in v2. The web
      *   UI is served by `opencode serve --port 4096`, password-protected.
-     *   The app generates a random password per launch, passes it via
-     *   OPENCODE_PASSWORD, shows it in the dialog, and opens
+     *   The password is stable per container (see getOrCreateWebPassword):
+     *   it must not change between launches, because the web UI signs in
+     *   with a session cookie and changing the server password signs
+     *   every browser session out (dev.opencode.ai/docs/cli/web) — a
+     *   fresh password per launch is what made the browser show
+     *   "已从此服务器退出登录" right after a correct login. The app
+     *   passes it via OPENCODE_PASSWORD (and OPENCODE_SERVER_PASSWORD as
+     *   a fallback), shows it in the dialog, and opens
      *   http://127.0.0.1:4096 with an ACTION_VIEW intent; the user types
-     *   the password into the web UI. If the password login ever fails,
-     *   the fallback is `opencode pair` in the session (one-time link).
+     *   the password into the web UI once and stays signed in.
+     *   (`opencode pair` is NOT a fallback here: it needs the shared
+     *   background service, not a standalone `opencode serve`.)
      * - Pi: the official pi-webapp has no fixed port; the launcher prints
      *   a token-bearing local address, so the app cannot build a URL.
      *   The dialog tells the user to copy the address from the session
@@ -469,13 +484,76 @@ public final class AiAgentUtils {
      * @param onDialogDismissed run when the explanation dialog is closed
      *        (DistroActivity passes finish() here); null is fine.
      */
+    /** Rootfs-relative path of a container's stable OpenCode web password. */
+    private static final String OPENCODE_WEB_PASSWORD_REL_PATH =
+        "root/.termux-aiagents/opencode-web-password";
+
+    /** 12 lowercase hex chars from a cryptographic RNG. */
+    private static String newRandomWebPassword() {
+        byte[] bytes = new byte[6];
+        new SecureRandom().nextBytes(bytes);
+        final char[] hex = "0123456789abcdef".toCharArray();
+        StringBuilder s = new StringBuilder(12);
+        for (byte b : bytes) {
+            s.append(hex[(b >> 4) & 0xF]);
+            s.append(hex[b & 0xF]);
+        }
+        return s.toString();
+    }
+
+    /**
+     * Returns this container's stable OpenCode web password, creating and
+     * storing it on first use. The password must not change between
+     * launches: the web UI signs in with a session cookie, and changing
+     * the server password signs every browser session out
+     * (dev.opencode.ai/docs/cli/web). It is stored in the container
+     * rootfs, so it survives as long as the container does. If the
+     * rootfs cannot be found, or the stored file is empty, or the write
+     * fails, a fresh random password is returned for this call only and
+     * the launch still works exactly as before.
+     */
+    private static String getOrCreateWebPassword(Context context, String container) {
+        String fallback = newRandomWebPassword();
+        File rootfs = DistroUtils.containerRootfs(container);
+        if (rootfs == null) return fallback;
+        File passwordFile = new File(rootfs, OPENCODE_WEB_PASSWORD_REL_PATH);
+        try {
+            if (passwordFile.isFile()) {
+                String stored = DistroUtils.readFile(passwordFile).trim();
+                if (!stored.isEmpty()) return stored;
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read stored OpenCode web password", e);
+        }
+        String password = newRandomWebPassword();
+        try {
+            File parent = passwordFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                return fallback;
+            }
+            try (FileOutputStream out = new FileOutputStream(passwordFile)) {
+                out.write(password.getBytes(StandardCharsets.UTF_8));
+            }
+            passwordFile.setReadable(false, false);
+            passwordFile.setReadable(true, true);
+            passwordFile.setWritable(false, false);
+            passwordFile.setWritable(true, true);
+            passwordFile.setExecutable(false, false);
+            return password;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to store OpenCode web password", e);
+            passwordFile.delete();
+            return fallback;
+        }
+    }
+
     public static void startWebSession(final Context context, final InstalledAgent agent,
                                        final Runnable onDialogDismissed) {
         final AgentDef def = findDef(agent.agentId);
         if (def == null || def.webKind == WebKind.NONE) return;
         final String webPassword;
         if (def.webKind == WebKind.OPENCODE) {
-            webPassword = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+            webPassword = getOrCreateWebPassword(context, agent.container);
         } else {
             webPassword = null;
         }
@@ -584,6 +662,17 @@ public final class AiAgentUtils {
                 s.append("echo \"密码：").append(webPassword).append("（也在手机弹出的对话框里）\"\n");
                 s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("export OPENCODE_PASSWORD=\"").append(webPassword).append("\"\n");
+                s.append("export OPENCODE_SERVER_PASSWORD=\"").append(webPassword).append("\"\n");
+                // If a server is already listening on the port (e.g. the
+                // user tapped web launch twice), do not start a second one:
+                // it would fail to bind and the session would exit. The
+                // password is stable, so the running server already
+                // accepts it — just point at the browser instead.
+                s.append("if (exec 3<>/dev/tcp/127.0.0.1/").append(def.webPort).append(") 2>/dev/null; then\n");
+                s.append("    echo \"OpenCode 网页版已经在运行，密码不变，直接在浏览器里打开上面的地址登录即可。\"\n");
+                s.append("    read -r -p \"按回车关闭此会话\"\n");
+                s.append("    exit 0\n");
+                s.append("fi\n");
                 s.append("opencode serve --hostname 127.0.0.1 --port ").append(def.webPort).append("\n");
                 break;
             case PI:
