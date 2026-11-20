@@ -22,8 +22,6 @@
 package com.termux.app.activities;
 
 import android.app.AlertDialog;
-import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.util.AtomicFile;
 import android.util.Log;
@@ -39,11 +37,8 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.termux.R;
-import com.termux.app.TermuxService;
 import com.termux.shared.activity.media.AppCompatActivityUtils;
-import com.termux.shared.shell.command.ExecutionCommand;
 import com.termux.shared.termux.TermuxConstants;
-import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_SERVICE;
 import com.termux.shared.theme.NightMode;
 
 import org.json.JSONArray;
@@ -52,7 +47,6 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -77,8 +71,9 @@ public class DistroActivity extends AppCompatActivity {
 
     private static final String LOG_TAG = "DistroActivity";
 
-    /** Version list cache file, under ~/.termux/. */
-    private static final String CACHE_FILE_NAME = "distro-list.json";
+    /** Intent extra: container name whose options dialog opens automatically
+     * (drawer long-press). */
+    public static final String EXTRA_CONTAINER_NAME = "com.termux.distro.container_name";
 
     private static final int DOCKER_HUB_CONNECT_TIMEOUT_MS = 15000;
     private static final int DOCKER_HUB_READ_TIMEOUT_MS = 30000;
@@ -158,7 +153,7 @@ public class DistroActivity extends AppCompatActivity {
         VersionOption(String display, String imageRef, String updated) {
             this.display = display;
             this.imageRef = imageRef;
-            this.container = containerNameForImageRef(imageRef);
+            this.container = DistroUtils.containerNameForImageRef(imageRef);
             this.updated = updated != null ? updated : "";
         }
     }
@@ -272,6 +267,8 @@ public class DistroActivity extends AppCompatActivity {
 
         loadCachedVersions();
         refreshInstalledContainers();
+        String showContainer = getIntent().getStringExtra(EXTRA_CONTAINER_NAME);
+        if (showContainer != null) showDistroDialogForContainer(showContainer);
         if (mCacheUpdatedAt > 0) {
             updateListRows(getString(R.string.distro_status_updated, formatTime(mCacheUpdatedAt)));
         } else {
@@ -313,7 +310,7 @@ public class DistroActivity extends AppCompatActivity {
             File commandFile = new File(binDir, DISTRO_COMMAND_FILE_NAME);
             String existing = null;
             if (commandFile.isFile()) {
-                existing = readFile(commandFile);
+                existing = DistroUtils.readFile(commandFile);
             }
             if (DISTRO_COMMAND_CONTENT.equals(existing)) return;
             try (FileOutputStream out = new FileOutputStream(commandFile)) {
@@ -327,50 +324,13 @@ public class DistroActivity extends AppCompatActivity {
         }
     }
 
-    private static String readFile(File file) throws IOException {
-        try (FileInputStream in = new FileInputStream(file)) {
-            byte[] buffer = new byte[(int) file.length()];
-            int read = 0;
-            while (read < buffer.length) {
-                int n = in.read(buffer, read, buffer.length - read);
-                if (n == -1) break;
-                read += n;
-            }
-            return new String(buffer, 0, read, StandardCharsets.UTF_8);
-        }
-    }
-
     // ------------------------------------------------------------------
     // Installed containers
     // ------------------------------------------------------------------
 
     /** Installed containers, from the proot-distro v5 containers dir (plus the legacy dir). */
     private void refreshInstalledContainers() {
-        Set<String> installed = new HashSet<>();
-        // v5: $PREFIX/var/lib/proot-distro/containers/<name>/rootfs/
-        collectContainers(
-            new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH, "lib/proot-distro/containers"),
-            installed, true);
-        // Legacy layout (pre-v5, migrated on first login): .../installed-rootfs/<name>/
-        // is the rootfs itself, so any directory counts.
-        collectContainers(
-            new File(TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH, "lib/proot-distro/installed-rootfs"),
-            installed, false);
-        mInstalledContainers = installed;
-    }
-
-    private static void collectContainers(File parentDir, Set<String> out, boolean rootfsIsChild) {
-        if (parentDir == null || !parentDir.isDirectory()) return;
-        File[] children = parentDir.listFiles();
-        if (children == null) return;
-        for (File child : children) {
-            if (!child.isDirectory()) continue;
-            // A container only counts as installed once its rootfs exists, so a
-            // half-finished install does not show up as installed.
-            if (!rootfsIsChild || new File(child, "rootfs").isDirectory()) {
-                out.add(child.getName());
-            }
-        }
+        mInstalledContainers = DistroUtils.scanInstalledContainers();
     }
 
     private List<String> installedContainersFor(DistroDef distro) {
@@ -395,10 +355,10 @@ public class DistroActivity extends AppCompatActivity {
     // ------------------------------------------------------------------
 
     private void loadCachedVersions() {
-        File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, CACHE_FILE_NAME);
+        File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, DistroUtils.CACHE_FILE_NAME);
         if (!cacheFile.isFile()) return;
         try {
-            JSONObject root = new JSONObject(readFile(cacheFile));
+            JSONObject root = new JSONObject(DistroUtils.readFile(cacheFile));
             mCacheUpdatedAt = root.optLong("updatedAt", 0);
             JSONObject versions = root.optJSONObject("versions");
             if (versions == null) return;
@@ -416,12 +376,9 @@ public class DistroActivity extends AppCompatActivity {
                 }
                 if (!options.isEmpty()) {
                     mVersions.put(distro.id, options);
-                    for (VersionOption versionOption : options) {
-                        mContainerDisplayNames.put(versionOption.container,
-                            distro.displayName + " " + versionOption.display);
-                    }
                 }
             }
+            mContainerDisplayNames.putAll(DistroUtils.loadCachedDisplayNames());
         } catch (Exception e) {
             // Corrupt cache: ignore it, the background refresh rebuilds it.
             Log.w(LOG_TAG, "Failed to read distro list cache", e);
@@ -450,7 +407,7 @@ public class DistroActivity extends AppCompatActivity {
                 versions.put(distro.id, array);
             }
             root.put("versions", versions);
-            File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, CACHE_FILE_NAME);
+            File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, DistroUtils.CACHE_FILE_NAME);
             File parent = cacheFile.getParentFile();
             if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return;
             AtomicFile atomicFile = new AtomicFile(cacheFile);
@@ -742,13 +699,6 @@ public class DistroActivity extends AppCompatActivity {
         }
     }
 
-    /** "opensuse/leap:16.1" -> "opensuse-leap-16.1", "archlinux:latest" -> "archlinux". */
-    private static String containerNameForImageRef(String imageRef) {
-        String name = imageRef.replace('/', '-').replace(':', '-');
-        if (name.endsWith("-latest")) name = name.substring(0, name.length() - "-latest".length());
-        return name;
-    }
-
     private static String readStream(InputStream inputStream) throws IOException {
         StringBuilder out = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(
@@ -845,6 +795,19 @@ public class DistroActivity extends AppCompatActivity {
             .setItems(items.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
             .setNegativeButton(android.R.string.cancel, null)
             .show();
+    }
+
+    /** Open the options dialog for one container (from the drawer long-press). */
+    private void showDistroDialogForContainer(String container) {
+        if (!mInstalledContainers.contains(container)) return;
+        String distroId = DistroUtils.distroIdForContainer(container);
+        if (distroId == null) return;
+        for (DistroDef distro : DISTROS) {
+            if (distro.id.equals(distroId)) {
+                showDistroDialog(distro);
+                return;
+            }
+        }
     }
 
     private void showVersionDialog(final DistroDef distro) {
@@ -961,7 +924,7 @@ public class DistroActivity extends AppCompatActivity {
         }
         String sessionName = getString(R.string.distro_session_install,
             distro.displayName + " " + version.display);
-        startSessionWithExecutable(scriptFile.getAbsolutePath(), null, sessionName, sessionName);
+        DistroUtils.startSessionWithExecutable(this, scriptFile.getAbsolutePath(), null, sessionName, sessionName);
         Toast.makeText(this, R.string.distro_install_started, Toast.LENGTH_LONG).show();
         finish();
     }
@@ -994,13 +957,7 @@ public class DistroActivity extends AppCompatActivity {
     }
 
     private void startLoginSession(String container, String display) {
-        String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
-            .getAbsolutePath();
-        if (!new File(prootDistro).isFile()) {
-            Toast.makeText(this, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
-            return;
-        }
-        startSessionWithExecutable(prootDistro, new String[]{"login", container}, display, display);
+        DistroUtils.startLoginSession(this, container, display);
         finish();
     }
 
@@ -1015,37 +972,11 @@ public class DistroActivity extends AppCompatActivity {
             return;
         }
         String sessionName = getString(R.string.distro_session_tools, display);
-        startSessionWithExecutable(prootDistro,
+        DistroUtils.startSessionWithExecutable(this, prootDistro,
             new String[]{"login", container, "--", "bash", "-c", command},
             sessionName, sessionName);
         Toast.makeText(this, R.string.distro_tools_started, Toast.LENGTH_LONG).show();
         finish();
     }
 
-    /**
-     * Run a command in a new visible terminal session, via the same internal
-     * TERMUX_SERVICE.ACTION_SERVICE_EXECUTE intent that RunCommandService uses
-     * (RunCommandService.java, "Start TERMUX_SERVICE and pass it execution intent").
-     * TermuxService creates the session, switches to it and brings
-     * TermuxActivity forward (default session action), so this activity
-     * finishes right after sending the intent.
-     */
-    private void startSessionWithExecutable(String executablePath, String[] arguments,
-                                            String sessionName, String commandLabel) {
-        Uri executableUri = new Uri.Builder()
-            .scheme(TERMUX_SERVICE.URI_SCHEME_SERVICE_EXECUTE)
-            .path(executablePath)
-            .build();
-        Intent execIntent = new Intent(TERMUX_SERVICE.ACTION_SERVICE_EXECUTE, executableUri);
-        execIntent.setClass(this, TermuxService.class);
-        if (arguments != null) execIntent.putExtra(TERMUX_SERVICE.EXTRA_ARGUMENTS, arguments);
-        execIntent.putExtra(TERMUX_SERVICE.EXTRA_RUNNER,
-            ExecutionCommand.Runner.TERMINAL_SESSION.getName());
-        execIntent.putExtra(TERMUX_SERVICE.EXTRA_SESSION_ACTION,
-            String.valueOf(TERMUX_SERVICE.VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY));
-        execIntent.putExtra(TERMUX_SERVICE.EXTRA_SHELL_NAME, sessionName);
-        execIntent.putExtra(TERMUX_SERVICE.EXTRA_COMMAND_LABEL, commandLabel);
-        execIntent.putExtra(TERMUX_SERVICE.EXTRA_WORKDIR, TermuxConstants.TERMUX_HOME_DIR_PATH);
-        startService(execIntent);
-    }
 }
