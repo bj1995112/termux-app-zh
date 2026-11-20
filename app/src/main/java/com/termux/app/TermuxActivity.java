@@ -69,8 +69,10 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.preference.PreferenceManager;
 import androidx.viewpager.widget.ViewPager;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -231,6 +233,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             mIsInvalidState = true;
             return;
         }
+
+        // Apply the "show welcome message" setting (creates or removes
+        // ~/.hushlogin). Also applied in addNewSession() for the very first
+        // launch, where the home directory does not exist yet at this point.
+        syncWelcomeMessageVisibility(this);
 
         setMargins();
 
@@ -699,7 +706,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             row.setText(rowText);
             row.setOnClickListener(v -> {
                 getDrawer().closeDrawers();
-                AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+                if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
+                    AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+                } else {
+                    // dsh has no terminal entry (upstream documents only
+                    // `dsh web`): tapping the row opens its web UI instead.
+                    AiAgentUtils.startWebSession(TermuxActivity.this, agent, null);
+                }
             });
             row.setLongClickable(true);
             row.setOnLongClickListener(v -> {
@@ -722,17 +735,20 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     /** Long-press menu on a drawer "AI 助手" row: enter the terminal, or
      * (web-capable agents only) open the web UI through the shared
-     * dialog-first startWebSession flow. The drawer has nothing to finish,
-     * so the onDialogDismissed callback is null (startWebSession documents
-     * null as fine). */
+     * dialog-first startWebSession flow. dsh has no terminal entry
+     * (upstream documents only `dsh web`), so its menu shows only the web
+     * item. The drawer has nothing to finish, so the onDialogDismissed
+     * callback is null (startWebSession documents null as fine). */
     private void showAgentDrawerMenu(final AiAgentUtils.InstalledAgent agent) {
         List<String> names = new ArrayList<>();
         List<Runnable> actions = new ArrayList<>();
-        names.add(getString(R.string.aiagents_drawer_enter_terminal));
-        actions.add(() -> {
-            getDrawer().closeDrawers();
-            AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
-        });
+        if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
+            names.add(getString(R.string.aiagents_drawer_enter_terminal));
+            actions.add(() -> {
+                getDrawer().closeDrawers();
+                AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+            });
+        }
         if (AiAgentUtils.hasWeb(agent.agentId)) {
             names.add(getString(R.string.aiagents_web_quick_item, agent.displayName));
             actions.add(() -> {
@@ -1061,6 +1077,42 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             return mTerminalView.getCurrentSession();
         else
             return null;
+    }
+
+    /**
+     * Apply the "show welcome message at startup" setting.
+     *
+     * The welcome text of a fresh session is shown by the {@code login}
+     * script (termux-tools), which displays the MOTD unless
+     * {@code ~/.hushlogin} exists. Truncating {@code $PREFIX/etc/motd}
+     * alone is NOT enough: the default MOTD path is the dynamic
+     * {@code $PREFIX/etc/motd.sh} script, so the only reliable switch is
+     * the hushlogin file itself. It survives {@code pkg upgrade} (it lives
+     * in HOME, not in the package tree) and destroys nothing, so no backup
+     * is needed: showing the message again is just deleting the file.
+     *
+     * Called from {@link #onCreate(Bundle)} and from
+     * {@link TermuxTerminalSessionActivityClient#addNewSession(boolean, String)}
+     * so the file state matches the setting before any new session's login
+     * script runs. Silently does nothing when the home directory does not
+     * exist yet (first launch, before the bootstrap is installed).
+     */
+    public static void syncWelcomeMessageVisibility(@NonNull Context context) {
+        if (!TermuxConstants.TERMUX_HOME_DIR.isDirectory()) return;
+
+        boolean showWelcomeMessage = PreferenceManager.getDefaultSharedPreferences(context)
+            .getBoolean("show_welcome_message", false);
+        File hushloginFile = new File(TermuxConstants.TERMUX_HOME_DIR, ".hushlogin");
+
+        try {
+            if (showWelcomeMessage) {
+                if (hushloginFile.exists()) hushloginFile.delete();
+            } else {
+                if (!hushloginFile.exists()) hushloginFile.createNewFile();
+            }
+        } catch (Exception e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to update ~/.hushlogin for welcome message setting", e);
+        }
     }
 
     public TermuxAppSharedPreferences getPreferences() {
