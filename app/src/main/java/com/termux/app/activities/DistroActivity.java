@@ -981,18 +981,22 @@ public class DistroActivity extends AppCompatActivity {
      * screen (same as entering the distro). Web-capable agents
      * (dsh, OpenCode, Pi) get an extra "打开 X 网页版" item, which starts
      * the web server in a visible session and shows how to reach it; this
-     * screen closes only after that dialog is dismissed. */
+     * screen closes only after that dialog is dismissed. dsh has no
+     * terminal entry (upstream documents only `dsh web`), so it lists only
+     * its web item, no terminal item. */
     private void showQuickStartDialog(final DistroDef distro, final String container,
                                       final String display,
                                       final List<AiAgentUtils.InstalledAgent> agents) {
         List<String> names = new ArrayList<>();
         List<Runnable> actions = new ArrayList<>();
         for (final AiAgentUtils.InstalledAgent agent : agents) {
-            names.add(agent.displayName);
-            actions.add(() -> {
-                AiAgentUtils.startAgentSession(DistroActivity.this, agent);
-                finish();
-            });
+            if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
+                names.add(agent.displayName);
+                actions.add(() -> {
+                    AiAgentUtils.startAgentSession(DistroActivity.this, agent);
+                    finish();
+                });
+            }
             AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
             if (def != null && def.webKind != AiAgentUtils.WebKind.NONE) {
                 names.add(getString(R.string.aiagents_web_quick_item, agent.displayName));
