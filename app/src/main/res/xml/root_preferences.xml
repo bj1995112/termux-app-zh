@@ -12,6 +12,12 @@
         app:summary="@string/prompt_theme_01_name"
         app:persistent="false"/>
 
+    <SwitchPreferenceCompat
+        app:key="show_welcome_message"
+        app:title="@string/welcome_message_title"
+        app:summary="@string/welcome_message_summary"
+        app:defaultValue="false"/>
+
     <Preference
         app:key="termux_api"
         app:title="@string/termux_api_preferences_title"
@@ -39,17 +45,5 @@
         app:summary="@string/termux_widget_preferences_summary"
         app:isPreferenceVisible="false"
         app:fragment="com.termux.app.fragments.settings.TermuxWidgetPreferencesFragment"/>
-
-    <Preference
-        app:key="about"
-        app:title="@string/about_preference_title"
-        app:persistent="false"/>
-    <!-- app:layout="@layout/preference_markdown_text" -->
-
-    <Preference
-        app:key="donate"
-        app:title="@string/donate_preference_title"
-        app:persistent="false"
-        app:isPreferenceVisible="false"/>
 
 </PreferenceScreen>
