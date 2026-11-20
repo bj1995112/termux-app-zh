@@ -1,6 +1,7 @@
 package com.termux.app.activities;
 
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Environment;
 
@@ -67,6 +68,7 @@ public class SettingsActivity extends AppCompatActivity {
                     configureTermuxFloatPreference(context);
                     configureTermuxTaskerPreference(context);
                     configureTermuxWidgetPreference(context);
+                    configurePromptStylePreference(context);
                     configureAboutPreference(context);
                     configureDonatePreference(context);
                 }
