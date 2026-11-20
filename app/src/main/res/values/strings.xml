@@ -363,4 +363,5 @@
     <string name="prompt_theme_22_name">Rainbow Username</string>
     <string name="prompt_theme_23_name">Last Two Dirs</string>
     <string name="prompt_theme_24_name">Root Turns Red</string>
+    <string name="prompt_sync_distros">Synced to %1$d distros</string>
 </resources>
