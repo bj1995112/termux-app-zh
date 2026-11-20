@@ -56,6 +56,7 @@ import com.termux.shared.termux.TermuxUtils;
 import com.termux.shared.termux.settings.properties.TermuxAppSharedProperties;
 import com.termux.shared.termux.theme.TermuxThemeUtils;
 import com.termux.shared.theme.NightMode;
+import com.termux.shared.theme.ThemeUtils;
 import com.termux.shared.view.ViewUtils;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
@@ -65,6 +66,7 @@ import com.termux.view.TerminalViewClient;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.viewpager.widget.ViewPager;
 
@@ -636,8 +638,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         int shown = Math.min(installed.size(), DistroUtils.MAX_DRAWER_DISTRO_ROWS);
         for (int i = 0; i < shown; i++) {
             final DistroUtils.InstalledDistro distro = installed.get(i);
-            TextView row = (TextView) getLayoutInflater()
-                .inflate(R.layout.item_terminal_sessions_list, rows, false);
+            TextView row = newInstalledDistroRow(rows);
             row.setText(distro.display);
             row.setOnClickListener(v -> {
                 getDrawer().closeDrawers();
@@ -651,8 +652,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             rows.addView(row);
         }
         if (installed.size() > DistroUtils.MAX_DRAWER_DISTRO_ROWS) {
-            TextView moreRow = (TextView) getLayoutInflater()
-                .inflate(R.layout.item_terminal_sessions_list, rows, false);
+            TextView moreRow = newInstalledDistroRow(rows);
             moreRow.setText(getString(R.string.distro_more_in_drawer,
                 installed.size() - DistroUtils.MAX_DRAWER_DISTRO_ROWS));
             moreRow.setOnClickListener(v -> {
@@ -661,6 +661,21 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             });
             rows.addView(moreRow);
         }
+    }
+
+
+    /** One drawer distro row: same layout as a session row, but with the dark
+     * background the session list applies at runtime. The layout's own
+     * background is a white ripple, which renders as a solid white box with
+     * invisible white text on the dark drawer. */
+    private TextView newInstalledDistroRow(LinearLayout rows) {
+        TextView row = (TextView) getLayoutInflater()
+            .inflate(R.layout.item_terminal_sessions_list, rows, false);
+        if (ThemeUtils.shouldEnableDarkTheme(this, NightMode.getAppNightMode().getName())) {
+            row.setBackground(ContextCompat.getDrawable(this,
+                R.drawable.session_background_black_selected));
+        }
+        return row;
     }
 
     /** Long-press on a drawer distro row: open DistroActivity at that distro's options dialog. */
