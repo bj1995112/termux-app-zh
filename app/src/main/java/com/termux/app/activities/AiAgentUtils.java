@@ -31,6 +31,7 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.AtomicFile;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -40,17 +41,24 @@ import com.termux.shared.settings.preferences.SharedPreferenceUtils;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 public final class AiAgentUtils {
 
@@ -65,6 +73,26 @@ public final class AiAgentUtils {
     /** Timeout for the pre-dialog web-port probe (loopback, fails fast). */
     private static final int WEB_PORT_PROBE_TIMEOUT_MS = 800;
 
+    /** Cache file for latest-version checks (Termux home, same place as the
+     * distro list cache). Format: {"checkedAt": <epoch ms>,
+     * "latest": {"pi": "1.6.0", ...}}. */
+    private static final String UPDATE_CACHE_FILE_NAME = "aiagents-updates.json";
+
+    /** Cached latest versions are used for one day without re-fetching. */
+    private static final long UPDATE_CACHE_VALID_MS = 24L * 60L * 60L * 1000L;
+
+    /** Per-request timeouts for latest-version checks; any failure is
+     * silent (no badge, no error) — see fetchLatestVersion. */
+    private static final int UPDATE_CHECK_CONNECT_TIMEOUT_MS = 10000;
+    private static final int UPDATE_CHECK_READ_TIMEOUT_MS = 20000;
+
+    /** Rootfs-relative path of the agy version record file. The agy
+     * installer prints the version it installs but writes no version
+     * file, so the install/update script records it here right after a
+     * successful install (see AiAgentsActivity.record_agy_version). */
+    private static final String AGY_VERSION_RECORD_REL_PATH =
+        "root/.termux-aiagents/versions/agy";
+
     /** Maximum rows shown in the drawer; more are reached from DistroActivity. */
     public static final int MAX_DRAWER_AGENT_ROWS = 5;
 
@@ -74,7 +102,7 @@ public final class AiAgentUtils {
 
     /** How an installed agent's version is found (from files, never by running it). */
     public enum VersionKind {
-        /** No local version file known (agy): show installed without a version. */
+        /** No local version file known: show installed without a version. */
         NONE,
         /** <prefix>/lib/node_modules/<npm package>/package.json "version". */
         NPM_PACKAGE_JSON,
@@ -88,7 +116,11 @@ public final class AiAgentUtils {
          * (the source-install stamp written by install.sh / `hermes update`;
          * "0.23.3", or "0.23.3+12.gabc1234" when the checkout sits ahead of
          * the tag). "unknown" or a missing stamp means no version. */
-        HERMES_STAMP
+        HERMES_STAMP,
+        /** Version record written by the install/update script:
+         * ~/.termux-aiagents/versions/agy (agy only — its installer writes
+         * no version file of its own). */
+        AGY_RECORDED
     }
 
     /** Which agents can be opened in the phone browser (v1: dsh, OpenCode, Pi, Hermes). */
@@ -193,7 +225,7 @@ public final class AiAgentUtils {
         new AgentDef("agy", "Antigravity CLI", R.string.aiagents_desc_agy, false, "agy",
             ".local/bin/agy",
             new String[]{"root/.local/bin/agy"},
-            VersionKind.NONE, null,
+            VersionKind.AGY_RECORDED, null,
             "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
             "curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh && bash /tmp/agy-install.sh",
             WebKind.NONE, 0, true),
@@ -388,6 +420,8 @@ public final class AiAgentUtils {
                     return probeAiderVersion(rootfs);
                 case HERMES_STAMP:
                     return probeHermesVersion(rootfs);
+                case AGY_RECORDED:
+                    return probeAgyRecordedVersion(rootfs);
                 default:
                     return "";
             }
@@ -492,6 +526,23 @@ public final class AiAgentUtils {
         return 0;
     }
 
+    /** Version recorded by the install/update script for agy
+     * (~/.termux-aiagents/versions/agy inside the container). "" when the
+     * record is missing (installed before the record existed) or does not
+     * look like a version — the list then shows no update badge for agy
+     * until its next install/update writes the record. */
+    private static String probeAgyRecordedVersion(File rootfs) {
+        File record = new File(rootfs, AGY_VERSION_RECORD_REL_PATH);
+        if (!record.isFile()) return "";
+        try {
+            String version = DistroUtils.readFile(record).trim();
+            return isComparableVersion(version) ? version : "";
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read agy version record", e);
+            return "";
+        }
+    }
+
     private static int leadingInt(String text) {
         int end = 0;
         while (end < text.length() && Character.isDigit(text.charAt(end))) end++;
@@ -500,6 +551,351 @@ public final class AiAgentUtils {
             return Integer.parseInt(text.substring(0, end));
         } catch (NumberFormatException e) {
             return 0;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Version comparison (update detection)
+    // ------------------------------------------------------------------
+
+    /** True when both versions parse (see isComparableVersion) and latest
+     * is strictly newer than installed. Anything unparseable on either
+     * side means "unknown" — no badge, never an error. */
+    public static boolean isNewerVersionAvailable(String installed, String latest) {
+        if (installed == null || latest == null) return false;
+        String a = stripLeadingV(installed.trim());
+        String b = stripLeadingV(latest.trim());
+        if (!isComparableVersion(a) || !isComparableVersion(b)) return false;
+        return compareVersions(b, a) > 0;
+    }
+
+    /** Comparable versions look like 1.6.0, 0.2.2-rc.5 or 2.1.330: numeric
+     * core, optional prerelease suffix after '-'. A leading 'v' is
+     * stripped by the caller (see isNewerVersionAvailable). */
+    public static boolean isComparableVersion(String version) {
+        if (version == null || version.isEmpty()) return false;
+        return version.matches("[0-9]+(\\.[0-9]+)*(-[0-9A-Za-z][0-9A-Za-z.-]*)?");
+    }
+
+    private static String stripLeadingV(String version) {
+        if (version != null && version.length() > 1
+            && (version.charAt(0) == 'v' || version.charAt(0) == 'V')
+            && Character.isDigit(version.charAt(1))) {
+            return version.substring(1);
+        }
+        return version;
+    }
+
+    /** Compare two parsed versions: > 0 when a is newer, < 0 when older,
+     * 0 when equal. Numeric core segments compare numerically (a missing
+     * segment counts as 0, so 1.6 == 1.6.0); when the cores are equal, a
+     * release outranks the same number with a prerelease suffix
+     * (1.0.0 > 1.0.0-rc.1), and two suffixes compare segment by segment
+     * (rc.5 > rc.2, beta > alpha). Callers must check isComparableVersion
+     * first; anything else compares as 0 here. */
+    public static int compareVersions(String a, String b) {
+        a = stripLeadingV(a);
+        b = stripLeadingV(b);
+        String[] coreA = coreOf(a).split("\\.");
+        String[] coreB = coreOf(b).split("\\.");
+        int length = Math.max(coreA.length, coreB.length);
+        for (int i = 0; i < length; i++) {
+            int numberA = i < coreA.length ? leadingInt(coreA[i]) : 0;
+            int numberB = i < coreB.length ? leadingInt(coreB[i]) : 0;
+            if (numberA != numberB) return Integer.compare(numberA, numberB);
+        }
+        String preA = prereleaseOf(a);
+        String preB = prereleaseOf(b);
+        if (preA.isEmpty() && preB.isEmpty()) return 0;
+        if (preA.isEmpty()) return 1;
+        if (preB.isEmpty()) return -1;
+        String[] partsA = preA.split("[.-]");
+        String[] partsB = preB.split("[.-]");
+        int preLength = Math.max(partsA.length, partsB.length);
+        for (int i = 0; i < preLength; i++) {
+            String segmentA = i < partsA.length ? partsA[i] : "";
+            String segmentB = i < partsB.length ? partsB[i] : "";
+            if (segmentA.equals(segmentB)) continue;
+            int numberA = leadingInt(segmentA);
+            int numberB = leadingInt(segmentB);
+            if (numberA != numberB) return Integer.compare(numberA, numberB);
+            return segmentA.compareTo(segmentB);
+        }
+        return 0;
+    }
+
+    /** Numeric core: everything before the first '-' ("0.2.2-rc.5" -> "0.2.2"). */
+    private static String coreOf(String version) {
+        int dash = version.indexOf('-');
+        return dash < 0 ? version : version.substring(0, dash);
+    }
+
+    /** Prerelease suffix: everything after the first '-', or "" when none. */
+    private static String prereleaseOf(String version) {
+        int dash = version.indexOf('-');
+        return dash < 0 ? "" : version.substring(dash + 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Latest versions (update detection)
+    // ------------------------------------------------------------------
+
+    /**
+     * The latest version an agent can be installed at right now, fetched
+     * live from the agent's own public source — or "" when the agent has
+     * no known source or the fetch failed. No auth, no login, and no
+     * version is ever hardcoded: the values below are only URLs and JSON
+     * field names. Every failure (timeout, HTTP 403 rate limit, bad
+     * body, unparseable version) is silent — the list simply shows no
+     * update badge for that agent.
+     *
+     * Sources, all verified live on 2026-11-21 (see update-check
+     * design.md §1):
+     * - Pi / dsh / OpenCode: npm registry .../latest, JSON "version".
+     * - Aider: PyPI JSON API, info.version.
+     * - Codex: GitHub releases/latest, "name" (plain version); fallback
+     *   strips the "rust-v" prefix from "tag_name".
+     * - Claude Code: plain-text version at downloads.claude.ai.
+     * - agy: the release manifest the official installer itself reads
+     *   (glibc vs musl manifest by distro; Alpine is musl).
+     * - Hermes: GitHub releases/latest, tag_name minus the leading "v".
+     *   Dormant until the Hermes AgentDef lands (no such id exists yet);
+     *   the badge additionally needs an installed version, which Hermes
+     *   has no source for in v1, so nothing shows for it either way.
+     */
+    public static String fetchLatestVersion(AgentDef def, String distroId) {
+        if (def == null) return "";
+        try {
+            switch (def.id) {
+                case "pi":
+                case "dsh":
+                case "opencode":
+                    return fetchNpmLatest(def.npmPackage);
+                case "aider":
+                    return fetchPyPILatest();
+                case "codex":
+                    return fetchCodexLatest();
+                case "claude":
+                    return fetchClaudeLatest();
+                case "agy":
+                    return fetchAgyLatest(distroId);
+                case "hermes":
+                    return fetchGithubTagLatest(
+                        "https://api.github.com/repos/NousResearch/hermes-agent/releases/latest");
+                default:
+                    return "";
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch latest version for " + def.id, e);
+            return "";
+        }
+    }
+
+    /** npm registry .../latest -> JSON "version" (Pi, dsh, OpenCode). */
+    private static String fetchNpmLatest(String npmPackage) {
+        if (npmPackage == null || npmPackage.isEmpty()) return "";
+        try {
+            String body = fetchUrlText("https://registry.npmjs.org/" + npmPackage + "/latest");
+            if (body == null) return "";
+            String version = new JSONObject(body).optString("version", "").trim();
+            return validatedVersion(version);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch npm latest for " + npmPackage, e);
+            return "";
+        }
+    }
+
+    /** PyPI JSON API -> info.version (Aider). */
+    private static String fetchPyPILatest() {
+        try {
+            String body = fetchUrlText("https://pypi.org/pypi/aider-chat/json");
+            if (body == null) return "";
+            JSONObject info = new JSONObject(body).optJSONObject("info");
+            if (info == null) return "";
+            return validatedVersion(info.optString("version", "").trim());
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch PyPI latest for aider-chat", e);
+            return "";
+        }
+    }
+
+    /** GitHub releases/latest for Codex: prefer "name" (a plain version
+     * like "0.171.0"); fall back to "tag_name" minus its "rust-v" prefix. */
+    private static String fetchCodexLatest() {
+        try {
+            String body = fetchUrlText("https://api.github.com/repos/openai/codex/releases/latest");
+            if (body == null) return "";
+            JSONObject release = new JSONObject(body);
+            String name = validatedVersion(release.optString("name", "").trim());
+            if (!name.isEmpty()) return name;
+            String tag = release.optString("tag_name", "").trim();
+            if (tag.startsWith("rust-v")) tag = tag.substring("rust-v".length());
+            return validatedVersion(tag);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch GitHub latest for codex", e);
+            return "";
+        }
+    }
+
+    /** GitHub releases/latest -> tag_name minus a leading "v"
+     * (Hermes: "v0.23.3" -> "0.23.3"). */
+    private static String fetchGithubTagLatest(String url) {
+        try {
+            String body = fetchUrlText(url);
+            if (body == null) return "";
+            String tag = new JSONObject(body).optString("tag_name", "").trim();
+            return validatedVersion(stripLeadingV(tag));
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch GitHub latest from " + url, e);
+            return "";
+        }
+    }
+
+    /** Claude Code: the installer downloads a plain-text version from this
+     * URL first (see claude.ai/install.sh), so the app reads the same file. */
+    private static String fetchClaudeLatest() {
+        try {
+            String body = fetchUrlText("https://downloads.claude.ai/claude-code-releases/latest");
+            if (body == null) return "";
+            return validatedVersion(body.trim());
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch Claude Code latest version", e);
+            return "";
+        }
+    }
+
+    /** The release manifest the official agy installer itself reads: its
+     * "version" field is what a fresh install would give. Alpine uses the
+     * musl manifest, every other distro the glibc one. */
+    private static String fetchAgyLatest(String distroId) {
+        try {
+            String manifest = "linux_arm64.json";
+            if ("alpine".equals(distroId)) manifest = "linux_arm64_musl.json";
+            String body = fetchUrlText("https://antigravity-cli-auto-updater-974169037036"
+                + ".us-central1.run.app/manifests/" + manifest);
+            if (body == null) return "";
+            String version = new JSONObject(body).optString("version", "").trim();
+            return validatedVersion(version);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch agy manifest", e);
+            return "";
+        }
+    }
+
+    /** A fetched version string, or "" when it does not parse (a changed
+     * endpoint must never produce a bogus badge). */
+    private static String validatedVersion(String version) {
+        if (version == null) return "";
+        String stripped = stripLeadingV(version.trim());
+        return isComparableVersion(stripped) ? stripped : "";
+    }
+
+    /** One HTTPS GET; null on any failure (timeout, non-200, empty body).
+     * Same HttpURLConnection idiom as DistroActivity's Docker Hub fetch. */
+    private static String fetchUrlText(String urlString) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(UPDATE_CHECK_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(UPDATE_CHECK_READ_TIMEOUT_MS);
+            connection.setRequestProperty("User-Agent", "termux-app-zh-aiagents/1.0");
+            connection.setRequestProperty("Accept", "application/json, text/plain, */*");
+            int status = connection.getResponseCode();
+            if (status != HttpURLConnection.HTTP_OK) return null;
+            return readStream(connection.getInputStream());
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Fetch failed for " + urlString, e);
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String readStream(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+        return out.toString(StandardCharsets.UTF_8.name());
+    }
+
+    // ------------------------------------------------------------------
+    // Latest-version cache (update detection)
+    // ------------------------------------------------------------------
+
+    /** One cached check: when it ran, and the latest version per agent id. */
+    public static final class UpdateCache {
+        public final long checkedAt;
+        public final Map<String, String> latest;
+
+        UpdateCache(long checkedAt, Map<String, String> latest) {
+            this.checkedAt = checkedAt;
+            this.latest = latest;
+        }
+    }
+
+    /** Cached latest versions, or an empty cache when there is none or it
+     * is corrupt (the next check rebuilds it). */
+    public static UpdateCache loadUpdateCache() {
+        Map<String, String> latest = new HashMap<>();
+        File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, UPDATE_CACHE_FILE_NAME);
+        if (!cacheFile.isFile()) return new UpdateCache(0, latest);
+        try {
+            JSONObject root = new JSONObject(DistroUtils.readFile(cacheFile));
+            long checkedAt = root.optLong("checkedAt", 0);
+            JSONObject versions = root.optJSONObject("latest");
+            if (versions != null) {
+                Iterator<String> ids = versions.keys();
+                while (ids.hasNext()) {
+                    String id = ids.next();
+                    String version = versions.optString(id, "");
+                    if (!version.isEmpty()) latest.put(id, version);
+                }
+            }
+            return new UpdateCache(checkedAt, latest);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read update cache", e);
+            return new UpdateCache(0, latest);
+        }
+    }
+
+    /** True when the cache was checked within the last day. */
+    public static boolean isUpdateCacheValid(long checkedAt) {
+        return checkedAt > 0
+            && System.currentTimeMillis() - checkedAt < UPDATE_CACHE_VALID_MS;
+    }
+
+    /** Save latest versions with "now" as the check time (AtomicFile, same
+     * as the distro list cache). Callers pass the merged map: freshly
+     * fetched values overwrite the old cache, failed fetches keep theirs. */
+    public static void saveUpdateCache(Map<String, String> latest) {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("checkedAt", System.currentTimeMillis());
+            JSONObject versions = new JSONObject();
+            for (Map.Entry<String, String> entry : latest.entrySet()) {
+                if (entry.getValue() != null && !entry.getValue().isEmpty()) {
+                    versions.put(entry.getKey(), entry.getValue());
+                }
+            }
+            root.put("latest", versions);
+            File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, UPDATE_CACHE_FILE_NAME);
+            File parent = cacheFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return;
+            AtomicFile atomicFile = new AtomicFile(cacheFile);
+            FileOutputStream out = atomicFile.startWrite();
+            try {
+                out.write(root.toString().getBytes(StandardCharsets.UTF_8));
+                atomicFile.finishWrite(out);
+            } catch (IOException e) {
+                atomicFile.failWrite(out);
+                throw e;
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to save update cache", e);
         }
     }
 
