@@ -280,4 +280,29 @@
 <string name="distro_installed_title">Installed Linux</string>
     <string name="distro_more_in_drawer">%1$s more…</string>
 
+    <string name="distro_install_ai_agents_for">Install AI assistants on %1$s</string>
+    <string name="aiagents_title">AI Assistants</string>
+    <string name="aiagents_desc_codex">OpenAI Codex, terminal coding agent (installer, no Node needed)</string>
+    <string name="aiagents_desc_pi">Pi, open-source coding agent (npm, needs Node 24)</string>
+    <string name="aiagents_desc_agy">Antigravity CLI, Google coding agent for the terminal (installer, no Node needed)</string>
+    <string name="aiagents_desc_dsh">DeepSeek Harness, DeepSeek coding agent, preview (npm, needs Node 24)</string>
+    <string name="aiagents_desc_opencode">OpenCode, open-source AI coding agent (npm, needs Node 24)</string>
+    <string name="aiagents_desc_aider">Aider, AI pair-programming in the terminal (uv installer, no Node needed)</string>
+    <string name="aiagents_not_installed">Not installed</string>
+    <string name="aiagents_installed">Installed %1$s</string>
+    <string name="aiagents_installed_unknown">Installed</string>
+    <string name="aiagents_unsupported">Not supported on this distro yet</string>
+    <string name="aiagents_status_checking">Checking installed agents…</string>
+    <string name="aiagents_status_summary">%1$d of %2$d agents installed</string>
+    <string name="aiagents_install_selected">Install selected</string>
+    <string name="aiagents_none_selected">No agents selected</string>
+    <string name="aiagents_update_title">Update %1$s</string>
+    <string name="aiagents_update_confirm">Update %1$s inside this distro? This runs the official update in a terminal session.</string>
+    <string name="aiagents_update">Update</string>
+    <string name="aiagents_update_dsh_note">dsh is a preview build; the update prints the current version first, and the rollback command if needed.</string>
+    <string name="aiagents_session">AI assistants: %1$s</string>
+    <string name="aiagents_no_rootfs">Cannot find this distro's files</string>
+    <string name="aiagents_script_failed">Failed to write install script: %1$s</string>
+    <string name="aiagents_install_started">Installing in a new terminal session…</string>
+
 </resources>
