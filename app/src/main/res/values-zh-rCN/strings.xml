@@ -359,4 +359,5 @@
     <string name="prompt_theme_22_name">彩虹用户名</string>
     <string name="prompt_theme_23_name">最后两级目录</string>
     <string name="prompt_theme_24_name">Root 变红</string>
+    <string name="prompt_sync_distros">已同步到 %1$d 个发行版</string>
 </resources>
