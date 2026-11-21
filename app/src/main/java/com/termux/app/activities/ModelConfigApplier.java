@@ -25,33 +25,34 @@ import java.util.Set;
 /**
  * Writes one model-config entry into the containers it targets.
  *
- * <p>Per-agent mapping (design §3 + §11 amendments):
+ * <p>Per-agent mapping (design §3 + §11 amendments). Slim scope: only the
+ * agents WITHOUT a web UI of their own, plus Pi (its /login cannot add a
+ * custom provider). dsh, OpenCode and Hermes are NOT here — configure them
+ * in their web UIs instead.
  *
  * <ul>
  * <li>Codex: ~/.codex/config.toml — managed marker section; top-level
  * {@code model} = primary, {@code model_provider} = termux-&lt;slug&gt;;
- * {@code [model_providers.termux-&lt;slug&gt;]} with name, base_url and
- * {@code env_key = "TERMUX_MODEL_API_KEY"} (Codex has no api_key field).
+ * {@code [model_providers.termux-&lt;slug&gt;]} with name, base_url,
+ * {@code env_key = "TERMUX_MODEL_API_KEY"} (Codex has no api_key field)
+ * and {@code wire_api = "responses"}. DeepSeek base is
+ * https://api.deepseek.com with NO /v1 (Codex appends /responses).
  * <li>Pi: ~/.pi/agent/models.json — providers.termux-&lt;slug&gt;
- * {baseUrl, api, apiKey, models[]} + settings.json defaultProvider /
- * defaultModel = primary.
- * <li>dsh: ~/.dsh/profiles/web/cordis.patch.yml — llm-pi-ai.providers
- * .termux-&lt;slug&gt; {apiKeyEnv, api, baseURL, models[]} +
- * agent-default-model {provider, model: primary}.
- * <li>OpenCode: ~/.config/opencode/opencode.json —
- * providers.termux-&lt;slug&gt; {package, settings {baseURL, apiKey},
- * models {id: {}}} + top-level "model": "termux-&lt;slug&gt;/&lt;primary&gt;".
+ * {baseUrl, api, apiKey, models: [{id}]} — each model is an OBJECT, plain
+ * strings are rejected by Pi's schema ("models.0: must be object") — +
+ * settings.json defaultProvider / defaultModel = primary. Anthropic
+ * baseUrl has no trailing /v1 (the SDK appends it).
  * <li>Aider: ~/.aider.conf.yml — model: openai/&lt;primary&gt; (or
  * gemini/&lt;primary&gt;); openai-api-base + openai-api-key for OpenAI
  * type; Gemini key via env only.
  * <li>Claude Code: ~/.claude/settings.json — env {ANTHROPIC_BASE_URL,
- * ANTHROPIC_AUTH_TOKEN}, model = primary, availableModels = full list.
- * Never touches ~/.claude.json.
- * <li>Hermes: ~/.hermes/config.yaml — model {provider: custom, base_url,
- * default: primary, key_env} + providers.models[]; ~/.hermes/.env carries
- * TERMUX_MODEL_API_KEY.
+ * ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY} (both token names: Bearer
+ * gateways read the former, x-api-key gateways the latter) + ANTHROPIC_MODEL
+ * and ANTHROPIC_DEFAULT_*_MODEL when default; model = primary,
+ * availableModels = full list. Never touches ~/.claude.json.
  * <li>agy: ~/.gemini/antigravity-cli/settings.json — modelProvider
- * "gemini", model = primary; key only via env GEMINI_API_KEY.
+ * "gemini", model = primary; key only via env GEMINI_API_KEY. Custom
+ * OpenAI-compatible providers are NOT supported by agy (Gemini only).
  * </ul>
  *
  * <p>Rules (design §6.2): backup first (.termux-bak, written once, never
@@ -123,9 +124,10 @@ public final class ModelConfigApplier {
     // Capability matrix (design §3; hardcoded, not runtime-fetched)
     // ------------------------------------------------------------------
 
-    /** Whether the agent can take a provider of this type in v1. The three
-     * unverified capabilities (OpenCode Gemini, Hermes Gemini, Aider
-     * Anthropic) are NOT in v1. */
+    /** Whether the agent can take a provider of this type in v1. Slim scope:
+     * only Pi, Codex, Aider, Claude and agy are offered at all (dsh,
+     * OpenCode and Hermes are configured in their web UIs). Aider
+     * Anthropic is NOT in v1. */
     public static boolean supportsType(String agentId, int type) {
         if (agentId == null) return false;
         switch (agentId) {
@@ -135,22 +137,16 @@ public final class ModelConfigApplier {
                 return true;
             case "agy":
                 return type == ModelConfigStore.TYPE_GEMINI;
-            case "dsh":
-                return true;
-            case "opencode":
-                return type != ModelConfigStore.TYPE_GEMINI;
             case "aider":
                 return type != ModelConfigStore.TYPE_ANTHROPIC;
             case "claude":
                 return type == ModelConfigStore.TYPE_ANTHROPIC;
-            case "hermes":
-                return type != ModelConfigStore.TYPE_GEMINI;
             default:
                 return false;
         }
     }
 
-    /** Pi/dsh "api" value per provider type. */
+    /** Pi "api" value per provider type. */
     private static String piApiForType(int type) {
         switch (type) {
             case ModelConfigStore.TYPE_ANTHROPIC:
@@ -163,10 +159,63 @@ public final class ModelConfigApplier {
         }
     }
 
+    /** Strip a trailing "/v1" (and trailing slashes) from a base URL. */
+    private static String stripTrailingV1(String url) {
+        if (url == null) return null;
+        String stripped = url;
+        while (stripped.endsWith("/")) {
+            stripped = stripped.substring(0, stripped.length() - 1);
+        }
+        if (stripped.endsWith("/v1")) {
+            stripped = stripped.substring(0, stripped.length() - 3);
+        }
+        return stripped;
+    }
+
+    /** Base URL for Pi: the anthropic-messages SDK appends /v1 itself,
+     * so a user-typed .../v1 would double up (/v1/v1/messages 404s).
+     * openai-completions and google-generative-ai keep the URL verbatim. */
+    private static String piBaseUrl(ModelConfigStore.Entry entry) {
+        String url = ModelConfigStore.effectiveBaseUrl(entry);
+        if (entry.type == ModelConfigStore.TYPE_ANTHROPIC) {
+            return stripTrailingV1(url);
+        }
+        return url;
+    }
+
+    /** Base URL for Codex: Codex appends /responses to base_url, and
+     * DeepSeek's documented Codex base is https://api.deepseek.com with NO
+     * /v1 (else /v1/responses 404s). Other gateways keep their URL verbatim
+     * (OpenRouter/LiteLLM use /v1 + /v1/responses). */
+    private static String codexBaseUrl(ModelConfigStore.Entry entry) {
+        String url = ModelConfigStore.effectiveBaseUrl(entry);
+        if (url != null && url.contains("api.deepseek.com")) {
+            return stripTrailingV1(url);
+        }
+        return url;
+    }
+
+    /** Pi models.json entries: a list of {"id": ...} objects. Plain strings
+     * are rejected by Pi's schema ("models.0: must be object"). Only "id"
+     * is required. */
+    private static JSONArray piModelJsonArray(ModelConfigStore.Entry entry) {
+        JSONArray array = new JSONArray();
+        try {
+            for (String model : entry.models) {
+                JSONObject obj = new JSONObject();
+                obj.put("id", model);
+                array.put(obj);
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to build Pi models array", e);
+        }
+        return array;
+    }
+
     /** Env vars an agent reads at launch (design §4.2). Empty when the
      * agent takes its key from its own config file. */
     private static List<String> envVarNamesForAgent(String agentId, int type) {
-        if ("codex".equals(agentId) || "dsh".equals(agentId)) {
+        if ("codex".equals(agentId)) {
             return Collections.singletonList(ENV_OPENAI_KEY);
         }
         if ("agy".equals(agentId)) {
@@ -181,8 +230,7 @@ public final class ModelConfigApplier {
     /** Env vars a quick terminal launch must prefix (design §4.2):
      * Codex, agy and aider/Gemini. A quick launch is not a login shell,
      * so .bashrc never runs; the other agents read their key from their
-     * own config file (Hermes from ~/.hermes/.env, dsh from the web
-     * script's source line). Aider only needs the prefix for Gemini
+     * own config file. Aider only needs the prefix for Gemini
      * entries (GEMINI_API_KEY): an OpenAI aider entry carries its key in
      * ~/.aider.conf.yml, and model-env.sh only holds GEMINI_API_KEY when
      * a Gemini aider entry was applied, so envArgsForAgent adds no arg
@@ -341,11 +389,8 @@ public final class ModelConfigApplier {
         switch (agentId) {
             case "codex": return applyCodex(rootfs, entry, apiKey);
             case "pi": return applyPi(rootfs, entry, apiKey);
-            case "dsh": return applyDsh(rootfs, entry, apiKey);
-            case "opencode": return applyOpenCode(rootfs, entry, apiKey);
             case "aider": return applyAider(rootfs, entry, apiKey);
             case "claude": return applyClaude(rootfs, entry, apiKey);
-            case "hermes": return applyHermes(rootfs, entry, apiKey);
             case "agy": return applyAgy(rootfs, entry, apiKey);
             default: return false;
         }
@@ -356,11 +401,8 @@ public final class ModelConfigApplier {
         switch (agentId) {
             case "codex": removeCodex(rootfs, entry); break;
             case "pi": removePi(rootfs, entry); break;
-            case "dsh": removeDsh(rootfs, entry); break;
-            case "opencode": removeOpenCode(rootfs, entry); break;
             case "aider": removeAider(rootfs, entry); break;
             case "claude": removeClaude(rootfs, entry); break;
-            case "hermes": removeHermes(rootfs, entry); break;
             case "agy": removeAgy(rootfs, entry); break;
             default: break;
         }
@@ -371,11 +413,8 @@ public final class ModelConfigApplier {
         switch (agentId) {
             case "codex": return isAppliedCodex(rootfs, entry);
             case "pi": return isAppliedPi(rootfs, entry);
-            case "dsh": return isAppliedDsh(rootfs, entry);
-            case "opencode": return isAppliedOpenCode(rootfs, entry);
             case "aider": return isAppliedAider(rootfs, entry);
             case "claude": return isAppliedClaude(rootfs, entry);
-            case "hermes": return isAppliedHermes(rootfs, entry);
             case "agy": return isAppliedAgy(rootfs, entry);
             default: return false;
         }
@@ -624,20 +663,25 @@ public final class ModelConfigApplier {
             return false;
         }
         try {
-            DumperOptions options = new DumperOptions();
-            options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
-            options.setIndent(2);
-            // Indent list items under their key (not flush-left).
-            options.setIndentWithIndicator(true);
-            options.setSplitLines(false);
-            Yaml yaml = new Yaml(options);
-            StringWriter writer = new StringWriter();
-            yaml.dump(map, writer);
-            return PromptThemeSync.writeFileAtomically(file, writer.toString());
+            return PromptThemeSync.writeFileAtomically(file, yamlDumpString(map));
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to write " + file.getAbsolutePath(), e);
             return false;
         }
+    }
+
+    /** Dump any YAML value (map or list) with the shared dumper options. */
+    private static String yamlDumpString(Object data) {
+        DumperOptions options = new DumperOptions();
+        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
+        options.setIndent(2);
+        // Indent list items under their key (not flush-left).
+        options.setIndentWithIndicator(true);
+        options.setSplitLines(false);
+        Yaml yaml = new Yaml(options);
+        StringWriter writer = new StringWriter();
+        yaml.dump(data, writer);
+        return writer.toString();
     }
 
     /** Get-or-create a nested YAML mapping (creates missing parents). */
@@ -707,8 +751,11 @@ public final class ModelConfigApplier {
         block.append("[model_providers.").append(entry.providerId).append("]\n");
         block.append("name = \"").append(tomlEscape(entry.providerId)).append("\"\n");
         block.append("base_url = \"")
-            .append(tomlEscape(ModelConfigStore.effectiveBaseUrl(entry))).append("\"\n");
+            .append(tomlEscape(codexBaseUrl(entry))).append("\"\n");
         block.append("env_key = \"").append(ENV_OPENAI_KEY).append("\"\n");
+        // Responses API is required for custom providers ("chat" was removed
+        // Feb 2026); write it explicitly rather than relying on the default.
+        block.append("wire_api = \"responses\"\n");
         block.append(end).append("\n");
         text = insertCodexBlock(text, block.toString(), entry.setDefault);
         return PromptThemeSync.writeFileAtomically(file, text);
@@ -909,10 +956,10 @@ public final class ModelConfigApplier {
         JSONObject providers = getOrCreateJsonObject(models, "providers");
         JSONObject provider = new JSONObject();
         try {
-            provider.put("baseUrl", ModelConfigStore.effectiveBaseUrl(entry));
+            provider.put("baseUrl", piBaseUrl(entry));
             provider.put("api", piApiForType(entry.type));
             provider.put("apiKey", apiKey);
-            provider.put("models", new JSONArray(entry.models));
+            provider.put("models", piModelJsonArray(entry));
             providers.put(entry.providerId, provider);
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to build Pi provider", e);
@@ -976,157 +1023,6 @@ public final class ModelConfigApplier {
             new File(homeDir(rootfs), ".pi/agent/models.json"));
         if (models == null) return false;
         JSONObject providers = models.optJSONObject("providers");
-        return providers != null && providers.has(entry.providerId);
-    }
-
-    // ------------------------------------------------------------------
-    // dsh — ~/.dsh/profiles/web/cordis.patch.yml (SnakeYAML)
-    // ------------------------------------------------------------------
-
-    private static File dshConfigFile(File rootfs) {
-        return new File(homeDir(rootfs), ".dsh/profiles/web/cordis.patch.yml");
-    }
-
-    private static boolean applyDsh(File rootfs, ModelConfigStore.Entry entry,
-                                    String apiKey) {
-        File file = dshConfigFile(rootfs);
-        backupOnce(file);
-        Map<String, Object> root = readYamlMap(file);
-        if (root == null) return false;
-        Map<String, Object> llm = getOrCreateYamlMap(root, "llm-pi-ai");
-        Map<String, Object> providers = getOrCreateYamlMap(llm, "providers");
-        Map<String, Object> provider = new LinkedHashMap<>();
-        provider.put("apiKeyEnv", ENV_OPENAI_KEY);
-        provider.put("api", piApiForType(entry.type));
-        provider.put("baseURL", ModelConfigStore.effectiveBaseUrl(entry));
-        provider.put("models", new ArrayList<>(entry.models));
-        providers.put(entry.providerId, provider);
-        if (entry.setDefault) {
-            Map<String, Object> defaultModel = new LinkedHashMap<>();
-            defaultModel.put("provider", entry.providerId);
-            defaultModel.put("model", entry.primaryModel);
-            llm.put("agent-default-model", defaultModel);
-        }
-        return writeYamlMap(file, root);
-    }
-
-    private static void removeDsh(File rootfs, ModelConfigStore.Entry entry) {
-        File file = dshConfigFile(rootfs);
-        if (!file.isFile()) return;
-        Map<String, Object> root = readYamlMap(file);
-        if (root == null) return;
-        Object llmObj = root.get("llm-pi-ai");
-        if (!(llmObj instanceof Map)) return;
-        @SuppressWarnings("unchecked")
-        Map<String, Object> llm = (Map<String, Object>) llmObj;
-        Object providersObj = llm.get("providers");
-        if (providersObj instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> providers = (Map<String, Object>) providersObj;
-            providers.remove(entry.providerId);
-        }
-        Object defaultObj = llm.get("agent-default-model");
-        if (defaultObj instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> defaultModel = (Map<String, Object>) defaultObj;
-            if (entry.providerId.equals(defaultModel.get("provider"))) {
-                Map<String, Object> backup = readYamlMap(backupFileFor(file));
-                Object backupDefault = null;
-                if (backup != null) {
-                    Object backupLlm = backup.get("llm-pi-ai");
-                    if (backupLlm instanceof Map) {
-                        backupDefault =
-                            ((Map<String, Object>) backupLlm).get("agent-default-model");
-                    }
-                }
-                if (backupDefault instanceof Map) {
-                    llm.put("agent-default-model", backupDefault);
-                } else {
-                    llm.remove("agent-default-model");
-                }
-            }
-        }
-        writeYamlMap(file, root);
-    }
-
-    private static boolean isAppliedDsh(File rootfs, ModelConfigStore.Entry entry) {
-        Map<String, Object> root = readYamlMap(dshConfigFile(rootfs));
-        if (root == null) return false;
-        Object llmObj = root.get("llm-pi-ai");
-        if (!(llmObj instanceof Map)) return false;
-        Object providersObj = ((Map<String, Object>) llmObj).get("providers");
-        return providersObj instanceof Map
-            && ((Map<String, Object>) providersObj).containsKey(entry.providerId);
-    }
-
-    // ------------------------------------------------------------------
-    // OpenCode — ~/.config/opencode/opencode.json
-    // ------------------------------------------------------------------
-
-    private static boolean applyOpenCode(File rootfs, ModelConfigStore.Entry entry,
-                                         String apiKey) {
-        File file = new File(homeDir(rootfs), ".config/opencode/opencode.json");
-        backupOnce(file);
-        JSONObject root = readJsonObject(file);
-        if (root == null) return false;
-        JSONObject providers = getOrCreateJsonObject(root, "providers");
-        JSONObject provider = new JSONObject();
-        try {
-            String pkg = entry.type == ModelConfigStore.TYPE_ANTHROPIC
-                ? "@opencode/ai/providers/anthropic-compatible"
-                : "@opencode/ai/providers/openai-compatible";
-            provider.put("package", pkg);
-            JSONObject settings = new JSONObject();
-            settings.put("baseURL", ModelConfigStore.effectiveBaseUrl(entry));
-            settings.put("apiKey", apiKey);
-            provider.put("settings", settings);
-            JSONObject models = new JSONObject();
-            for (String model : entry.models) {
-                models.put(model, new JSONObject());
-            }
-            provider.put("models", models);
-            providers.put(entry.providerId, provider);
-            if (entry.setDefault) {
-                root.put("model", entry.providerId + "/" + entry.primaryModel);
-            }
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to build OpenCode provider", e);
-            return false;
-        }
-        return writeJsonObject(file, root);
-    }
-
-    private static void removeOpenCode(File rootfs, ModelConfigStore.Entry entry) {
-        File file = new File(homeDir(rootfs), ".config/opencode/opencode.json");
-        if (!file.isFile()) return;
-        JSONObject root = readJsonObject(file);
-        if (root == null) return;
-        JSONObject providers = root.optJSONObject("providers");
-        if (providers != null && providers.has(entry.providerId)) {
-            providers.remove(entry.providerId);
-        }
-        String currentModel = root.optString("model", "");
-        if (currentModel.startsWith(entry.providerId + "/")) {
-            JSONObject backup = readJsonObject(backupFileFor(file));
-            if (backup != null && backup.has("model")) {
-                try {
-                    root.put("model", backup.optString("model", ""));
-                } catch (Exception e) {
-                    Log.w(LOG_TAG, "Failed to restore OpenCode model", e);
-                    root.remove("model");
-                }
-            } else {
-                root.remove("model");
-            }
-        }
-        writeJsonObject(file, root);
-    }
-
-    private static boolean isAppliedOpenCode(File rootfs, ModelConfigStore.Entry entry) {
-        JSONObject root = readJsonObject(
-            new File(homeDir(rootfs), ".config/opencode/opencode.json"));
-        if (root == null) return false;
-        JSONObject providers = root.optJSONObject("providers");
         return providers != null && providers.has(entry.providerId);
     }
 
@@ -1206,10 +1102,19 @@ public final class ModelConfigApplier {
         try {
             JSONObject env = getOrCreateJsonObject(root, "env");
             env.put("ANTHROPIC_BASE_URL", ModelConfigStore.effectiveBaseUrl(entry));
+            // Both token names: Bearer gateways read ANTHROPIC_AUTH_TOKEN,
+            // x-api-key gateways read ANTHROPIC_API_KEY (wrong one → 401).
             env.put("ANTHROPIC_AUTH_TOKEN", apiKey);
+            env.put("ANTHROPIC_API_KEY", apiKey);
             root.put("availableModels", new JSONArray(entry.models));
             if (entry.setDefault) {
                 root.put("model", entry.primaryModel);
+                // Otherwise subagents/background tasks fall back to
+                // Anthropic-hosted models.
+                env.put("ANTHROPIC_MODEL", entry.primaryModel);
+                env.put("ANTHROPIC_DEFAULT_OPUS_MODEL", entry.primaryModel);
+                env.put("ANTHROPIC_DEFAULT_SONNET_MODEL", entry.primaryModel);
+                env.put("ANTHROPIC_DEFAULT_HAIKU_MODEL", entry.primaryModel);
             }
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to build Claude Code settings", e);
@@ -1223,12 +1128,27 @@ public final class ModelConfigApplier {
         if (!file.isFile()) return;
         JSONObject root = readJsonObject(file);
         if (root == null) return;
+        JSONObject backup = readJsonObject(backupFileFor(file));
+        JSONObject backupEnv = backup == null ? null : backup.optJSONObject("env");
         JSONObject env = root.optJSONObject("env");
         if (env != null) {
-            env.remove("ANTHROPIC_BASE_URL");
-            env.remove("ANTHROPIC_AUTH_TOKEN");
+            for (String key : new String[]{"ANTHROPIC_BASE_URL",
+                    "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL"}) {
+                if (backupEnv != null && backupEnv.has(key)) {
+                    try {
+                        env.put(key, backupEnv.optString(key, ""));
+                    } catch (Exception e) {
+                        Log.w(LOG_TAG, "Failed to restore Claude env key", e);
+                        env.remove(key);
+                    }
+                } else {
+                    env.remove(key);
+                }
+            }
         }
-        JSONObject backup = readJsonObject(backupFileFor(file));
         if (entry.primaryModel.equals(root.optString("model", ""))) {
             if (backup != null && backup.has("model")) {
                 try {
@@ -1260,97 +1180,6 @@ public final class ModelConfigApplier {
         if (root == null) return false;
         JSONObject env = root.optJSONObject("env");
         return env != null && env.has("ANTHROPIC_AUTH_TOKEN");
-    }
-
-    // ------------------------------------------------------------------
-    // Hermes — ~/.hermes/config.yaml + ~/.hermes/.env
-    // ------------------------------------------------------------------
-
-    private static File hermesConfigFile(File rootfs) {
-        return new File(homeDir(rootfs), ".hermes/config.yaml");
-    }
-
-    private static File hermesEnvFile(File rootfs) {
-        return new File(homeDir(rootfs), ".hermes/.env");
-    }
-
-    private static boolean applyHermes(File rootfs, ModelConfigStore.Entry entry,
-                                       String apiKey) {
-        File configFile = hermesConfigFile(rootfs);
-        File envFile = hermesEnvFile(rootfs);
-        backupOnce(configFile);
-        backupOnce(envFile);
-        Map<String, Object> root = readYamlMap(configFile);
-        if (root == null) return false;
-        Map<String, Object> model = getOrCreateYamlMap(root, "model");
-        model.put("provider", "custom");
-        model.put("base_url", ModelConfigStore.effectiveBaseUrl(entry));
-        if (entry.setDefault) {
-            model.put("default", entry.primaryModel);
-        }
-        model.put("key_env", ENV_OPENAI_KEY);
-        if (entry.type == ModelConfigStore.TYPE_ANTHROPIC) {
-            model.put("transport", "anthropic_messages");
-        }
-        Map<String, Object> providers = getOrCreateYamlMap(root, "providers");
-        providers.put("models", new ArrayList<>(entry.models));
-        if (!writeYamlMap(configFile, root)) return false;
-        return upsertDotenvLine(envFile, ENV_OPENAI_KEY, apiKey);
-    }
-
-    private static void removeHermes(File rootfs, ModelConfigStore.Entry entry) {
-        File configFile = hermesConfigFile(rootfs);
-        if (configFile.isFile()) {
-            Map<String, Object> root = readYamlMap(configFile);
-            if (root != null) {
-                Object modelObj = root.get("model");
-                if (modelObj instanceof Map) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> model = (Map<String, Object>) modelObj;
-                    if (ENV_OPENAI_KEY.equals(model.get("key_env"))) {
-                        Map<String, Object> backup = readYamlMap(backupFileFor(configFile));
-                        Object backupModel = backup == null ? null : backup.get("model");
-                        if (backupModel instanceof Map) {
-                            root.put("model", backupModel);
-                        } else {
-                            model.remove("provider");
-                            model.remove("base_url");
-                            model.remove("default");
-                            model.remove("key_env");
-                            model.remove("transport");
-                        }
-                    }
-                }
-                Object providersObj = root.get("providers");
-                if (providersObj instanceof Map) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> providers = (Map<String, Object>) providersObj;
-                    Map<String, Object> backup = readYamlMap(backupFileFor(configFile));
-                    Object backupProviders = backup == null ? null : backup.get("providers");
-                    if (backupProviders instanceof Map
-                            && ((Map<String, Object>) backupProviders)
-                                .containsKey("models")) {
-                        providers.put("models",
-                            ((Map<String, Object>) backupProviders).get("models"));
-                    } else {
-                        providers.remove("models");
-                    }
-                }
-                writeYamlMap(configFile, root);
-            }
-        }
-        File envFile = hermesEnvFile(rootfs);
-        if (envFile.isFile()) {
-            removeDotenvLine(envFile, ENV_OPENAI_KEY);
-        }
-    }
-
-    private static boolean isAppliedHermes(File rootfs, ModelConfigStore.Entry entry) {
-        Map<String, Object> root = readYamlMap(hermesConfigFile(rootfs));
-        if (root == null) return false;
-        Object modelObj = root.get("model");
-        return modelObj instanceof Map
-            && ENV_OPENAI_KEY.equals(((Map<String, Object>) modelObj).get("key_env"));
     }
 
     // ------------------------------------------------------------------
@@ -1413,50 +1242,5 @@ public final class ModelConfigApplier {
             new File(homeDir(rootfs), ".gemini/antigravity-cli/settings.json"));
         if (root == null) return false;
         return "gemini".equals(root.optString("modelProvider", ""));
-    }
-
-    // ------------------------------------------------------------------
-    // dotenv helpers (Hermes ~/.hermes/.env)
-    // ------------------------------------------------------------------
-
-    /** Set KEY=value, preserving the other lines. Values are written raw
-     * (API keys are [A-Za-z0-9_.-] in practice). */
-    private static boolean upsertDotenvLine(File file, String key, String value) {
-        File parent = file.getParentFile();
-        if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return false;
-        String content = PromptThemeSync.readFileOrEmpty(file);
-        String[] lines = content.split("\n", -1);
-        StringBuilder builder = new StringBuilder();
-        boolean replaced = false;
-        for (String line : lines) {
-            if (line.startsWith(key + "=")) {
-                if (!replaced) {
-                    builder.append(key).append("=").append(value).append("\n");
-                    replaced = true;
-                }
-                continue;
-            }
-            builder.append(line).append("\n");
-        }
-        if (!replaced) {
-            if (builder.length() > 0
-                    && builder.charAt(builder.length() - 1) != '\n') {
-                builder.append('\n');
-            }
-            builder.append(key).append("=").append(value).append("\n");
-        }
-        return PromptThemeSync.writeFileAtomically(file, builder.toString());
-    }
-
-    private static void removeDotenvLine(File file, String key) {
-        String content = PromptThemeSync.readFileOrEmpty(file);
-        if (!content.contains(key + "=")) return;
-        String[] lines = content.split("\n", -1);
-        StringBuilder builder = new StringBuilder();
-        for (String line : lines) {
-            if (line.startsWith(key + "=")) continue;
-            builder.append(line).append("\n");
-        }
-        PromptThemeSync.writeFileAtomically(file, builder.toString());
     }
 }
