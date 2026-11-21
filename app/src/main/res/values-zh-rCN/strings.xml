@@ -458,7 +458,6 @@
     <string name="modelconfig_not_installed">未安装</string>
     <string name="modelconfig_yaml_note">应用后该文件会被重排，注释会丢失；原文件已备份为 .termux-bak</string>
     <string name="modelconfig_codex_note">Codex 只认 Responses API，纯 Chat Completions 端点接不上</string>
-    <string name="modelconfig_hermes_note">Hermes 要求模型上下文不低于 64K</string>
     <string name="modelconfig_apply_to_distros">应用到发行版</string>
     <string name="modelconfig_all_distros">全部已安装的发行版</string>
     <string name="modelconfig_no_distros">还没有安装发行版</string>
