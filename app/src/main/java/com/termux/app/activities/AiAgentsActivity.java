@@ -68,6 +68,10 @@ public class AiAgentsActivity extends AppCompatActivity {
     public static final String EXTRA_CONTAINER_NAME = "com.termux.aiagents.container_name";
     public static final String EXTRA_DISTRO_ID = "com.termux.aiagents.distro_id";
     public static final String EXTRA_DISPLAY_NAME = "com.termux.aiagents.display_name";
+    /** Agent id to update right after detection (set by the drawer
+     * "可更新" label, which already confirmed with the user). */
+    public static final String EXTRA_AUTO_UPDATE_AGENT_ID =
+        "com.termux.aiagents.auto_update_agent_id";
 
     /** Distros whose Node 24 path is verified on-device (v1). Other distros
      * show Node-dependent agents as unsupported until verified; adding a
@@ -109,6 +113,10 @@ public class AiAgentsActivity extends AppCompatActivity {
     private String mContainer;
     private String mDistroId;
     private String mDisplay;
+    /** Agent id from EXTRA_AUTO_UPDATE_AGENT_ID; consumed exactly once
+     * after the first detection, then cleared so a later re-detection
+     * (e.g. coming back from the update session) does not re-run it. */
+    private String mAutoUpdateAgentId;
 
     private ListView mAgentListView;
     private TextView mStatusView;
@@ -136,6 +144,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         mContainer = getIntent().getStringExtra(EXTRA_CONTAINER_NAME);
         mDistroId = getIntent().getStringExtra(EXTRA_DISTRO_ID);
         mDisplay = getIntent().getStringExtra(EXTRA_DISPLAY_NAME);
+        mAutoUpdateAgentId = getIntent().getStringExtra(EXTRA_AUTO_UPDATE_AGENT_ID);
         if (mContainer == null) mContainer = "";
         if (mDistroId == null) mDistroId = "";
         if (mDisplay == null) mDisplay = mContainer;
@@ -199,7 +208,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         });
         mInstallButton.setOnClickListener(v -> installSelected());
 
-        // Cached latest versions (checked within the last day) apply to
+        // Cached latest versions (checked within the last hour) apply to
         // the rows as soon as detection finishes, without re-fetching.
         AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
         if (AiAgentUtils.isUpdateCacheValid(cache.checkedAt)) {
@@ -280,9 +289,28 @@ public class AiAgentsActivity extends AppCompatActivity {
                     for (AgentRow row : mRows) if (row.installed) installed++;
                     mCheckUpdatesButton.setEnabled(installed > 0 && !mCheckingUpdates);
                     updateStatus(getString(R.string.aiagents_status_summary, installed, mRows.size()));
+                    runPendingAutoUpdate();
                 });
             }
         }.start();
+    }
+
+    /** Run the drawer-requested update once, right after detection: the
+     * user already confirmed in the drawer, so the update session starts
+     * directly (same path as the row's update dialog). The flag is
+     * cleared first, so coming back from the session cannot re-run it. */
+    private void runPendingAutoUpdate() {
+        if (mAutoUpdateAgentId == null) return;
+        String target = mAutoUpdateAgentId;
+        mAutoUpdateAgentId = null;
+        for (AgentRow row : mRows) {
+            if (row.def.id.equals(target) && row.installed) {
+                List<AiAgentUtils.AgentDef> single = new ArrayList<>();
+                single.add(row.def);
+                startAgentSession(single, true);
+                return;
+            }
+        }
     }
 
     /** Node-dependent agents are only offered where the Node 24 path is verified;
@@ -294,7 +322,7 @@ public class AiAgentsActivity extends AppCompatActivity {
     }
 
     // ------------------------------------------------------------------
-    // Update detection (latest versions, cached one day)
+    // Update detection (latest versions, cached one hour)
     // ------------------------------------------------------------------
 
     /** Copy the known latest versions (cache + last check) into the
@@ -310,10 +338,10 @@ public class AiAgentsActivity extends AppCompatActivity {
     /** Check for updates of the agents installed in this container.
      * Only runs on an explicit tap (never automatically): the button is
      * disabled while a check is running and when nothing is installed.
-     * Fetches run on a background thread; rows are matched by agent id
-     * on the UI thread, so a detection running in parallel cannot leave
-     * stale row references behind. Failures are silent — a failed agent
-     * keeps its cached value and shows no badge. */
+     * Fetches run in parallel on a background thread; rows are matched by
+     * agent id on the UI thread, so a detection running in parallel cannot
+     * leave stale row references behind. Failures are silent — a failed
+     * agent keeps its cached value and shows no badge. */
     private void checkUpdatesInBackground() {
         if (mCheckingUpdates) return;
         List<AiAgentUtils.AgentDef> installed = new ArrayList<>();
@@ -327,11 +355,12 @@ public class AiAgentsActivity extends AppCompatActivity {
         new Thread() {
             @Override
             public void run() {
-                Map<String, String> fetched = new HashMap<>();
+                Map<String, String> distroByAgent = new HashMap<>();
                 for (AiAgentUtils.AgentDef def : installed) {
-                    String latest = AiAgentUtils.fetchLatestVersion(def, mDistroId);
-                    if (!latest.isEmpty()) fetched.put(def.id, latest);
+                    distroByAgent.put(def.id, mDistroId);
                 }
+                Map<String, String> fetched =
+                    AiAgentUtils.fetchLatestVersions(installed, distroByAgent);
                 boolean anyFetched = !fetched.isEmpty();
                 final Map<String, String> merged;
                 if (anyFetched) {
