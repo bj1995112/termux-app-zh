@@ -383,4 +383,42 @@
     <string name="prompt_theme_23_name">Last Two Dirs</string>
     <string name="prompt_theme_24_name">Root Turns Red</string>
     <string name="prompt_sync_distros">Synced to %1$d distros</string>
+
+    <!-- Download source (mirror) settings -->
+    <string name="mirror_title">Download source</string>
+    <string name="mirror_preset_official">Official</string>
+    <string name="mirror_preset_tuna">TUNA (Tsinghua)</string>
+    <string name="mirror_preset_ustc">USTC</string>
+    <string name="mirror_preset_aliyun">Alibaba Cloud</string>
+    <string name="mirror_preset_custom">Custom</string>
+    <string name="mirror_registry_title">Registry mirror</string>
+    <string name="mirror_registry_follow">Follow preset</string>
+    <string name="mirror_registry_follow_summary">Current: %1$s</string>
+    <string name="mirror_custom_distro_host">Distro mirror host</string>
+    <string name="mirror_custom_registry">Registry mirror host</string>
+    <string name="mirror_custom_npm">npm registry</string>
+    <string name="mirror_custom_pypi">PyPI index</string>
+    <string name="mirror_custom_github_proxy">GitHub proxy (optional)</string>
+    <string name="mirror_sync_button">Sync to installed distros</string>
+    <string name="mirror_test_button">Test connection</string>
+    <string name="mirror_restore_button">Restore official sources</string>
+    <string name="mirror_sync_confirm">Sync the new mirror to %1$d installed distros?</string>
+    <string name="mirror_synced">Synced to %1$d distros</string>
+    <string name="mirror_synced_partial">Synced to %1$d distros, %2$d failed</string>
+    <string name="mirror_no_distros">No distros installed</string>
+    <string name="mirror_probe_ok">All selected mirrors are reachable</string>
+    <string name="mirror_probe_failed">Unreachable: %1$s</string>
+    <string name="mirror_probe_distro">Distro mirror</string>
+    <string name="mirror_restore_confirm">Restore official sources in installed distros and switch back to Official?</string>
+    <string name="mirror_restored">Official sources restored</string>
+    <string name="mirror_void_note">Void Linux is only mirrored on TUNA; other presets keep its official source</string>
+    <string name="mirror_free_proxy_note">DaoCloud / dockerproxy are free proxies with no SLA; switch back to Official if downloads fail</string>
+    <string name="mirror_github_proxy_warning">Third-party proxies can see and modify downloads; only use one you trust</string>
+    <string name="mirror_invalid_url">Invalid URL (must start with https://)</string>
+    <string name="mirror_switch_anyway">Switch anyway</string>
+    <string name="mirror_test_checking">Testing connection…</string>
+    <string name="mirror_not_set">Not set</string>
+    <string name="storage_preference_title">External storage</string>
+    <string name="storage_preference_summary_granted">Storage access granted — phone files are in ~/storage</string>
+    <string name="storage_preference_summary_not_granted">Not set up — tap to allow access to phone files</string>
 </resources>
