@@ -505,12 +505,17 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("  esac\n");
         s.append("}\n");
         s.append(ensureCurlCommand(mDistroId)).append("\n");
+        // Download mirrors: npm / PyPI / uv / Hermes downloads inside the
+        // distro use the selected preset (for the Official preset this just
+        // pins the official registries). Must come before any npm/uv use.
+        MirrorSettings.MirrorPreset preset = MirrorSettings.loadPreset(this);
+        s.append(MirrorSettings.mirrorScriptExports(preset));
         boolean needsNode = false;
         for (AiAgentUtils.AgentDef def : agents) if (def.needsNode) needsNode = true;
         if (needsNode) {
             s.append("if ! node_ok; then\n");
             s.append("  echo \"正在安装 Node 24 …\"\n");
-            s.append("  ").append(nodeInstallCommand(mDistroId)).append("\n");
+            s.append("  ").append(nodeInstallCommand(mDistroId, preset)).append("\n");
             s.append("  node_fallback_links\n");
             s.append("fi\n");
             s.append("if node_ok; then echo \"Node $(node --version) 就绪\"; ");
@@ -596,8 +601,14 @@ public class AiAgentsActivity extends AppCompatActivity {
     }
 
     /** Install Node 24. All 7 distros can provide Node >= 24.9 (see design.md §2);
-     * only ubuntu/debian are offered in v1 (NODE_VERIFIED). */
-    private static String nodeInstallCommand(String distroId) {
+     * only ubuntu/debian are offered in v1 (NODE_VERIFIED). On Ubuntu/Debian
+     * with a non-official mirror preset, NodeSource has no Chinese mirror,
+     * so install Node 24 from the npmmirror binary tarball instead. */
+    private static String nodeInstallCommand(String distroId, MirrorSettings.MirrorPreset preset) {
+        if (("ubuntu".equals(distroId) || "debian".equals(distroId))
+                && preset != null && !MirrorSettings.isOfficial(preset)) {
+            return MirrorSettings.nodeTarballInstallCommand();
+        }
         switch (distroId) {
             case "ubuntu":
             case "debian":
