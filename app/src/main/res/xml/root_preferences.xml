@@ -12,6 +12,18 @@
         app:summary="@string/prompt_theme_01_name"
         app:persistent="false"/>
 
+    <Preference
+        app:key="download_mirror"
+        app:title="@string/mirror_title"
+        app:summary="@string/mirror_preset_official"
+        app:persistent="false"/>
+
+    <Preference
+        app:key="storage"
+        app:title="@string/storage_preference_title"
+        app:summary="@string/storage_preference_summary_not_granted"
+        app:persistent="false"/>
+
     <SwitchPreferenceCompat
         app:key="show_welcome_message"
         app:title="@string/welcome_message_title"
