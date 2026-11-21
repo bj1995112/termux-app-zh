@@ -68,6 +68,26 @@ public class SettingsActivity extends AppCompatActivity {
             }.start();
         }
 
+        @Override
+        public void onResume() {
+            super.onResume();
+            refreshDownloadMirrorSummary();
+        }
+
+        /** The download-source summary shows the current preset name, not
+         *  the static value from the XML. Refreshed every time the
+         *  settings screen is shown (including coming back from the
+         *  mirror screen after switching presets). */
+        private void refreshDownloadMirrorSummary() {
+            Context context = getContext();
+            if (context == null) return;
+            Preference downloadMirrorPreference = findPreference("download_mirror");
+            if (downloadMirrorPreference != null) {
+                MirrorSettings.MirrorPreset preset = MirrorSettings.loadPreset(context);
+                downloadMirrorPreference.setSummary(MirrorSettings.presetNameResId(preset.id));
+            }
+        }
+
         private void configureTermuxAPIPreference(@NonNull Context context) {
             Preference termuxAPIPreference = findPreference("termux_api");
             if (termuxAPIPreference != null) {

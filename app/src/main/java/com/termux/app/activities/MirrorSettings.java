@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
 
+import com.termux.R;
 import com.termux.shared.settings.preferences.SharedPreferenceUtils;
 
 import java.io.File;
@@ -18,6 +19,10 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Download-source (换下载源) settings.
@@ -169,7 +174,7 @@ public final class MirrorSettings {
 
     public static MirrorPreset loadPreset(Context context) {
         SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(context, PREFS_NAME);
-        String id = prefs.getString(KEY_MIRROR_ID, PRESET_OFFICIAL);
+        String id = prefs.getString(KEY_MIRROR_ID, PRESET_TUNA);
         if (PRESET_CUSTOM.equals(id)) return loadCustomPreset(context);
         MirrorPreset preset = presetForId(id);
         preset.registryOverride = prefs.getString(KEY_REGISTRY_OVERRIDE, REGISTRY_FOLLOW);
@@ -203,6 +208,15 @@ public final class MirrorSettings {
             editor.putString(KEY_CUSTOM_GITHUB_PROXY, preset.githubProxy);
         }
         editor.apply();
+    }
+
+    /** String resource for a preset id (settings summary). Unknown ids fall back to Official. */
+    public static int presetNameResId(String id) {
+        if (PRESET_TUNA.equals(id)) return R.string.mirror_preset_tuna;
+        if (PRESET_USTC.equals(id)) return R.string.mirror_preset_ustc;
+        if (PRESET_ALIYUN.equals(id)) return R.string.mirror_preset_aliyun;
+        if (PRESET_CUSTOM.equals(id)) return R.string.mirror_preset_custom;
+        return R.string.mirror_preset_official;
     }
 
     public static boolean isOfficial(MirrorPreset preset) {
@@ -929,9 +943,11 @@ public final class MirrorSettings {
     // Connectivity probe
     // ------------------------------------------------------------------
 
-    /** Probe the preset's endpoints; returns the labels of the ones that
-     *  did not answer within 5s. Empty list = all reachable. Call on a
-     *  background thread. */
+    /** Probe the preset's endpoints in parallel; returns the labels of the
+     *  ones that did not answer within 5s. Empty list = all reachable.
+     *  Same contract as before, but all probes run at once, so the whole
+     *  probe finishes in ~5s instead of up to ~40s sequential.
+     *  Call on a background thread. */
     public static List<String> probePreset(MirrorPreset preset) {
         List<String> unreachable = new ArrayList<>();
         if (preset == null) preset = presetForId(PRESET_OFFICIAL);
@@ -947,8 +963,21 @@ public final class MirrorSettings {
         if (!registry.isEmpty()) {
             probes.add(new String[]{"registry", "https://" + registry + "/v2/"});
         }
+        ExecutorService pool = Executors.newFixedThreadPool(probes.size());
+        List<Future<Boolean>> results = new ArrayList<>();
         for (String[] probe : probes) {
-            if (!probeUrl(probe[1])) unreachable.add(probe[0]);
+            final String url = probe[1];
+            results.add(pool.submit(() -> probeUrl(url)));
+        }
+        pool.shutdown();
+        for (int i = 0; i < probes.size(); i++) {
+            try {
+                if (!results.get(i).get()) unreachable.add(probes.get(i)[0]);
+            } catch (InterruptedException | ExecutionException e) {
+                // A probe that could not even run counts as unreachable;
+                // a probe must never crash the caller.
+                unreachable.add(probes.get(i)[0]);
+            }
         }
         return unreachable;
     }

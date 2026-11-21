@@ -27,8 +27,11 @@ import java.util.Set;
  * Download-source (换下载源) settings.
  *
  * One global preset governs every distro and every AI agent install.
- * Switching presets probes the new preset's endpoints first; if any of
- * them is unreachable the user can still switch anyway or cancel.
+ * Switching presets applies immediately; the new preset's endpoints are
+ * then probed in the background and the result is shown in the status
+ * line only, never as a blocking dialog. The image registry override
+ * (follow preset / DaoCloud / dockerproxy) is always selectable,
+ * whatever preset is active.
  * Changing a preset never auto-syncs installed distros: the user is asked
  * (design decision), and "同步到已安装的发行版" re-applies on demand.
  */
@@ -141,24 +144,23 @@ public class MirrorSettingsActivity extends AppCompatActivity {
     private void buildRegistryRows() {
         mRegistryContainer.removeAllViews();
         LayoutInflater inflater = LayoutInflater.from(this);
-        boolean official = MirrorSettings.isOfficial(mPreset);
         String effective = MirrorSettings.effectiveRegistry(mPreset);
         if (effective.isEmpty()) effective = "Docker Hub";
 
         addRegistryRow(inflater, getString(R.string.mirror_registry_follow),
                 getString(R.string.mirror_registry_follow_summary, effective),
                 MirrorSettings.REGISTRY_FOLLOW.equals(mPreset.registryOverride),
-                MirrorSettings.REGISTRY_FOLLOW, official);
+                MirrorSettings.REGISTRY_FOLLOW);
         addRegistryRow(inflater, "DaoCloud", MirrorSettings.REGISTRY_DAOCLOUD,
                 MirrorSettings.REGISTRY_DAOCLOUD.equals(mPreset.registryOverride),
-                MirrorSettings.REGISTRY_DAOCLOUD, official);
+                MirrorSettings.REGISTRY_DAOCLOUD);
         addRegistryRow(inflater, "dockerproxy", MirrorSettings.REGISTRY_DOCKERPROXY,
                 MirrorSettings.REGISTRY_DOCKERPROXY.equals(mPreset.registryOverride),
-                MirrorSettings.REGISTRY_DOCKERPROXY, official);
+                MirrorSettings.REGISTRY_DOCKERPROXY);
     }
 
     private void addRegistryRow(LayoutInflater inflater, String title, String subtitle,
-                                boolean checked, String override, boolean disabled) {
+                                boolean checked, String override) {
         View row = inflater.inflate(R.layout.mirror_preset_row, mRegistryContainer, false);
         TextView titleView = row.findViewById(R.id.mirror_row_title);
         TextView subtitleView = row.findViewById(R.id.mirror_row_subtitle);
@@ -166,10 +168,7 @@ public class MirrorSettingsActivity extends AppCompatActivity {
         titleView.setText(title);
         subtitleView.setText(subtitle);
         checkView.setText(checked ? "✓" : "");
-        row.setAlpha(disabled ? 0.4f : 1.0f);
-        if (!disabled) {
-            row.setOnClickListener(v -> setRegistryOverride(override));
-        }
+        row.setOnClickListener(v -> setRegistryOverride(override));
         mRegistryContainer.addView(row);
     }
 
@@ -214,26 +213,20 @@ public class MirrorSettingsActivity extends AppCompatActivity {
                 ? MirrorSettings.loadCustomPreset(this)
                 : MirrorSettings.presetForId(id);
         candidate.registryOverride = mPreset.registryOverride;
+        // Switch immediately; the probe only reports reachability in the
+        // status line and never blocks the switch.
+        applyPreset(candidate);
         setStatus(getString(R.string.mirror_test_checking));
         new Thread(() -> {
             List<String> unreachable = MirrorSettings.probePreset(candidate);
             runOnUiThread(() -> {
-                setStatus(null);
                 if (unreachable.isEmpty()) {
-                    applyPreset(candidate);
+                    setStatus(getString(R.string.mirror_probe_ok));
                 } else {
-                    showProbeFailedDialog(candidate, unreachable);
+                    setStatus(getString(R.string.mirror_probe_failed, joinLabels(unreachable)));
                 }
             });
         }).start();
-    }
-
-    private void showProbeFailedDialog(MirrorPreset candidate, List<String> unreachable) {
-        new AlertDialog.Builder(this)
-                .setMessage(getString(R.string.mirror_probe_failed, joinLabels(unreachable)))
-                .setPositiveButton(R.string.mirror_switch_anyway, (d, w) -> applyPreset(candidate))
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
     }
 
     private void applyPreset(MirrorPreset candidate) {
