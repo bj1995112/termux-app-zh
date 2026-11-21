@@ -10,11 +10,13 @@ import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
 
 import com.termux.R;
+import com.termux.app.TermuxActivity;
 import com.termux.shared.termux.settings.preferences.TermuxAPIAppSharedPreferences;
 import com.termux.shared.termux.settings.preferences.TermuxFloatAppSharedPreferences;
 import com.termux.shared.termux.settings.preferences.TermuxTaskerAppSharedPreferences;
 import com.termux.shared.termux.settings.preferences.TermuxWidgetAppSharedPreferences;
 import com.termux.shared.activity.media.AppCompatActivityUtils;
+import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.theme.NightMode;
 
 public class SettingsActivity extends AppCompatActivity {
@@ -59,6 +61,8 @@ public class SettingsActivity extends AppCompatActivity {
                     configureTermuxTaskerPreference(context);
                     configureTermuxWidgetPreference(context);
                     configurePromptStylePreference(context);
+                    configureDownloadMirrorPreference(context);
+                    configureStoragePreference(context);
                 }
             }.start();
         }
@@ -104,6 +108,32 @@ public class SettingsActivity extends AppCompatActivity {
             if (promptStylePreference != null) {
                 promptStylePreference.setOnPreferenceClickListener(preference -> {
                     context.startActivity(new Intent(context, PromptStyleActivity.class));
+                    return true;
+                });
+            }
+        }
+
+        private void configureDownloadMirrorPreference(@NonNull Context context) {
+            Preference downloadMirrorPreference = findPreference("download_mirror");
+            if (downloadMirrorPreference != null) {
+                downloadMirrorPreference.setOnPreferenceClickListener(preference -> {
+                    context.startActivity(new Intent(context, MirrorSettingsActivity.class));
+                    return true;
+                });
+            }
+        }
+
+        private void configureStoragePreference(@NonNull Context context) {
+            Preference storagePreference = findPreference("storage");
+            if (storagePreference != null) {
+                // ~/storage exists once setup has run after granting access.
+                if (TermuxConstants.TERMUX_STORAGE_HOME_DIR.exists()) {
+                    storagePreference.setSummary(R.string.storage_preference_summary_granted);
+                }
+                storagePreference.setOnPreferenceClickListener(preference -> {
+                    Intent intent = new Intent(context, TermuxActivity.class);
+                    intent.putExtra(TermuxActivity.EXTRA_REQUEST_STORAGE_PERMISSION, true);
+                    context.startActivity(intent);
                     return true;
                 });
             }
