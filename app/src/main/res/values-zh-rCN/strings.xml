@@ -336,6 +336,12 @@
     <string name="aiagents_downgrade_note">降级会覆盖当前版。</string>
     <string name="aiagents_downgrade_agy_note">提醒：agy 二进制自带后台自更新，装旧版后它可能自己升回最新版。</string>
     <string name="aiagents_version_not_supported">%1$s 暂不支持安装旧版本</string>
+    <string name="aiagents_retry">重试</string>
+    <string name="aiagents_offline_data">离线数据</string>
+    <string name="aiagents_history_error_timeout">连接超时</string>
+    <string name="aiagents_history_error_http_403">GitHub 返回 403（请求受限）</string>
+    <string name="aiagents_history_error_no_network">无网络</string>
+    <string name="aiagents_history_error_parse">解析失败</string>
     <string name="aiagents_drawer_version_with_update">%1$s · 有新版本 %2$s</string>
 
     <string name="prompt_style_title">命令行样式</string>

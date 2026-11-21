@@ -340,6 +340,12 @@
     <string name="aiagents_downgrade_note">Downgrading will replace the current version.</string>
     <string name="aiagents_downgrade_agy_note">Note: agy updates itself in the background, so an older version may update itself back to the latest version.</string>
     <string name="aiagents_version_not_supported">Installing an older version is not supported for %1$s yet</string>
+    <string name="aiagents_retry">Retry</string>
+    <string name="aiagents_offline_data">Offline data</string>
+    <string name="aiagents_history_error_timeout">Connection timed out</string>
+    <string name="aiagents_history_error_http_403">GitHub returned 403 (rate limited)</string>
+    <string name="aiagents_history_error_no_network">No network connection</string>
+    <string name="aiagents_history_error_parse">Failed to parse the response</string>
     <string name="aiagents_drawer_version_with_update">%1$s · Update available: %2$s</string>
 
     <string name="prompt_style_title">Command-Line Style</string>

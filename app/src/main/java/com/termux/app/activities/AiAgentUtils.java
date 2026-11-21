@@ -49,6 +49,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
@@ -102,8 +104,8 @@ public final class AiAgentUtils {
 
     /** Per-request timeouts for latest-version checks; any failure is
      * silent (no badge, no error) — see fetchLatestVersion. */
-    private static final int UPDATE_CHECK_CONNECT_TIMEOUT_MS = 10000;
-    private static final int UPDATE_CHECK_READ_TIMEOUT_MS = 20000;
+    private static final int UPDATE_CHECK_CONNECT_TIMEOUT_MS = 20000;
+    private static final int UPDATE_CHECK_READ_TIMEOUT_MS = 45000;
 
     /** Rootfs-relative path of the agy version record file. The agy
      * installer prints the version it installs but writes no version
@@ -845,33 +847,121 @@ public final class AiAgentUtils {
     }
 
     // ------------------------------------------------------------------
-    // Version history (version picker dialog)
+    // Version history (inline expandable rows)
     // ------------------------------------------------------------------
+
+    /** One published version with its publish date (YYYY-MM-DD, or ""
+     * when the source gives no date — a date is never invented). */
+    public static class VersionEntry {
+        public final String version;
+        public final String date;
+
+        public VersionEntry(String version, String date) {
+            this.version = version == null ? "" : version;
+            this.date = date == null ? "" : date;
+        }
+    }
+
+    /** A history fetch: the entries (newest first, at most
+     * MAX_HISTORY_VERSIONS), plus a short English failure code when the
+     * list is empty: "" (ok), "timeout", "http-403", "no-network",
+     * "parse-error", "empty". The code is mapped to a user string at
+     * display time (AiAgentsActivity.historyErrorMessage); the reason is
+     * also logged with Log.w. */
+    public static class HistoryResult {
+        public final List<VersionEntry> entries;
+        public final String error;
+
+        public HistoryResult(List<VersionEntry> entries, String error) {
+            this.entries = entries == null ? new ArrayList<>() : entries;
+            this.error = error == null ? "" : error;
+        }
+
+        static HistoryResult failure(String error) {
+            return new HistoryResult(new ArrayList<>(), error);
+        }
+    }
+
+    /** Result of one HTTP GET: the body (null on failure) and a short
+     * English error code ("" on success): "timeout", "http-403",
+     * "no-network", "empty". Any other HTTP status is reported as
+     * "empty" (nothing usable came back); the real status is logged. */
+    private static final class FetchResult {
+        final String body;
+        final String error;
+
+        FetchResult(String body, String error) {
+            this.body = body;
+            this.error = error == null ? "" : error;
+        }
+    }
+
+    /** YYYY-MM-DD from an ISO 8601 timestamp ("2026-11-20T..."), or ""
+     * when the value has no valid date prefix. */
+    private static String dateFromIso(String iso) {
+        if (iso == null || iso.length() < 10) return "";
+        return validDate(iso.substring(0, 10));
+    }
+
+    /** The date itself, or "" when it is not a YYYY-MM-DD calendar shape
+     * (month 01-12, day 01-31; no day-of-month validation beyond that —
+     * a bad date is dropped, never shown). */
+    private static String validDate(String date) {
+        if (date == null || date.length() != 10) return "";
+        if (date.charAt(4) != '-' || date.charAt(7) != '-') return "";
+        for (int i = 0; i < 10; i++) {
+            if (i == 4 || i == 7) continue;
+            if (!Character.isDigit(date.charAt(i))) return "";
+        }
+        int month = Integer.parseInt(date.substring(5, 7));
+        int day = Integer.parseInt(date.substring(8, 10));
+        if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+        return date;
+    }
+
+    /** "owner/repo" from a GitHub API releases URL, or "" when the URL
+     * does not match (the atom fallback is then skipped). */
+    private static String githubOwnerRepo(String apiUrl) {
+        if (apiUrl == null) return "";
+        int start = apiUrl.indexOf("repos/");
+        if (start < 0) return "";
+        int end = apiUrl.indexOf("/releases", start);
+        if (end < 0) return "";
+        return apiUrl.substring(start + "repos/".length(), end);
+    }
 
     /**
      * The newest few published versions of an agent, newest first, at most
-     * MAX_HISTORY_VERSIONS (latest + 2). The first entry is the same
-     * version fetchLatestVersion returns. Empty when the agent has no
-     * known history source or the fetch failed — the dialog then shows
-     * "查不到历史" and never errors. No version is ever hardcoded.
+     * MAX_HISTORY_VERSIONS (latest + 2), each with its publish date. The
+     * first entry is the same version fetchLatestVersion returns. When the
+     * primary source yields nothing, one fallback is tried (see the
+     * per-source methods); when both fail, the result carries the failure
+     * reason instead of a bare empty list. No version is ever hardcoded.
      *
-     * Sources (all verified live 2026-11-22, see agent-version-history
+     * Sources (all verified live 2026-11-22, see agent-version-history-v2
      * design.md §1):
      * - Pi / dsh / OpenCode / Claude: the full npm metadata's "time"
-     *   object, newest first; OpenCode skips 0.0.0-dev-* builds (the
-     *   dev dist-tag publishes several a day and would otherwise fill
-     *   the whole list). The abbreviated npm metadata has no "time",
-     *   so the full document is fetched (gzipped, see fetchUrlText).
+     *   object, newest first; OpenCode skips 0.0.0-dev-* builds. Primary
+     *   registry.npmjs.org, fallback registry.npmmirror.com (same JSON
+     *   shape, verified: identical top 3 for all four packages).
      * - Aider: PyPI "releases", each version's newest upload_time, newest
-     *   first — never sorted as strings (0.9.0 is a 2023 release and
-     *   would otherwise sort above 0.86.x).
+     *   first — never sorted as strings. Primary pypi.org, fallback
+     *   mirrors.tuna.tsinghua.edu.cn/pypi (same JSON shape, verified).
+     *   npmmirror / USTC / Aliyun PyPI JSON endpoints all 404, so they
+     *   are NOT used.
      * - Codex / Hermes / agy: the GitHub releases list (?per_page=20),
-     *   newest first; drafts and prereleases are skipped (Codex
-     *   publishes rust-vX.Y.Z-alpha.N prereleases), and for Hermes any
-     *   tag containing "canary" is skipped too.
+     *   newest first; drafts and prereleases are skipped, and for Hermes
+     *   any tag containing "canary" is skipped too. Fallback is the
+     *   releases.atom feed (no auth, no rate-limit counter): tag from the
+     *   entry link href, date from <updated>, prerelease-looking tags
+     *   skipped by substring (the feed has no prerelease flag — see
+     *   ATOM_SKIP_SUBSTRINGS). The feed only holds
+     *   10 entries, so the fallback can be partial — Codex and Hermes
+     *   yield 2 usable versions there today (alpha/canary flood), agy
+     *   yields 3; a partial list is still shown.
      */
-    public static List<String> fetchVersionHistory(AgentDef def, String distroId) {
-        if (def == null) return new ArrayList<>();
+    public static HistoryResult fetchVersionHistory(AgentDef def, String distroId) {
+        if (def == null) return HistoryResult.failure("empty");
         try {
             switch (def.id) {
                 case "pi":
@@ -896,26 +986,36 @@ public final class AiAgentUtils {
                         "https://api.github.com/repos/NousResearch/hermes-agent/releases?per_page=20",
                         false, true);
                 default:
-                    return new ArrayList<>();
+                    return HistoryResult.failure("empty");
             }
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to fetch version history for " + def.id, e);
-            return new ArrayList<>();
+            return HistoryResult.failure("parse-error");
         }
     }
 
     /** npm full metadata: "time" maps version -> first-publish time
      * (ISO 8601, so a plain string sort is chronological). Newest first,
      * at most MAX_HISTORY_VERSIONS, skipping dev builds when asked and
-     * anything that does not parse as a version. */
-    private static List<String> fetchNpmHistory(String npmPackage, boolean skipDevVersions) {
-        List<String> result = new ArrayList<>();
-        if (npmPackage == null || npmPackage.isEmpty()) return result;
+     * anything that does not parse as a version. Primary registry first,
+     * npmmirror once on failure (same shape). */
+    private static HistoryResult fetchNpmHistory(String npmPackage, boolean skipDevVersions) {
+        if (npmPackage == null || npmPackage.isEmpty()) return HistoryResult.failure("empty");
+        HistoryResult primary = fetchNpmHistoryFrom(
+            "https://registry.npmjs.org/" + npmPackage, skipDevVersions);
+        if (!primary.entries.isEmpty()) return primary;
+        HistoryResult mirror = fetchNpmHistoryFrom(
+            "https://registry.npmmirror.com/" + npmPackage, skipDevVersions);
+        if (!mirror.entries.isEmpty()) return mirror;
+        return primary.error.isEmpty() ? mirror : primary;
+    }
+
+    private static HistoryResult fetchNpmHistoryFrom(String url, boolean skipDevVersions) {
+        FetchResult fetched = fetchUrlResult(url);
+        if (fetched.body == null) return HistoryResult.failure(fetched.error);
         try {
-            String body = fetchUrlText("https://registry.npmjs.org/" + npmPackage);
-            if (body == null) return result;
-            JSONObject time = new JSONObject(body).optJSONObject("time");
-            if (time == null) return result;
+            JSONObject time = new JSONObject(fetched.body).optJSONObject("time");
+            if (time == null) return HistoryResult.failure("parse-error");
             List<String[]> dated = new ArrayList<>();
             Iterator<String> versions = time.keys();
             while (versions.hasNext()) {
@@ -927,27 +1027,39 @@ public final class AiAgentUtils {
                 dated.add(new String[]{version, when});
             }
             Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            List<VersionEntry> result = new ArrayList<>();
             for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
-                result.add(validatedVersion(dated.get(i)[0]));
+                result.add(new VersionEntry(validatedVersion(dated.get(i)[0]),
+                    dateFromIso(dated.get(i)[1])));
             }
-            return result;
+            if (result.isEmpty()) return HistoryResult.failure("empty");
+            return new HistoryResult(result, "");
         } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to fetch npm history for " + npmPackage, e);
-            return result;
+            Log.w(LOG_TAG, "Failed to parse npm history from " + url, e);
+            return HistoryResult.failure("parse-error");
         }
     }
 
     /** PyPI: "releases" maps version -> files; a version's date is its
      * newest file's upload_time_iso_8601. Newest first, at most
      * MAX_HISTORY_VERSIONS. Sorting by upload time (not by version
-     * string) is what keeps the 2023-era 0.9.0 out of the top 3. */
-    private static List<String> fetchPyPIHistory() {
-        List<String> result = new ArrayList<>();
+     * string) is what keeps the 2023-era 0.9.0 out of the top 3.
+     * Primary pypi.org first, TUNA mirror once on failure (same shape). */
+    private static HistoryResult fetchPyPIHistory() {
+        HistoryResult primary = fetchPyPIHistoryFrom("https://pypi.org/pypi/aider-chat/json");
+        if (!primary.entries.isEmpty()) return primary;
+        HistoryResult mirror = fetchPyPIHistoryFrom(
+            "https://mirrors.tuna.tsinghua.edu.cn/pypi/aider-chat/json");
+        if (!mirror.entries.isEmpty()) return mirror;
+        return primary.error.isEmpty() ? mirror : primary;
+    }
+
+    private static HistoryResult fetchPyPIHistoryFrom(String url) {
+        FetchResult fetched = fetchUrlResult(url);
+        if (fetched.body == null) return HistoryResult.failure(fetched.error);
         try {
-            String body = fetchUrlText("https://pypi.org/pypi/aider-chat/json");
-            if (body == null) return result;
-            JSONObject releases = new JSONObject(body).optJSONObject("releases");
-            if (releases == null) return result;
+            JSONObject releases = new JSONObject(fetched.body).optJSONObject("releases");
+            if (releases == null) return HistoryResult.failure("parse-error");
             List<String[]> dated = new ArrayList<>();
             Iterator<String> versions = releases.keys();
             while (versions.hasNext()) {
@@ -966,13 +1078,16 @@ public final class AiAgentUtils {
                 if (!newest.isEmpty()) dated.add(new String[]{version, newest});
             }
             Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            List<VersionEntry> result = new ArrayList<>();
             for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
-                result.add(validatedVersion(dated.get(i)[0]));
+                result.add(new VersionEntry(validatedVersion(dated.get(i)[0]),
+                    dateFromIso(dated.get(i)[1])));
             }
-            return result;
+            if (result.isEmpty()) return HistoryResult.failure("empty");
+            return new HistoryResult(result, "");
         } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to fetch PyPI history for aider-chat", e);
-            return result;
+            Log.w(LOG_TAG, "Failed to parse PyPI history from " + url, e);
+            return HistoryResult.failure("parse-error");
         }
     }
 
@@ -981,13 +1096,27 @@ public final class AiAgentUtils {
      * asked (Hermes). Codex prefers the release "name" (a plain version)
      * and falls back to tag_name minus "rust-v"; the others use tag_name
      * minus a leading "v". Newest first by published_at, at most
-     * MAX_HISTORY_VERSIONS. */
-    private static List<String> fetchGithubReleaseHistory(String url,
+     * MAX_HISTORY_VERSIONS. When the API yields nothing, the releases.atom
+     * feed is tried once (see fetchGithubAtomHistory). */
+    private static HistoryResult fetchGithubReleaseHistory(String url,
             boolean preferName, boolean skipCanary) {
-        List<String> result = new ArrayList<>();
+        FetchResult fetched = fetchUrlResult(url);
+        HistoryResult primary;
+        if (fetched.body == null) {
+            Log.w(LOG_TAG, "GitHub history fetch failed (" + fetched.error + "): " + url);
+            primary = HistoryResult.failure(fetched.error);
+        } else {
+            primary = parseGithubReleaseHistory(fetched.body, preferName, skipCanary);
+        }
+        if (!primary.entries.isEmpty()) return primary;
+        HistoryResult atom = fetchGithubAtomHistory(url);
+        if (!atom.entries.isEmpty()) return atom;
+        return primary.error.isEmpty() ? atom : primary;
+    }
+
+    private static HistoryResult parseGithubReleaseHistory(String body,
+            boolean preferName, boolean skipCanary) {
         try {
-            String body = fetchUrlText(url);
-            if (body == null) return result;
             JSONArray releases = new JSONArray(body);
             List<String[]> dated = new ArrayList<>();
             for (int i = 0; i < releases.length(); i++) {
@@ -1010,25 +1139,114 @@ public final class AiAgentUtils {
                     release.optString("published_at", "")});
             }
             Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            List<VersionEntry> result = new ArrayList<>();
             for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
-                result.add(dated.get(i)[0]);
+                result.add(new VersionEntry(dated.get(i)[0], dateFromIso(dated.get(i)[1])));
             }
-            return result;
+            if (result.isEmpty()) return HistoryResult.failure("empty");
+            return new HistoryResult(result, "");
         } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to fetch GitHub history from " + url, e);
-            return result;
+            Log.w(LOG_TAG, "Failed to parse GitHub history", e);
+            return HistoryResult.failure("parse-error");
+        }
+    }
+
+    /** Tag substrings that mark an atom entry as not-a-stable-release.
+     * The feed has no prerelease flag, so this is the whole filter (plus
+     * the version check below). "alpha" is essential for Codex (its feed
+     * is flooded with rust-v0.17x.0-alpha.N); "canary"/"rc" for Hermes
+     * (live feed shows canary.2026…-v0.23.3, v0.23.3+canary.… and
+     * rc.1-v0.23.3 forms). A stable tag for these three repos never
+     * contains any of these words, so the list is safe to share. */
+    private static final String[] ATOM_SKIP_SUBSTRINGS = {"alpha", "beta", "rc",
+        "dev", "canary", "preview", "nightly"};
+
+    /** Atom fallback for GitHub histories: the releases.atom feed needs no
+     * auth and does not count against the REST rate limit, which is what
+     * makes it a fallback at all (the agy API call 403s from this VM's
+     * shared egress IP while its atom feed answers 200). Parsing is plain
+     * string scanning, not an XML parser: each <entry> gives its tag from
+     * the link href (".../releases/tag/<tag>", %2B-decoded) and its date
+     * from <updated>. There is no prerelease flag in the feed, so
+     * ATOM_SKIP_SUBSTRINGS is matched against the tag, and a tag that does
+     * not parse as a version is skipped too (e.g. Hermes "rc.1-v0.23.3"
+     * would fail validation even without the "rc" skip). The feed holds 10
+     * entries, so the result can be partial (Codex/Hermes: 2 usable today)
+     * — still shown. */
+    private static HistoryResult fetchGithubAtomHistory(String apiUrl) {
+        String ownerRepo = githubOwnerRepo(apiUrl);
+        if (ownerRepo.isEmpty()) return HistoryResult.failure("empty");
+        FetchResult fetched = fetchUrlResult(
+            "https://github.com/" + ownerRepo + "/releases.atom");
+        if (fetched.body == null) return HistoryResult.failure(fetched.error);
+        try {
+            List<String[]> dated = new ArrayList<>();
+            String body = fetched.body;
+            int pos = 0;
+            while (true) {
+                int entryStart = body.indexOf("<entry>", pos);
+                if (entryStart < 0) break;
+                int entryEnd = body.indexOf("</entry>", entryStart);
+                if (entryEnd < 0) break;
+                String entry = body.substring(entryStart, entryEnd);
+                pos = entryEnd + "</entry>".length();
+                int linkStart = entry.indexOf("<link");
+                if (linkStart < 0) continue;
+                int hrefStart = entry.indexOf("href=\"", linkStart);
+                if (hrefStart < 0) continue;
+                hrefStart += "href=\"".length();
+                int hrefEnd = entry.indexOf("\"", hrefStart);
+                if (hrefEnd < 0) continue;
+                String href = entry.substring(hrefStart, hrefEnd);
+                int tagStart = href.indexOf("/releases/tag/");
+                if (tagStart < 0) continue;
+                String tag = href.substring(tagStart + "/releases/tag/".length());
+                tag = tag.replace("%2B", "+").replace("%2b", "+");
+                String lowerTag = tag.toLowerCase(Locale.ROOT);
+                boolean skipped = false;
+                for (String marker : ATOM_SKIP_SUBSTRINGS) {
+                    if (lowerTag.contains(marker)) {
+                        skipped = true;
+                        break;
+                    }
+                }
+                if (skipped) continue;
+                if (tag.startsWith("rust-v")) tag = tag.substring("rust-v".length());
+                String version = validatedVersion(tag);
+                if (version.isEmpty()) continue;
+                String when = "";
+                int updatedStart = entry.indexOf("<updated>");
+                if (updatedStart >= 0) {
+                    int updatedEnd = entry.indexOf("</updated>", updatedStart);
+                    if (updatedEnd > updatedStart) {
+                        when = entry.substring(updatedStart + "<updated>".length(), updatedEnd);
+                    }
+                }
+                dated.add(new String[]{version, when});
+            }
+            Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            List<VersionEntry> result = new ArrayList<>();
+            for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
+                result.add(new VersionEntry(dated.get(i)[0], dateFromIso(dated.get(i)[1])));
+            }
+            if (result.isEmpty()) return HistoryResult.failure("empty");
+            return new HistoryResult(result, "");
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to parse GitHub atom feed for " + apiUrl, e);
+            return HistoryResult.failure("parse-error");
         }
     }
 
     /**
      * Version histories for several agents in parallel (same 4-thread /
-     * 35s shape as fetchLatestVersions). Only agents with a non-empty
-     * history contribute. Runs synchronously on the caller's thread;
+     * 70s shape as fetchLatestVersions). Every attempted agent contributes
+     * its HistoryResult; callers use the entries when non-empty and the
+     * error code otherwise. Runs synchronously on the caller's thread;
      * callers must call it off the UI thread.
      */
-    public static Map<String, List<String>> fetchVersionHistories(
+    public static Map<String, HistoryResult> fetchVersionHistories(
             List<AgentDef> defs, Map<String, String> distroIdByAgentId) {
-        Map<String, List<String>> fetched = Collections.synchronizedMap(new HashMap<>());
+        Map<String, HistoryResult> fetched = Collections.synchronizedMap(new HashMap<>());
         if (defs == null || defs.isEmpty()) return fetched;
         ExecutorService pool = Executors.newFixedThreadPool(4);
         for (AgentDef def : defs) {
@@ -1036,14 +1254,14 @@ public final class AiAgentUtils {
             pool.submit(() -> {
                 String distroId = distroIdByAgentId == null
                     ? "" : distroIdByAgentId.get(current.id);
-                List<String> history = fetchVersionHistory(current,
+                HistoryResult history = fetchVersionHistory(current,
                     distroId == null ? "" : distroId);
-                if (!history.isEmpty()) fetched.put(current.id, history);
+                fetched.put(current.id, history);
             });
         }
         pool.shutdown();
         try {
-            pool.awaitTermination(35, TimeUnit.SECONDS);
+            pool.awaitTermination(70, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -1073,8 +1291,19 @@ public final class AiAgentUtils {
      * Asks for gzip: the full npm metadata behind a history fetch is
      * several MB uncompressed (OpenCode ~4.3 MB) but ~0.6 MB gzipped, so
      * the wire cost stays small; servers that ignore the header just
-     * answer plain and the Content-Encoding check below skips the wrap. */
+     * answer plain and the Content-Encoding check below skips the wrap.
+     * Callers that need the failure reason use fetchUrlResult directly. */
     private static String fetchUrlText(String urlString) {
+        return fetchUrlResult(urlString).body;
+    }
+
+    /** One HTTPS GET with its failure reason. The taxonomy is small on
+     * purpose: SocketTimeoutException -> "timeout", UnknownHostException
+     * or any other IOException (refused/reset mid-read) -> "no-network",
+     * HTTP 403 -> "http-403", any other non-200 status or an empty body
+     * -> "empty" (the real status is logged). JSON problems are NOT
+     * reported here — a 200 with a bad body is the caller's "parse-error". */
+    private static FetchResult fetchUrlResult(String urlString) {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(urlString);
@@ -1085,15 +1314,33 @@ public final class AiAgentUtils {
             connection.setRequestProperty("Accept", "application/json, text/plain, */*");
             connection.setRequestProperty("Accept-Encoding", "gzip");
             int status = connection.getResponseCode();
-            if (status != HttpURLConnection.HTTP_OK) return null;
+            if (status == HttpURLConnection.HTTP_FORBIDDEN) {
+                Log.w(LOG_TAG, "Fetch forbidden (403) for " + urlString);
+                return new FetchResult(null, "http-403");
+            }
+            if (status != HttpURLConnection.HTTP_OK) {
+                Log.w(LOG_TAG, "Fetch HTTP " + status + " for " + urlString);
+                return new FetchResult(null, "empty");
+            }
             InputStream in = connection.getInputStream();
             if ("gzip".equalsIgnoreCase(connection.getContentEncoding())) {
                 in = new GZIPInputStream(in);
             }
-            return readStream(in);
+            String body = readStream(in);
+            if (body == null || body.isEmpty()) return new FetchResult(null, "empty");
+            return new FetchResult(body, "");
+        } catch (SocketTimeoutException e) {
+            Log.w(LOG_TAG, "Fetch timed out for " + urlString, e);
+            return new FetchResult(null, "timeout");
+        } catch (UnknownHostException e) {
+            Log.w(LOG_TAG, "Fetch failed (no network / unknown host) for " + urlString, e);
+            return new FetchResult(null, "no-network");
+        } catch (IOException e) {
+            Log.w(LOG_TAG, "Fetch failed (network) for " + urlString, e);
+            return new FetchResult(null, "no-network");
         } catch (Exception e) {
             Log.w(LOG_TAG, "Fetch failed for " + urlString, e);
-            return null;
+            return new FetchResult(null, "empty");
         } finally {
             if (connection != null) connection.disconnect();
         }
@@ -1116,22 +1363,25 @@ public final class AiAgentUtils {
     /** One cached check: when it ran, the latest version per agent id,
      * and — since the version-history round — when the histories were
      * last fetched and the history per agent id (newest first, at most
-     * MAX_HISTORY_VERSIONS). Latest and history have separate clocks:
-     * latest is re-checked hourly, history daily (see
-     * HISTORY_CACHE_VALID_MS). Old caches without the history fields
-     * load as "no history", so the format stays backward compatible. */
+     * MAX_HISTORY_VERSIONS, each entry a {"version", "date"} object).
+     * Latest and history have separate clocks: latest is re-checked
+     * hourly, history daily (see HISTORY_CACHE_VALID_MS). Old caches
+     * without the history fields load as "no history"; v1 caches whose
+     * history entries are plain strings (no dates) are dropped outright
+     * — a string entry is never parsed as a date — so the format stays
+     * backward compatible and loadUpdateCache never crashes on them. */
     public static final class UpdateCache {
         public final long checkedAt;
         public final Map<String, String> latest;
         public final long historyCheckedAt;
-        public final Map<String, List<String>> history;
+        public final Map<String, List<VersionEntry>> history;
 
         UpdateCache(long checkedAt, Map<String, String> latest) {
-            this(checkedAt, latest, 0, new HashMap<String, List<String>>());
+            this(checkedAt, latest, 0, new HashMap<String, List<VersionEntry>>());
         }
 
         UpdateCache(long checkedAt, Map<String, String> latest,
-                    long historyCheckedAt, Map<String, List<String>> history) {
+                    long historyCheckedAt, Map<String, List<VersionEntry>> history) {
             this.checkedAt = checkedAt;
             this.latest = latest;
             this.historyCheckedAt = historyCheckedAt;
@@ -1143,7 +1393,7 @@ public final class AiAgentUtils {
      * is corrupt (the next check rebuilds it). */
     public static UpdateCache loadUpdateCache() {
         Map<String, String> latest = new HashMap<>();
-        Map<String, List<String>> history = new HashMap<>();
+        Map<String, List<VersionEntry>> history = new HashMap<>();
         File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, UPDATE_CACHE_FILE_NAME);
         if (!cacheFile.isFile()) return new UpdateCache(0, latest);
         try {
@@ -1166,14 +1416,32 @@ public final class AiAgentUtils {
                     String id = ids.next();
                     JSONArray versionsArray = histories.optJSONArray(id);
                     if (versionsArray == null) continue;
-                    List<String> versionsList = new ArrayList<>();
+                    List<VersionEntry> versionsList = new ArrayList<>();
+                    // A v1 cache stores plain strings here ("1.6.0") with
+                    // no date at all: drop the whole agent entry rather
+                    // than guessing a date for it. A v2 entry is a
+                    // {"version", "date"} object; anything else is skipped.
+                    boolean oldFormat = false;
                     for (int i = 0; i < versionsArray.length()
                         && versionsList.size() < MAX_HISTORY_VERSIONS; i++) {
+                        Object item = versionsArray.opt(i);
+                        if (item instanceof String) {
+                            oldFormat = true;
+                            break;
+                        }
+                        if (!(item instanceof JSONObject)) continue;
+                        JSONObject entry = (JSONObject) item;
                         String version = validatedVersion(
-                            versionsArray.optString(i, "").trim());
-                        if (!version.isEmpty()) versionsList.add(version);
+                            entry.optString("version", "").trim());
+                        String date = validDate(
+                            entry.optString("date", "").trim());
+                        if (!version.isEmpty()) {
+                            versionsList.add(new VersionEntry(version, date));
+                        }
                     }
-                    if (!versionsList.isEmpty()) history.put(id, versionsList);
+                    if (!oldFormat && !versionsList.isEmpty()) {
+                        history.put(id, versionsList);
+                    }
                 }
             }
             return new UpdateCache(checkedAt, latest, historyCheckedAt, history);
@@ -1212,11 +1480,11 @@ public final class AiAgentUtils {
      * empty — an empty map keeps the cached side and does not advance
      * its check time, so a failed history fetch never marks "checked". */
     public static void saveUpdateCache(Map<String, String> latest,
-            Map<String, List<String>> history) {
+            Map<String, List<VersionEntry>> history) {
         UpdateCache current = loadUpdateCache();
         Map<String, String> mergedLatest = new HashMap<>(current.latest);
         if (latest != null) mergedLatest.putAll(latest);
-        Map<String, List<String>> mergedHistory = new HashMap<>(current.history);
+        Map<String, List<VersionEntry>> mergedHistory = new HashMap<>(current.history);
         if (history != null) mergedHistory.putAll(history);
         saveUpdateCacheInternal(mergedLatest, mergedHistory,
             latest != null && !latest.isEmpty()
@@ -1225,11 +1493,11 @@ public final class AiAgentUtils {
                 ? System.currentTimeMillis() : current.historyCheckedAt);
     }
 
-    /** Save freshly fetched histories only (the version dialog path):
+    /** Save freshly fetched histories only (the expanded-row path):
      * the latest map and its check time are preserved untouched. */
-    public static void saveVersionHistory(Map<String, List<String>> history) {
+    public static void saveVersionHistory(Map<String, List<VersionEntry>> history) {
         UpdateCache current = loadUpdateCache();
-        Map<String, List<String>> mergedHistory = new HashMap<>(current.history);
+        Map<String, List<VersionEntry>> mergedHistory = new HashMap<>(current.history);
         if (history != null) mergedHistory.putAll(history);
         saveUpdateCacheInternal(current.latest, mergedHistory, current.checkedAt,
             history != null && !history.isEmpty()
@@ -1238,9 +1506,9 @@ public final class AiAgentUtils {
 
     /** Write the cache file (AtomicFile, same as the distro list cache):
      * {"checkedAt": ..., "latest": {...}, "historyCheckedAt": ...,
-     * "history": {"pi": ["1.6.0", ...], ...}}. */
+     * "history": {"pi": [{"version": "1.6.0", "date": "2026-11-20"}, ...], ...}}. */
     private static void saveUpdateCacheInternal(Map<String, String> latest,
-            Map<String, List<String>> history, long checkedAt, long historyCheckedAt) {
+            Map<String, List<VersionEntry>> history, long checkedAt, long historyCheckedAt) {
         try {
             JSONObject root = new JSONObject();
             root.put("checkedAt", checkedAt);
@@ -1253,13 +1521,17 @@ public final class AiAgentUtils {
             root.put("latest", versions);
             root.put("historyCheckedAt", historyCheckedAt);
             JSONObject histories = new JSONObject();
-            for (Map.Entry<String, List<String>> entry : history.entrySet()) {
+            for (Map.Entry<String, List<VersionEntry>> entry : history.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) continue;
                 JSONArray versionsArray = new JSONArray();
-                for (String version : entry.getValue()) {
-                    if (version != null && !version.isEmpty()) {
-                        versionsArray.put(version);
-                    }
+                for (VersionEntry versionEntry : entry.getValue()) {
+                    if (versionEntry == null || versionEntry.version == null
+                        || versionEntry.version.isEmpty()) continue;
+                    JSONObject versionObject = new JSONObject();
+                    versionObject.put("version", versionEntry.version);
+                    versionObject.put("date",
+                        versionEntry.date == null ? "" : versionEntry.date);
+                    versionsArray.put(versionObject);
                 }
                 if (versionsArray.length() > 0) histories.put(entry.getKey(), versionsArray);
             }
@@ -1282,6 +1554,56 @@ public final class AiAgentUtils {
     }
 
     // ------------------------------------------------------------------
+    // Bundled offline fallback (assets/aiagents-versions.json)
+    // ------------------------------------------------------------------
+
+    /** The bundled version history shipped in the APK (assets file
+     * aiagents-versions.json, top 3 versions per agent with dates, snapshot
+     * taken when the APK was built). Read with no network, never crashes:
+     * any failure (missing asset, bad JSON, bad version) just yields an
+     * empty map. The expanded row uses it only when a live history fetch
+     * fails AND there is no cache — live results always win when available,
+     * and bundled entries are never written into the cache. */
+    public static Map<String, List<VersionEntry>> loadBundledHistory(Context context) {
+        Map<String, List<VersionEntry>> result = new HashMap<>();
+        if (context == null) return result;
+        InputStream in = null;
+        try {
+            in = context.getAssets().open("aiagents-versions.json");
+            String body = readStream(in);
+            JSONObject root = new JSONObject(body);
+            JSONObject history = root.optJSONObject("history");
+            if (history == null) return result;
+            Iterator<String> ids = history.keys();
+            while (ids.hasNext()) {
+                String id = ids.next();
+                JSONArray entries = history.optJSONArray(id);
+                if (entries == null) continue;
+                List<VersionEntry> list = new ArrayList<>();
+                for (int i = 0; i < entries.length() && list.size() < MAX_HISTORY_VERSIONS; i++) {
+                    JSONObject entry = entries.optJSONObject(i);
+                    if (entry == null) continue;
+                    String version = validatedVersion(entry.optString("version", "").trim());
+                    String date = validDate(entry.optString("date", "").trim());
+                    if (!version.isEmpty()) list.add(new VersionEntry(version, date));
+                }
+                if (!list.isEmpty()) result.put(id, list);
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to load bundled version history", e);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                    // Best effort; the stream is going away either way.
+                }
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------
     // Latest-version refresh (parallel + refresh-if-stale)
     // ------------------------------------------------------------------
 
@@ -1292,9 +1614,9 @@ public final class AiAgentUtils {
 
     /**
      * Fetch the latest version for each given agent definition in
-     * parallel (4 threads; each fetch has its own 10s connect / 20s
-     * read timeout, so the whole refresh is bounded by ~30s worst case
-     * instead of 30s per agent). distroIdByAgentId picks the per-agent
+     * parallel (4 threads; each fetch has its own 20s connect / 45s
+     * read timeout, so the whole refresh is bounded by ~70s worst case
+     * instead of 65s per agent). distroIdByAgentId picks the per-agent
      * source variant (agy's glibc vs musl manifest); a missing entry
      * means "any distro". Failures are silent — a failed agent simply
      * contributes nothing. Returns only freshly fetched values (never
@@ -1318,9 +1640,9 @@ public final class AiAgentUtils {
         }
         pool.shutdown();
         try {
-            // Each fetch caps at its own timeouts (10s + 20s); 35s covers
+            // Each fetch caps at its own timeouts (20s + 45s); 70s covers
             // a full round even if every request stalls.
-            pool.awaitTermination(35, TimeUnit.SECONDS);
+            pool.awaitTermination(70, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

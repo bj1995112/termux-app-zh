@@ -1,51 +1,82 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- v2: the root is vertical so the row can grow an inline expanded area
+     (version list + Install button) below the header. The header keeps the
+     old ids (check / title / subtitle / web); the text column and the arrow
+     are the expand tap target; the expanded container is built in code. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="horizontal"
+    android:orientation="vertical"
     android:paddingStart="16dp"
     android:paddingTop="12dp"
     android:paddingEnd="16dp"
     android:paddingBottom="12dp">
 
-    <CheckBox
-        android:id="@+id/aiagents_row_check"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_vertical"
-        android:clickable="false"
-        android:focusable="false" />
-
     <LinearLayout
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:orientation="vertical"
-        android:paddingStart="8dp">
+        android:orientation="horizontal">
+
+        <CheckBox
+            android:id="@+id/aiagents_row_check"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:clickable="false"
+            android:focusable="false" />
+
+        <LinearLayout
+            android:id="@+id/aiagents_row_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="8dp">
+
+            <TextView
+                android:id="@+id/aiagents_row_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/aiagents_row_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/aiagents_row_title"
-            android:layout_width="match_parent"
+            android:id="@+id/aiagents_row_arrow"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="16sp" />
-
-        <TextView
-            android:id="@+id/aiagents_row_subtitle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textSize="13sp"
+            android:layout_gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:text="▸"
+            android:textSize="16sp"
             android:textColor="?android:attr/textColorSecondary" />
+
+        <Button
+            android:id="@+id/aiagents_row_web"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:focusable="false"
+            android:text="@string/aiagents_web_open"
+            android:textSize="13sp"
+            android:visibility="gone" />
 
     </LinearLayout>
 
-    <Button
-        android:id="@+id/aiagents_row_web"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:id="@+id/aiagents_row_expanded"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="center_vertical"
-        android:focusable="false"
-        android:text="@string/aiagents_web_open"
-        android:textSize="13sp"
+        android:orientation="vertical"
+        android:paddingStart="8dp"
+        android:paddingTop="8dp"
         android:visibility="gone" />
 
 </LinearLayout>
