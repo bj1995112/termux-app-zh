@@ -16,6 +16,8 @@ import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -363,6 +365,37 @@ public final class ModelConfigApplier {
         if (!stillApplied) {
             removeBashrcMarker(rootfs);
         }
+    }
+
+    /** Remove every applied config from every container named in the
+     * apply records — not just the distros still installed, so records
+     * for removed containers are cleaned too — and strip the top-level
+     * web_search line from each touched container's Codex config,
+     * including a hand-added one (it comes back on the next apply when
+     * that entry's toggle is on). Saved entries are kept. Returns the
+     * number of containers touched. Call on a background thread. */
+    public static int clearAllApplied(Context context) {
+        Map<String, Map<String, List<String>>> records =
+            ModelConfigStore.loadApplyRecords();
+        List<ModelConfigStore.Entry> entries = ModelConfigStore.loadEntries(context);
+        Map<String, ModelConfigStore.Entry> byId = new HashMap<>();
+        for (ModelConfigStore.Entry entry : entries) byId.put(entry.id, entry);
+        Set<String> touched = new HashSet<>();
+        for (Map.Entry<String, Map<String, List<String>>> record : records.entrySet()) {
+            ModelConfigStore.Entry entry = byId.get(record.getKey());
+            for (String container : record.getValue().keySet()) {
+                if (entry != null) {
+                    removeEntryFromContainer(context, entry, container);
+                } else {
+                    // The entry was deleted already; only its record
+                    // is left, so drop that.
+                    ModelConfigStore.removeAppliedRecord(record.getKey(), container);
+                }
+                touched.add(container);
+            }
+        }
+        for (String container : touched) stripCodexWebSearch(container);
+        return touched.size();
     }
 
     /** True when any target agent of the entry has the provider present in
@@ -773,6 +806,12 @@ public final class ModelConfigApplier {
         String end = codexBlockEnd(entry.providerId);
         String text = PromptThemeSync.readFileOrEmpty(file);
         text = removeManagedSection(text, begin, end);
+        // web_search is one global top-level key: strip every copy first
+        // — a hand-added line, or one left in another entry's block —
+        // then this entry's toggle decides whether one is written back.
+        // TOML forbids duplicate keys, so the last apply wins.
+        text = stripTomlTopLevelKey(text, "web_search");
+        text = stripKeysFromOtherCodexBlocks(text, entry.providerId, "web_search");
         if (entry.setDefault) {
             // This entry becomes the default: take the top-level model /
             // model_provider lines out of every other entry's block (their
@@ -780,7 +819,8 @@ public final class ModelConfigApplier {
             // file (the original is preserved in .termux-bak; see
             // DESIGN-NOTES.md §1). TOML forbids duplicate keys, so there
             // can only be one set.
-            text = stripModelLinesFromOtherCodexBlocks(text, entry.providerId);
+            text = stripKeysFromOtherCodexBlocks(text, entry.providerId,
+                "model", "model_provider");
             text = stripTomlTopLevelKey(text, "model");
             text = stripTomlTopLevelKey(text, "model_provider");
         }
@@ -792,6 +832,14 @@ public final class ModelConfigApplier {
             block.append("model_provider = \"").append(tomlEscape(entry.providerId))
                 .append("\"\n");
         }
+        if (entry.disableWebSearch) {
+            // Many relays reject the web_search tool Codex sends by
+            // default (responses_feature_not_supported); "disabled"
+            // removes the tool from the request entirely. Top-level: it
+            // must sit before the first [table] header, hence the
+            // hasTopLevelKeys flag at the insert below.
+            block.append("web_search = \"disabled\"\n");
+        }
         block.append("[model_providers.").append(entry.providerId).append("]\n");
         block.append("name = \"").append(tomlEscape(entry.providerId)).append("\"\n");
         block.append("base_url = \"")
@@ -801,14 +849,16 @@ public final class ModelConfigApplier {
         // Feb 2026); write it explicitly rather than relying on the default.
         block.append("wire_api = \"responses\"\n");
         block.append(end).append("\n");
-        text = insertCodexBlock(text, block.toString(), entry.setDefault);
+        text = insertCodexBlock(text, block.toString(),
+            entry.setDefault || entry.disableWebSearch);
         return PromptThemeSync.writeFileAtomically(file, text);
     }
 
-    /** Remove the model / model_provider lines from every managed block
+    /** Remove the given top-level key lines from every managed block
      * except the given provider's (its block was already removed). */
-    private static String stripModelLinesFromOtherCodexBlocks(String text,
-                                                              String ownProviderId) {
+    private static String stripKeysFromOtherCodexBlocks(String text,
+                                                        String ownProviderId,
+                                                        String... keys) {
         String[] lines = text.split("\n", -1);
         StringBuilder builder = new StringBuilder();
         String currentBlockProvider = null;
@@ -820,13 +870,33 @@ public final class ModelConfigApplier {
                 currentBlockProvider = null;
             } else if (currentBlockProvider != null
                     && !currentBlockProvider.equals(ownProviderId)
-                    && (trimmed.matches("model\\s*=.*")
-                        || trimmed.matches("model_provider\\s*=.*"))) {
+                    && matchesAnyTopLevelKey(trimmed, keys)) {
                 continue;
             }
             builder.append(line).append("\n");
         }
         return builder.toString();
+    }
+
+    private static boolean matchesAnyTopLevelKey(String trimmed, String... keys) {
+        for (String key : keys) {
+            if (trimmed.matches(java.util.regex.Pattern.quote(key) + "\\s*=.*")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Strip a top-level web_search line from one container's Codex
+     * config (hand-added or managed). No-op when the file has none. */
+    private static void stripCodexWebSearch(String container) {
+        File rootfs = DistroUtils.containerRootfs(container);
+        if (rootfs == null) return;
+        File file = codexConfigFile(rootfs);
+        if (!file.isFile()) return;
+        String text = PromptThemeSync.readFileOrEmpty(file);
+        String stripped = stripTomlTopLevelKey(text, "web_search");
+        if (!stripped.equals(text)) PromptThemeSync.writeFileAtomically(file, stripped);
     }
 
     private static String providerIdFromCodexMarker(String line) {
@@ -837,12 +907,12 @@ public final class ModelConfigApplier {
     }
 
     /** Insert the managed block: before the first [table] header when it
-     * carries top-level keys (setDefault), otherwise at the end. Top-level
-     * keys appended after a table header would belong to that table, not
-     * to the document root — appending unconditionally broke files that
-     * already had a [model_providers.*] table (caught by the mirror test).
-     * The insertion point is indexForTopLevelInsert: before the first
-     * table, or before the managed block that holds it. */
+     * carries top-level keys (setDefault, or disableWebSearch), otherwise
+     * at the end. Top-level keys appended after a table header would belong
+     * to that table, not to the document root — appending unconditionally
+     * broke files that already had a [model_providers.*] table (caught by
+     * the mirror test). The insertion point is indexForTopLevelInsert:
+     * before the first table, or before the managed block that holds it. */
     private static String insertCodexBlock(String text, String block,
                                            boolean hasTopLevelKeys) {
         if (text.isEmpty()) return block;
