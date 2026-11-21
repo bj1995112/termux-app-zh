@@ -233,16 +233,6 @@
                 android:visibility="gone" />
 
             <TextView
-                android:id="@+id/modelconfig_edit_note_hermes"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/modelconfig_hermes_note"
-                android:textSize="13sp"
-                android:textColor="?android:attr/textColorSecondary"
-                android:visibility="gone" />
-
-            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
