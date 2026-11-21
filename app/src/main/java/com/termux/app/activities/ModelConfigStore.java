@@ -113,6 +113,11 @@ public final class ModelConfigStore {
         /** Must be one of models (or "" when models is empty). */
         public String primaryModel;
         public boolean setDefault;
+        /** Disable the web_search tool Codex sends by default. Many
+         * relays reject that tool (responses_feature_not_supported), so
+         * the toggle defaults to on; turn it off for direct OpenAI use,
+         * where web search is supported. Codex only. */
+        public boolean disableWebSearch = true;
         public List<String> agentIds;
         public List<String> distroNames;
         public boolean allDistros;
@@ -202,6 +207,7 @@ public final class ModelConfigStore {
                 obj.put("models", new JSONArray(models));
                 obj.put("primaryModel", primaryModel);
                 obj.put("setDefault", setDefault);
+                obj.put("disableWebSearch", disableWebSearch);
                 obj.put("agents", new JSONArray(agentIds));
                 obj.put("distros", new JSONArray(distroNames));
                 obj.put("allDistros", allDistros);
@@ -229,6 +235,9 @@ public final class ModelConfigStore {
                     agentIds, distroNames, obj.optBoolean("allDistros", false),
                     obj.optLong("createdAt", 0), obj.optLong("lastAppliedAt", 0));
                 entry.apiPath = obj.optString("apiPath", "");
+                // Old saved entries have no such key: default true so
+                // they get the web_search fix on the next apply.
+                entry.disableWebSearch = obj.optBoolean("disableWebSearch", true);
                 entry.fixPrimaryModel();
                 return entry;
             } catch (Exception e) {
