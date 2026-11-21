@@ -416,16 +416,16 @@ public final class ModelConfigApplier {
         return false;
     }
 
-    /** Whether the agent binary exists in this rootfs (same binPaths as
-     * AiAgentUtils detection). */
+    /** Whether the agent binary exists in this rootfs. Delegates to
+     * AiAgentUtils.findBinPath so this gate can never disagree with the
+     * list/drawer detection: a binary that is an absolute symlink into
+     * the container (Codex ~/.local/bin/codex) counts, because isFile()
+     * follows the link to the phone's own /root and says false. */
     public static boolean isAgentInstalled(File rootfs, String agentId) {
         if (rootfs == null) return false;
         AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agentId);
-        if (def == null || def.binPaths == null) return false;
-        for (String binPath : def.binPaths) {
-            if (new File(rootfs, binPath).isFile()) return true;
-        }
-        return false;
+        if (def == null) return false;
+        return AiAgentUtils.findBinPath(rootfs, def) != null;
     }
 
     private static boolean applyToAgent(File rootfs, ModelConfigStore.Entry entry,
