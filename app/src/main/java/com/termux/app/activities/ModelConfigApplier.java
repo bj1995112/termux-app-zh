@@ -174,10 +174,16 @@ public final class ModelConfigApplier {
 
     /** Base URL for Pi: the anthropic-messages SDK appends /v1 itself,
      * so a user-typed .../v1 would double up (/v1/v1/messages 404s).
-     * openai-completions and google-generative-ai keep the URL verbatim. */
+     * openai-completions and google-generative-ai keep the URL verbatim.
+     * A pinned API path wins: no stripping. */
     private static String piBaseUrl(ModelConfigStore.Entry entry) {
-        String url = ModelConfigStore.effectiveBaseUrl(entry);
-        if (entry.type == ModelConfigStore.TYPE_ANTHROPIC) {
+        return piBaseUrl(entry.type, entry.baseUrl, entry.apiPath);
+    }
+
+    private static String piBaseUrl(int type, String baseUrl, String apiPath) {
+        String url = ModelConfigStore.effectiveBaseUrl(type, baseUrl, apiPath);
+        if (!ModelConfigStore.normalizeApiPath(apiPath).isEmpty()) return url;
+        if (type == ModelConfigStore.TYPE_ANTHROPIC) {
             return stripTrailingV1(url);
         }
         return url;
@@ -186,13 +192,51 @@ public final class ModelConfigApplier {
     /** Base URL for Codex: Codex appends /responses to base_url, and
      * DeepSeek's documented Codex base is https://api.deepseek.com with NO
      * /v1 (else /v1/responses 404s). Other gateways keep their URL verbatim
-     * (OpenRouter/LiteLLM use /v1 + /v1/responses). */
+     * (OpenRouter/LiteLLM use /v1 + /v1/responses). A pinned API path
+     * wins: no DeepSeek special-casing. */
     private static String codexBaseUrl(ModelConfigStore.Entry entry) {
-        String url = ModelConfigStore.effectiveBaseUrl(entry);
+        return codexBaseUrl(entry.type, entry.baseUrl, entry.apiPath);
+    }
+
+    private static String codexBaseUrl(int type, String baseUrl, String apiPath) {
+        String url = ModelConfigStore.effectiveBaseUrl(type, baseUrl, apiPath);
+        if (!ModelConfigStore.normalizeApiPath(apiPath).isEmpty()) return url;
         if (url != null && url.contains("api.deepseek.com")) {
             return stripTrailingV1(url);
         }
         return url;
+    }
+
+    /** Full request URL an agent will hit for this entry, or "" when the
+     * agent takes no custom provider (agy) or the id is unknown. Shares
+     * the exact base-URL logic the applier writes, so the edit screen's
+     * preview can never disagree with the applied config. */
+    public static String requestUrlPreview(ModelConfigStore.Entry entry, String agentId) {
+        if (entry == null) return "";
+        return requestUrlPreview(entry.type, entry.baseUrl, entry.apiPath, agentId);
+    }
+
+    /** Same, from form values (no entry yet). */
+    public static String requestUrlPreview(int type, String baseUrl, String apiPath, String agentId) {
+        if (agentId == null) return "";
+        String base;
+        switch (agentId) {
+            case "codex":
+                base = codexBaseUrl(type, baseUrl, apiPath);
+                return base == null ? "" : base + "/responses";
+            case "pi":
+                base = piBaseUrl(type, baseUrl, apiPath);
+                return base == null ? "" : base + (type == ModelConfigStore.TYPE_ANTHROPIC
+                    ? "/v1/messages" : "/chat/completions");
+            case "claude":
+                base = ModelConfigStore.effectiveBaseUrl(type, baseUrl, apiPath);
+                return base == null ? "" : base + "/v1/messages";
+            case "aider":
+                base = ModelConfigStore.effectiveBaseUrl(type, baseUrl, apiPath);
+                return base == null ? "" : base + "/chat/completions";
+            default:
+                return "";
+        }
     }
 
     /** Pi models.json entries: a list of {"id": ...} objects. Plain strings
