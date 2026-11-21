@@ -920,9 +920,25 @@ public final class AiAgentUtils {
         }
         String sessionName = context.getString(R.string.aiagents_quick_session,
             agent.displayName, agent.distroDisplay);
+        // Codex/agy read their key from the process environment (env_key /
+        // GEMINI_API_KEY) and a quick launch is not a login shell, so
+        // .bashrc never runs: prefix the launch with `env VAR=value ...`
+        // taken from the container's model-env.sh (written by
+        // ModelConfigApplier). Passed as argv, never shell-parsed, so any
+        // key characters are safe.
+        List<String> args = new ArrayList<>();
+        args.add("login");
+        args.add(agent.container);
+        args.add("--");
+        List<String> envArgs = ModelConfigApplier.envArgsForAgent(
+            DistroUtils.containerRootfs(agent.container), agent.agentId);
+        if (!envArgs.isEmpty()) {
+            args.add("env");
+            args.addAll(envArgs);
+        }
+        args.add(agent.inContainerPath());
         DistroUtils.startSessionWithExecutable(context, prootDistro,
-            new String[]{"login", agent.container, "--", agent.inContainerPath()},
-            sessionName, sessionName);
+            args.toArray(new String[0]), sessionName, sessionName);
     }
 
     // ------------------------------------------------------------------
@@ -1283,6 +1299,11 @@ public final class AiAgentUtils {
                 s.append("echo \"注意：直接打开 http://127.0.0.1:3080 进不去，必须带 token 的完整地址。\"\n");
                 s.append("command -v dsh >/dev/null 2>&1 || { echo \"没有找到 dsh，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("cd ~ || true\n");
+                // dsh reads its key from the environment (apiKeyEnv in
+                // cordis.patch.yml); this script's shell is not a login
+                // shell, so source the model env file written by
+                // ModelConfigApplier. Missing file = no model config, skip.
+                s.append("[ -f \"$HOME/.termux-aiagents/model-env.sh\" ] && . \"$HOME/.termux-aiagents/model-env.sh\"\n");
                 s.append("dsh web --no-open\n");
                 break;
             case OPENCODE:
