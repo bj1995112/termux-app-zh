@@ -390,6 +390,7 @@
     <string name="mirror_registry_title">Registry 镜像站</string>
     <string name="mirror_registry_follow">跟随预设</string>
     <string name="mirror_registry_follow_summary">当前：%1$s</string>
+    <string name="mirror_registry_docker_hub">Docker Hub</string>
     <string name="mirror_custom_distro_host">发行版镜像站</string>
     <string name="mirror_custom_registry">Registry 镜像站</string>
     <string name="mirror_custom_npm">npm 源</string>
@@ -414,6 +415,18 @@
     <string name="mirror_switch_anyway">仍要切换</string>
     <string name="mirror_test_checking">正在测试连接…</string>
     <string name="mirror_not_set">未设置</string>
+    <string name="mirror_preset_tencent">腾讯云</string>
+    <string name="mirror_preset_huawei">华为云</string>
+    <string name="mirror_detect_button">一键检测</string>
+    <string name="mirror_detect_traffic_note">本次检测约下载 14MB，测完即删。</string>
+    <string name="mirror_detect_checking">正在检测… %1$d/%2$d</string>
+    <string name="mirror_detect_results_title">检测结果</string>
+    <string name="mirror_detect_presets_label">预设</string>
+    <string name="mirror_detect_apply">使用推荐</string>
+    <string name="mirror_detect_recommended">推荐</string>
+    <string name="mirror_detect_speed_failed">测速失败</string>
+    <string name="mirror_detect_unreachable">无法连接</string>
+    <string name="mirror_detect_all_failed">都测不通，请检查网络</string>
     <string name="storage_preference_title">外部存储</string>
     <string name="storage_preference_summary_granted">已授权，手机文件在 ~/storage 里</string>
     <string name="storage_preference_summary_not_granted">未设置，点一下允许访问手机文件</string>

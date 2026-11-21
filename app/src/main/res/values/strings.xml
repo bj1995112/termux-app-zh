@@ -394,6 +394,7 @@
     <string name="mirror_registry_title">Registry mirror</string>
     <string name="mirror_registry_follow">Follow preset</string>
     <string name="mirror_registry_follow_summary">Current: %1$s</string>
+    <string name="mirror_registry_docker_hub">Docker Hub</string>
     <string name="mirror_custom_distro_host">Distro mirror host</string>
     <string name="mirror_custom_registry">Registry mirror host</string>
     <string name="mirror_custom_npm">npm registry</string>
@@ -418,6 +419,18 @@
     <string name="mirror_switch_anyway">Switch anyway</string>
     <string name="mirror_test_checking">Testing connection…</string>
     <string name="mirror_not_set">Not set</string>
+    <string name="mirror_preset_tencent">Tencent Cloud</string>
+    <string name="mirror_preset_huawei">Huawei Cloud</string>
+    <string name="mirror_detect_button">Detect &amp; recommend</string>
+    <string name="mirror_detect_traffic_note">This test downloads about 14 MB; files are deleted right after measuring.</string>
+    <string name="mirror_detect_checking">Detecting… %1$d/%2$d</string>
+    <string name="mirror_detect_results_title">Detection results</string>
+    <string name="mirror_detect_presets_label">Presets</string>
+    <string name="mirror_detect_apply">Use recommended</string>
+    <string name="mirror_detect_recommended">Recommended</string>
+    <string name="mirror_detect_speed_failed">Speed test failed</string>
+    <string name="mirror_detect_unreachable">Unreachable</string>
+    <string name="mirror_detect_all_failed">All sources failed; check your network</string>
     <string name="storage_preference_title">External storage</string>
     <string name="storage_preference_summary_granted">Storage access granted — phone files are in ~/storage</string>
     <string name="storage_preference_summary_not_granted">Not set up — tap to allow access to phone files</string>

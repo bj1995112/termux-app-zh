@@ -14,7 +14,10 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.termux.R;
+import com.termux.app.activities.MirrorSettings.DetectOutcome;
 import com.termux.app.activities.MirrorSettings.MirrorPreset;
+import com.termux.app.activities.MirrorSettings.PresetDetectResult;
+import com.termux.app.activities.MirrorSettings.RegistryDetectResult;
 import com.termux.app.activities.MirrorSettings.SyncResult;
 import com.termux.shared.activity.media.AppCompatActivityUtils;
 import com.termux.shared.theme.NightMode;
@@ -30,8 +33,13 @@ import java.util.Set;
  * Switching presets applies immediately; the new preset's endpoints are
  * then probed in the background and the result is shown in the status
  * line only, never as a blocking dialog. The image registry override
- * (follow preset / DaoCloud / dockerproxy) is always selectable,
+ * (follow preset / DaoCloud / dockerproxy / 1ms.run) is always selectable,
  * whatever preset is active.
+ * "一键检测" measures every preset and every registry — latency first,
+ * then real download speed — and recommends the fastest of each; it never
+ * switches anything by itself, "使用推荐" applies the recommendation.
+ * Speed-test downloads go to the app cache and are deleted right after
+ * measuring, so nothing is left behind.
  * Changing a preset never auto-syncs installed distros: the user is asked
  * (design decision), and "同步到已安装的发行版" re-applies on demand.
  */
@@ -42,6 +50,8 @@ public class MirrorSettingsActivity extends AppCompatActivity {
             R.string.mirror_preset_tuna,
             R.string.mirror_preset_ustc,
             R.string.mirror_preset_aliyun,
+            R.string.mirror_preset_tencent,
+            R.string.mirror_preset_huawei,
             R.string.mirror_preset_custom
     };
 
@@ -52,8 +62,16 @@ public class MirrorSettingsActivity extends AppCompatActivity {
     private TextView mStatusText;
     private TextView mVoidNote;
     private TextView mGithubProxyWarning;
+    private Button mDetectButton;
+    private Button mDetectApplyButton;
+    private LinearLayout mDetectResults;
+    private LinearLayout mDetectPresetsContainer;
+    private LinearLayout mDetectRegistriesContainer;
 
     private MirrorPreset mPreset;
+    private boolean mDetecting;
+    private PresetDetectResult mBestPreset;
+    private RegistryDetectResult mBestRegistry;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,6 +92,14 @@ public class MirrorSettingsActivity extends AppCompatActivity {
         mStatusText = findViewById(R.id.mirror_status);
         mVoidNote = findViewById(R.id.mirror_void_note);
         mGithubProxyWarning = findViewById(R.id.mirror_github_proxy_warning);
+        mDetectResults = findViewById(R.id.mirror_detect_results);
+        mDetectPresetsContainer = findViewById(R.id.mirror_detect_presets_container);
+        mDetectRegistriesContainer = findViewById(R.id.mirror_detect_registries_container);
+
+        mDetectButton = findViewById(R.id.mirror_detect_button);
+        mDetectButton.setOnClickListener(v -> startDetect());
+        mDetectApplyButton = findViewById(R.id.mirror_detect_apply_button);
+        mDetectApplyButton.setOnClickListener(v -> applyRecommendation());
 
         Button syncButton = findViewById(R.id.mirror_sync_button);
         syncButton.setOnClickListener(v -> syncToInstalled());
@@ -151,12 +177,19 @@ public class MirrorSettingsActivity extends AppCompatActivity {
                 getString(R.string.mirror_registry_follow_summary, effective),
                 MirrorSettings.REGISTRY_FOLLOW.equals(mPreset.registryOverride),
                 MirrorSettings.REGISTRY_FOLLOW);
+        addRegistryRow(inflater, getString(R.string.mirror_registry_docker_hub),
+                "registry-1.docker.io",
+                MirrorSettings.REGISTRY_DOCKER_HUB.equals(mPreset.registryOverride),
+                MirrorSettings.REGISTRY_DOCKER_HUB);
         addRegistryRow(inflater, "DaoCloud", MirrorSettings.REGISTRY_DAOCLOUD,
                 MirrorSettings.REGISTRY_DAOCLOUD.equals(mPreset.registryOverride),
                 MirrorSettings.REGISTRY_DAOCLOUD);
         addRegistryRow(inflater, "dockerproxy", MirrorSettings.REGISTRY_DOCKERPROXY,
                 MirrorSettings.REGISTRY_DOCKERPROXY.equals(mPreset.registryOverride),
                 MirrorSettings.REGISTRY_DOCKERPROXY);
+        addRegistryRow(inflater, "1ms.run", MirrorSettings.REGISTRY_1MS,
+                MirrorSettings.REGISTRY_1MS.equals(mPreset.registryOverride),
+                MirrorSettings.REGISTRY_1MS);
     }
 
     private void addRegistryRow(LayoutInflater inflater, String title, String subtitle,
@@ -278,6 +311,124 @@ public class MirrorSettingsActivity extends AppCompatActivity {
                 }
             });
         }).start();
+    }
+
+    // ---------- detect and recommend ----------
+
+    /** One tap: measure every preset and every registry (latency, then
+     *  real download speed) and recommend the fastest of each.
+     *  Detection never switches anything; "使用推荐" applies it. */
+    private void startDetect() {
+        if (mDetecting) return;
+        mDetecting = true;
+        mBestPreset = null;
+        mBestRegistry = null;
+        mDetectButton.setEnabled(false);
+        mDetectResults.setVisibility(View.GONE);
+        int total = MirrorSettings.PRESET_IDS.size() + MirrorSettings.REGISTRY_OPTIONS.size();
+        if (!MirrorSettings.isCustomConfigured(this)) total--;
+        setStatus(getString(R.string.mirror_detect_checking, 0, total));
+        new Thread(() -> {
+            DetectOutcome outcome = MirrorSettings.detectAll(this,
+                    (done, totalSteps) -> runOnUiThread(() ->
+                            setStatus(getString(R.string.mirror_detect_checking,
+                                    done, totalSteps))));
+            runOnUiThread(() -> {
+                mDetecting = false;
+                mDetectButton.setEnabled(true);
+                showDetectResults(outcome);
+            });
+        }).start();
+    }
+
+    private void showDetectResults(DetectOutcome outcome) {
+        mBestPreset = outcome.bestPreset;
+        mBestRegistry = outcome.bestRegistry;
+        LayoutInflater inflater = LayoutInflater.from(this);
+        mDetectPresetsContainer.removeAllViews();
+        for (PresetDetectResult result : outcome.presets) {
+            mDetectPresetsContainer.addView(detectRow(inflater, mDetectPresetsContainer,
+                    getString(MirrorSettings.presetNameResId(result.presetId)),
+                    result.latencyMs, result.speedKBps, outcome.bestPreset == result));
+        }
+        mDetectRegistriesContainer.removeAllViews();
+        for (RegistryDetectResult result : outcome.registries) {
+            mDetectRegistriesContainer.addView(detectRow(inflater, mDetectRegistriesContainer,
+                    registryDisplayName(result.registry),
+                    result.latencyMs, result.speedKBps, outcome.bestRegistry == result));
+        }
+        mDetectResults.setVisibility(View.VISIBLE);
+        boolean hasRecommendation = mBestPreset != null || mBestRegistry != null;
+        mDetectApplyButton.setVisibility(hasRecommendation ? View.VISIBLE : View.GONE);
+        if (!hasRecommendation) {
+            setStatus(getString(R.string.mirror_detect_all_failed));
+        } else {
+            setStatus(null);
+        }
+    }
+
+    private View detectRow(LayoutInflater inflater, LinearLayout parent, String title,
+                           long latencyMs, long speedKBps, boolean recommended) {
+        View row = inflater.inflate(R.layout.mirror_preset_row, parent, false);
+        TextView titleView = row.findViewById(R.id.mirror_row_title);
+        TextView subtitleView = row.findViewById(R.id.mirror_row_subtitle);
+        TextView checkView = row.findViewById(R.id.mirror_row_check);
+        titleView.setText(title);
+        subtitleView.setText(detectSubtitle(latencyMs, speedKBps));
+        checkView.setText(recommended ? getString(R.string.mirror_detect_recommended) : "");
+        return row;
+    }
+
+    private String detectSubtitle(long latencyMs, long speedKBps) {
+        if (latencyMs < 0) return getString(R.string.mirror_detect_unreachable);
+        if (speedKBps < 0) {
+            return getString(R.string.mirror_detect_speed_failed) + " · " + latencyMs + "ms";
+        }
+        return speedKBps + " KB/s · " + latencyMs + "ms";
+    }
+
+    private String registryDisplayName(String registry) {
+        if (registry == null || registry.isEmpty()
+                || MirrorSettings.REGISTRY_DOCKER_HUB.equals(registry)) return "Docker Hub";
+        return registry;
+    }
+
+    /** Apply the recommendation: the fastest preset and the fastest
+     *  registry override, in one tap, through the normal apply path
+     *  (save + refresh + installed-distros sync prompt). */
+    private void applyRecommendation() {
+        if (mBestPreset == null && mBestRegistry == null) return;
+        MirrorPreset candidate;
+        if (mBestPreset != null) {
+            candidate = MirrorSettings.PRESET_CUSTOM.equals(mBestPreset.presetId)
+                    ? MirrorSettings.loadCustomPreset(this)
+                    : MirrorSettings.presetForId(mBestPreset.presetId);
+        } else {
+            candidate = mPreset;
+        }
+        candidate.registryOverride = recommendedRegistryOverride();
+        applyPreset(candidate);
+    }
+
+    private String recommendedRegistryOverride() {
+        if (mBestRegistry == null) return mPreset.registryOverride;
+        String registry = mBestRegistry.registry;
+        if (MirrorSettings.REGISTRY_DOCKER_HUB.equals(registry)) {
+            return MirrorSettings.REGISTRY_DOCKER_HUB;
+        }
+        if (MirrorSettings.REGISTRY_DAOCLOUD.equals(registry)) {
+            return MirrorSettings.REGISTRY_DAOCLOUD;
+        }
+        if (MirrorSettings.REGISTRY_DOCKERPROXY.equals(registry)) {
+            return MirrorSettings.REGISTRY_DOCKERPROXY;
+        }
+        if (MirrorSettings.REGISTRY_1MS.equals(registry)) {
+            return MirrorSettings.REGISTRY_1MS;
+        }
+        // Defensive: an empty/unknown registry result means Docker Hub
+        // direct, expressed explicitly so it survives a non-official
+        // preset (REGISTRY_FOLLOW would mean that preset's mirror).
+        return MirrorSettings.REGISTRY_DOCKER_HUB;
     }
 
     private void showRestoreDialog() {

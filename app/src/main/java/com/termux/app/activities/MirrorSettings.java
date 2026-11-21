@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -56,15 +57,29 @@ public final class MirrorSettings {
     public static final String PRESET_TUNA = "tuna";
     public static final String PRESET_USTC = "ustc";
     public static final String PRESET_ALIYUN = "aliyun";
+    public static final String PRESET_TENCENT = "tencent";
+    public static final String PRESET_HUAWEI = "huawei";
     public static final String PRESET_CUSTOM = "custom";
 
     public static final List<String> PRESET_IDS = Arrays.asList(
-            PRESET_OFFICIAL, PRESET_TUNA, PRESET_USTC, PRESET_ALIYUN, PRESET_CUSTOM);
+            PRESET_OFFICIAL, PRESET_TUNA, PRESET_USTC, PRESET_ALIYUN,
+            PRESET_TENCENT, PRESET_HUAWEI, PRESET_CUSTOM);
 
     /** Empty means "follow the preset". */
     public static final String REGISTRY_FOLLOW = "";
+    /** Explicit "use Docker Hub directly" override. This is a marker,
+     *  never a host: effectiveRegistry() maps it to "" (Docker Hub). It
+     *  exists so "使用推荐" can pin Docker Hub even with a non-official
+     *  preset, where REGISTRY_FOLLOW would mean that preset's mirror. */
+    public static final String REGISTRY_DOCKER_HUB = "docker-hub";
     public static final String REGISTRY_DAOCLOUD = "docker.m.daocloud.io";
-    public static final String REGISTRY_DOCKERPROXY = "dockerproxy.com";
+    public static final String REGISTRY_DOCKERPROXY = "dockerproxy.net";
+    public static final String REGISTRY_1MS = "docker.1ms.run";
+
+    /** Registry choices the detect-and-recommend test measures
+     *  (REGISTRY_DOCKER_HUB = Docker Hub directly). */
+    public static final List<String> REGISTRY_OPTIONS = Arrays.asList(
+            REGISTRY_DOCKER_HUB, REGISTRY_DAOCLOUD, REGISTRY_DOCKERPROXY, REGISTRY_1MS);
 
     public static final String NPM_OFFICIAL_URL = "https://registry.npmjs.org";
     public static final String NPM_MIRROR_URL = "https://registry.npmmirror.com";
@@ -107,6 +122,8 @@ public final class MirrorSettings {
             "mirrors.tuna.tsinghua.edu.cn",
             "mirrors.ustc.edu.cn",
             "mirrors.aliyun.com",
+            "mirrors.tencent.com",
+            "mirrors.huaweicloud.com",
     };
 
     public static final class MirrorPreset {
@@ -143,6 +160,82 @@ public final class MirrorSettings {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Detect and recommend (one-click mirror test)
+    // ------------------------------------------------------------------
+
+    /** One measured source: latency in ms (-1 = did not answer) and
+     *  real download speed in KB/s (-1 = not measured or failed). */
+    public static final class PresetDetectResult {
+        public final String presetId;
+        public final long latencyMs;
+        public final long speedKBps;
+        /** Labels of the preset's other endpoints that did not answer
+         *  (npm / pypi / registry, as in probePreset). */
+        public final List<String> unreachable;
+
+        public PresetDetectResult(String presetId, long latencyMs, long speedKBps,
+                                  List<String> unreachable) {
+            this.presetId = presetId;
+            this.latencyMs = latencyMs;
+            this.speedKBps = speedKBps;
+            this.unreachable = unreachable != null ? unreachable : new ArrayList<String>();
+        }
+
+        public boolean isReachable() {
+            return latencyMs >= 0;
+        }
+
+        public boolean hasSpeed() {
+            return speedKBps >= 0;
+        }
+    }
+
+    public static final class RegistryDetectResult {
+        /** REGISTRY_DOCKER_HUB = Docker Hub directly. */
+        public final String registry;
+        public final long latencyMs;
+        public final long speedKBps;
+
+        public RegistryDetectResult(String registry, long latencyMs, long speedKBps) {
+            this.registry = registry != null ? registry : "";
+            this.latencyMs = latencyMs;
+            this.speedKBps = speedKBps;
+        }
+
+        public boolean isReachable() {
+            return latencyMs >= 0;
+        }
+
+        public boolean hasSpeed() {
+            return speedKBps >= 0;
+        }
+    }
+
+    public static final class DetectOutcome {
+        public final List<PresetDetectResult> presets;
+        public final List<RegistryDetectResult> registries;
+        /** Fastest preset by measured speed; null when none measured. */
+        public final PresetDetectResult bestPreset;
+        /** Fastest registry by measured speed; null when none measured. */
+        public final RegistryDetectResult bestRegistry;
+
+        public DetectOutcome(List<PresetDetectResult> presets,
+                             List<RegistryDetectResult> registries,
+                             PresetDetectResult bestPreset,
+                             RegistryDetectResult bestRegistry) {
+            this.presets = presets;
+            this.registries = registries;
+            this.bestPreset = bestPreset;
+            this.bestRegistry = bestRegistry;
+        }
+    }
+
+    /** Progress callback for detectAll(), invoked on the calling (background) thread. */
+    public interface DetectProgressListener {
+        void onProgress(int done, int total);
+    }
+
     private MirrorSettings() {
     }
 
@@ -166,18 +259,40 @@ public final class MirrorSettings {
                     REGISTRY_DAOCLOUD, NPM_MIRROR_URL,
                     "https://mirrors.aliyun.com/pypi/simple", "");
         }
+        if (PRESET_TENCENT.equals(id)) {
+            // Tencent's own Docker mirror is dead, so the registry stays
+            // DaoCloud; only the distro host and PyPI are Tencent's.
+            return new MirrorPreset(PRESET_TENCENT, "mirrors.tencent.com",
+                    REGISTRY_DAOCLOUD, NPM_MIRROR_URL,
+                    "https://mirrors.cloud.tencent.com/pypi/simple", "");
+        }
+        if (PRESET_HUAWEI.equals(id)) {
+            return new MirrorPreset(PRESET_HUAWEI, "mirrors.huaweicloud.com",
+                    REGISTRY_DAOCLOUD, NPM_MIRROR_URL,
+                    "https://mirrors.huaweicloud.com/repository/pypi/simple", "");
+        }
         if (PRESET_CUSTOM.equals(id)) {
             return new MirrorPreset(PRESET_CUSTOM, "", "", NPM_MIRROR_URL, PYPI_OFFICIAL_URL, "");
         }
         return new MirrorPreset(PRESET_OFFICIAL, "", "", NPM_OFFICIAL_URL, PYPI_OFFICIAL_URL, "");
     }
 
+    /** Old stored value "dockerproxy.com" now means dockerproxy.net
+     *  (the host moved; .com only 301-redirects there). */
+    public static String normalizeRegistryOverride(String override) {
+        if ("dockerproxy.com".equals(override)) return REGISTRY_DOCKERPROXY;
+        // Anything else (including the REGISTRY_DOCKER_HUB sentinel)
+        // passes through unchanged.
+        return override != null ? override : REGISTRY_FOLLOW;
+    }
+
     public static MirrorPreset loadPreset(Context context) {
         SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(context, PREFS_NAME);
-        String id = prefs.getString(KEY_MIRROR_ID, PRESET_TUNA);
+        String id = prefs.getString(KEY_MIRROR_ID, PRESET_OFFICIAL);
         if (PRESET_CUSTOM.equals(id)) return loadCustomPreset(context);
         MirrorPreset preset = presetForId(id);
-        preset.registryOverride = prefs.getString(KEY_REGISTRY_OVERRIDE, REGISTRY_FOLLOW);
+        preset.registryOverride = normalizeRegistryOverride(
+                prefs.getString(KEY_REGISTRY_OVERRIDE, REGISTRY_FOLLOW));
         return preset;
     }
 
@@ -190,8 +305,16 @@ public final class MirrorSettings {
                 orDefault(prefs.getString(KEY_CUSTOM_NPM, ""), NPM_MIRROR_URL),
                 orDefault(prefs.getString(KEY_CUSTOM_PYPI, ""), PYPI_OFFICIAL_URL),
                 prefs.getString(KEY_CUSTOM_GITHUB_PROXY, ""));
-        preset.registryOverride = prefs.getString(KEY_REGISTRY_OVERRIDE, REGISTRY_FOLLOW);
+        preset.registryOverride = normalizeRegistryOverride(
+                prefs.getString(KEY_REGISTRY_OVERRIDE, REGISTRY_FOLLOW));
         return preset;
+    }
+
+    /** True when the user has configured any custom field worth detecting. */
+    public static boolean isCustomConfigured(Context context) {
+        MirrorPreset custom = loadCustomPreset(context);
+        return !custom.distroHost.isEmpty() || !custom.registry.isEmpty()
+                || !custom.githubProxy.isEmpty();
     }
 
     public static void savePreset(Context context, MirrorPreset preset) {
@@ -199,7 +322,7 @@ public final class MirrorSettings {
         SharedPreferences.Editor editor = prefs.edit();
         editor.putString(KEY_MIRROR_ID, preset.id);
         editor.putString(KEY_REGISTRY_OVERRIDE,
-                preset.registryOverride != null ? preset.registryOverride : REGISTRY_FOLLOW);
+                normalizeRegistryOverride(preset.registryOverride));
         if (PRESET_CUSTOM.equals(preset.id)) {
             editor.putString(KEY_CUSTOM_DISTRO_HOST, preset.distroHost);
             editor.putString(KEY_CUSTOM_REGISTRY, preset.registry);
@@ -215,6 +338,8 @@ public final class MirrorSettings {
         if (PRESET_TUNA.equals(id)) return R.string.mirror_preset_tuna;
         if (PRESET_USTC.equals(id)) return R.string.mirror_preset_ustc;
         if (PRESET_ALIYUN.equals(id)) return R.string.mirror_preset_aliyun;
+        if (PRESET_TENCENT.equals(id)) return R.string.mirror_preset_tencent;
+        if (PRESET_HUAWEI.equals(id)) return R.string.mirror_preset_huawei;
         if (PRESET_CUSTOM.equals(id)) return R.string.mirror_preset_custom;
         return R.string.mirror_preset_official;
     }
@@ -226,6 +351,7 @@ public final class MirrorSettings {
     /** Effective registry host: the override wins, otherwise the preset's. "" = Docker Hub. */
     public static String effectiveRegistry(MirrorPreset preset) {
         if (preset == null) return "";
+        if (REGISTRY_DOCKER_HUB.equals(preset.registryOverride)) return "";
         if (preset.registryOverride != null && !preset.registryOverride.isEmpty()) {
             return preset.registryOverride;
         }
@@ -983,6 +1109,296 @@ public final class MirrorSettings {
     }
 
     private static boolean probeUrl(String urlString) {
+        return probeLatencyMs(urlString) >= 0;
+    }
+
+    /** GET latency in ms: time from connect to the first HTTP response.
+     *  -1 when the host does not answer within 5s. Any HTTP response
+     *  (including 401 from a registry's /v2/) counts as an answer. */
+    public static long probeLatencyMs(String urlString) {
+        HttpURLConnection connection = null;
+        try {
+            long startMs = System.currentTimeMillis();
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(true);
+            connection.connect();
+            connection.getResponseCode();
+            return System.currentTimeMillis() - startMs;
+        } catch (IOException | RuntimeException e) {
+            // Any failure (including proxy/tunneling errors) means unreachable;
+            // a probe must never crash the caller.
+            return -1;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Detect and recommend: latency + real download speed
+    // ------------------------------------------------------------------
+
+    /** Cache subdir for speed-test downloads. Files here are deleted
+     *  right after measuring and are never kept. */
+    public static File speedTestDir(Context context) {
+        return new File(context.getCacheDir(), "mirror-speedtest");
+    }
+
+    /** Delete every leftover file in the speed-test dir (an interrupted
+     *  test can leave one behind). Call when a detection starts. */
+    public static void clearSpeedTestDir(Context context) {
+        File dir = speedTestDir(context);
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            if (file.isFile()) file.delete();
+        }
+    }
+
+    /** Run the full detection: latency + real download speed for every
+     *  preset and every registry option, all in parallel (4 downloads at
+     *  a time). Progress is reported as tasks finish. Detection only
+     *  measures and recommends — it never switches anything itself.
+     *  Call on a background thread. */
+    public static DetectOutcome detectAll(Context context, DetectProgressListener progress) {
+        List<MirrorPreset> presets = new ArrayList<>();
+        for (String id : PRESET_IDS) {
+            if (PRESET_CUSTOM.equals(id)) {
+                if (!isCustomConfigured(context)) continue;
+                presets.add(loadCustomPreset(context));
+            } else {
+                presets.add(presetForId(id));
+            }
+        }
+        List<String> registries = new ArrayList<>(REGISTRY_OPTIONS);
+        int total = presets.size() + registries.size();
+        File speedDir = speedTestDir(context);
+        clearSpeedTestDir(context);
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        List<Future<PresetDetectResult>> presetFutures = new ArrayList<>();
+        for (MirrorPreset preset : presets) {
+            final MirrorPreset p = preset;
+            presetFutures.add(pool.submit(() -> detectPreset(p, speedDir)));
+        }
+        List<Future<RegistryDetectResult>> registryFutures = new ArrayList<>();
+        for (String registry : registries) {
+            final String r = registry;
+            registryFutures.add(pool.submit(() -> detectRegistry(r, speedDir)));
+        }
+        pool.shutdown();
+        List<PresetDetectResult> presetResults = new ArrayList<>();
+        List<RegistryDetectResult> registryResults = new ArrayList<>();
+        int done = 0;
+        for (int i = 0; i < presetFutures.size(); i++) {
+            presetResults.add(getOrFailedPreset(presets.get(i), presetFutures.get(i)));
+            if (progress != null) progress.onProgress(++done, total);
+        }
+        for (int i = 0; i < registryFutures.size(); i++) {
+            registryResults.add(getOrFailedRegistry(registries.get(i), registryFutures.get(i)));
+            if (progress != null) progress.onProgress(++done, total);
+        }
+        return new DetectOutcome(presetResults, registryResults,
+                fastestPreset(presetResults), fastestRegistry(registryResults));
+    }
+
+    private static PresetDetectResult getOrFailedPreset(MirrorPreset preset,
+                                                        Future<PresetDetectResult> future) {
+        try {
+            PresetDetectResult result = future.get();
+            return result != null ? result
+                    : new PresetDetectResult(preset.id, -1, -1, new ArrayList<String>());
+        } catch (InterruptedException | ExecutionException e) {
+            return new PresetDetectResult(preset.id, -1, -1, new ArrayList<String>());
+        }
+    }
+
+    private static RegistryDetectResult getOrFailedRegistry(String registry,
+                                                            Future<RegistryDetectResult> future) {
+        try {
+            RegistryDetectResult result = future.get();
+            return result != null ? result : new RegistryDetectResult(registry, -1, -1);
+        } catch (InterruptedException | ExecutionException e) {
+            return new RegistryDetectResult(registry, -1, -1);
+        }
+    }
+
+    /** Fastest by measured speed; ties broken by lower latency.
+     *  A source whose speed test failed is never recommended. */
+    private static PresetDetectResult fastestPreset(List<PresetDetectResult> results) {
+        PresetDetectResult best = null;
+        for (PresetDetectResult r : results) {
+            if (r == null || !r.hasSpeed()) continue;
+            if (best == null || r.speedKBps > best.speedKBps
+                    || (r.speedKBps == best.speedKBps && r.latencyMs >= 0
+                    && (best.latencyMs < 0 || r.latencyMs < best.latencyMs))) {
+                best = r;
+            }
+        }
+        return best;
+    }
+
+    private static RegistryDetectResult fastestRegistry(List<RegistryDetectResult> results) {
+        RegistryDetectResult best = null;
+        for (RegistryDetectResult r : results) {
+            if (r == null || !r.hasSpeed()) continue;
+            if (best == null || r.speedKBps > best.speedKBps
+                    || (r.speedKBps == best.speedKBps && r.latencyMs >= 0
+                    && (best.latencyMs < 0 || r.latencyMs < best.latencyMs))) {
+                best = r;
+            }
+        }
+        return best;
+    }
+
+    /** Measure one preset: distro-host latency, the usual endpoint probe,
+     *  and the real download speed of the Ubuntu Release file from its
+     *  distro host (same file on every mirror, ~255 KB). Never throws. */
+    public static PresetDetectResult detectPreset(MirrorPreset preset, File speedDir) {
+        if (preset == null) preset = presetForId(PRESET_OFFICIAL);
+        try {
+            String host = preset.distroHost.isEmpty() ? "archive.ubuntu.com" : preset.distroHost;
+            long latencyMs = probeLatencyMs("https://" + host + "/");
+            List<String> unreachable = probePreset(preset);
+            long speedKBps = -1;
+            if (latencyMs >= 0) {
+                speedKBps = downloadSpeedKBps(
+                        "https://" + host + "/ubuntu/dists/noble/Release",
+                        speedDir, "release-" + preset.id, 15000);
+            }
+            return new PresetDetectResult(preset.id, latencyMs, speedKBps, unreachable);
+        } catch (RuntimeException e) {
+            return new PresetDetectResult(preset.id, -1, -1, new ArrayList<String>());
+        }
+    }
+
+    /** Measure one registry: /v2/ latency, then the real download speed
+     *  of an Alpine image layer via the Docker token flow. Never throws. */
+    public static RegistryDetectResult detectRegistry(String registry, File speedDir) {
+        // The sentinel means Docker Hub directly; it is never a host.
+        String resultRegistry = registry != null ? registry : "";
+        String host = REGISTRY_DOCKER_HUB.equals(resultRegistry) ? "" : resultRegistry;
+        try {
+            String base = "https://" + (host.isEmpty() ? "registry-1.docker.io" : host);
+            long latencyMs = probeLatencyMs(base + "/v2/");
+            long speedKBps = -1;
+            if (latencyMs >= 0) {
+                speedKBps = registryLayerSpeedKBps(host, speedDir);
+            }
+            return new RegistryDetectResult(resultRegistry, latencyMs, speedKBps);
+        } catch (RuntimeException e) {
+            return new RegistryDetectResult(resultRegistry, -1, -1);
+        }
+    }
+
+    /** Download a URL to a file in speedDir and return the measured speed
+     *  in KB/s (-1 on failure). The file is deleted before returning,
+     *  even on failure, so speed-test downloads never accumulate. */
+    public static long downloadSpeedKBps(String urlString, File speedDir,
+                                         String fileName, int readTimeoutMs) {
+        return downloadToFileSpeedKBps(urlString, null, speedDir, fileName, readTimeoutMs);
+    }
+
+    private static long downloadToFileSpeedKBps(String urlString, String authHeader,
+                                                File speedDir, String fileName,
+                                                int readTimeoutMs) {
+        File out = new File(speedDir, fileName);
+        HttpURLConnection connection = null;
+        InputStream in = null;
+        FileOutputStream fileOut = null;
+        try {
+            if (!speedDir.exists() && !speedDir.mkdirs()) return -1;
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(readTimeoutMs);
+            connection.setRequestMethod("GET");
+            if (authHeader != null) connection.setRequestProperty("Authorization", authHeader);
+            connection.setInstanceFollowRedirects(true);
+            long startMs = System.currentTimeMillis();
+            connection.connect();
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return -1;
+            in = connection.getInputStream();
+            fileOut = new FileOutputStream(out);
+            byte[] buf = new byte[8192];
+            long bytes = 0;
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                fileOut.write(buf, 0, n);
+                bytes += n;
+            }
+            long elapsedMs = System.currentTimeMillis() - startMs;
+            if (bytes <= 0 || elapsedMs <= 0) return -1;
+            return bytes * 1000 / elapsedMs / 1024;
+        } catch (IOException | RuntimeException e) {
+            return -1;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+            if (fileOut != null) {
+                try {
+                    fileOut.close();
+                } catch (IOException ignored) {
+                }
+            }
+            if (connection != null) connection.disconnect();
+            if (out.exists()) out.delete();
+        }
+    }
+
+    // --- Registry token flow (Docker distribution spec) ---
+    //
+    // Verified live against DaoCloud and Docker Hub: GET /v2/ answers 401
+    // with a Bearer challenge; the token endpoint returns "token" (or
+    // "access_token"); the manifest for library/alpine:3.20 is a manifest
+    // LIST, so the amd64 entry is fetched to get layers[0]; the blob GET
+    // 307-redirects to storage and must be followed. Per-mirror quirks
+    // handled here: redirects on every request, any WWW-Authenticate
+    // parameter order/spacing, a challenge that only appears on the
+    // manifest request (dockerproxy.net answers /v2/ with 200), and
+    // "token" vs "access_token" in the token JSON. A failure at any step
+    // means -1 (speed test failed), never a crash.
+
+    private static final String SPEEDTEST_IMAGE = "library/alpine";
+    private static final String SPEEDTEST_TAG = "3.20";
+
+    /** Download the Alpine layer from a registry and return KB/s (-1 on failure). */
+    private static long registryLayerSpeedKBps(String registry, File speedDir) {
+        String host = registry != null && !registry.isEmpty() ? registry : "registry-1.docker.io";
+        String base = "https://" + host;
+        String token = registryBearerToken(base);
+        if (token == null) return -1;
+        String digest = registryAlpineLayerDigest(base, token);
+        if (digest == null) return -1;
+        String safeHost = host.replaceAll("[^A-Za-z0-9]", "_");
+        return downloadToFileSpeedKBps(
+                base + "/v2/" + SPEEDTEST_IMAGE + "/blobs/" + digest,
+                "Bearer " + token, speedDir, "layer-" + safeHost, 20000);
+    }
+
+    /** Bearer token for library/alpine:pull. The challenge may come from
+     *  /v2/ or, for registries that answer /v2/ with 200, from the
+     *  manifest request's 401. Null when no token could be fetched. */
+    private static String registryBearerToken(String base) {
+        String challenge = wwwAuthenticateFor(base + "/v2/");
+        if (challenge != null) {
+            String token = fetchRegistryToken(challenge);
+            if (token != null) return token;
+        }
+        challenge = wwwAuthenticateFor(base + "/v2/" + SPEEDTEST_IMAGE
+                + "/manifests/" + SPEEDTEST_TAG);
+        if (challenge != null) return fetchRegistryToken(challenge);
+        return null;
+    }
+
+    /** WWW-Authenticate header of a GET, when the response is 401; null otherwise. */
+    private static String wwwAuthenticateFor(String urlString) {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(urlString);
@@ -992,16 +1408,160 @@ public final class MirrorSettings {
             connection.setRequestMethod("GET");
             connection.setInstanceFollowRedirects(true);
             connection.connect();
-            // Any HTTP response (including 401 from a registry's /v2/) means reachable.
-            connection.getResponseCode();
-            return true;
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_UNAUTHORIZED) return null;
+            return connection.getHeaderField("WWW-Authenticate");
         } catch (IOException | RuntimeException e) {
-            // Any failure (including proxy/tunneling errors) means unreachable;
-            // a probe must never crash the caller.
-            return false;
+            return null;
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    /** Exchange a Bearer challenge for a token. Null on any failure. */
+    private static String fetchRegistryToken(String challenge) {
+        String realm = bearerParam(challenge, "realm");
+        if (realm == null || realm.isEmpty()) return null;
+        String service = bearerParam(challenge, "service");
+        StringBuilder url = new StringBuilder(realm);
+        url.append(realm.contains("?") ? "&" : "?");
+        if (service != null && !service.isEmpty()) url.append("service=").append(service).append("&");
+        url.append("scope=repository:").append(SPEEDTEST_IMAGE).append(":pull");
+        String body = getJson(url.toString(), null, null);
+        if (body == null) return null;
+        String token = jsonString(body, "token");
+        if (token == null) token = jsonString(body, "access_token");
+        return token;
+    }
+
+    /** First layers[] digest of the Alpine manifest. When the tag resolves
+     *  to a manifest list, the amd64 entry is fetched first. Null on failure. */
+    private static String registryAlpineLayerDigest(String base, String token) {
+        String accept = "application/vnd.docker.distribution.manifest.list.v2+json, "
+                + "application/vnd.docker.distribution.manifest.v2+json";
+        String body = getJson(base + "/v2/" + SPEEDTEST_IMAGE + "/manifests/" + SPEEDTEST_TAG,
+                "Bearer " + token, accept);
+        if (body == null) return null;
+        String digest = findManifestDigestForArch(body, "amd64");
+        if (digest != null) {
+            body = getJson(base + "/v2/" + SPEEDTEST_IMAGE + "/manifests/" + digest,
+                    "Bearer " + token,
+                    "application/vnd.docker.distribution.manifest.v2+json");
+            if (body == null) return null;
+        }
+        return findFirstLayerDigest(body);
+    }
+
+    /** In a manifest list, the digest of the entry for the given
+     *  architecture; null when the body is a single manifest or has no
+     *  such entry. */
+    private static String findManifestDigestForArch(String body, String arch) {
+        if (body.indexOf("\"manifests\"") < 0) return null;
+        int searchFrom = 0;
+        while (true) {
+            int archAt = body.indexOf("\"architecture\":\"" + arch + "\"", searchFrom);
+            if (archAt < 0) return null;
+            // The entry's digest precedes its platform block.
+            int platformAt = body.lastIndexOf("\"platform\"", archAt);
+            if (platformAt < 0) {
+                searchFrom = archAt + 1;
+                continue;
+            }
+            int entryOpen = body.lastIndexOf('{', platformAt);
+            int digestAt = body.indexOf("\"digest\":\"", entryOpen);
+            if (digestAt < 0 || digestAt > platformAt) {
+                searchFrom = archAt + 1;
+                continue;
+            }
+            int start = digestAt + "\"digest\":\"".length();
+            int end = body.indexOf('"', start);
+            if (end <= start) {
+                searchFrom = archAt + 1;
+                continue;
+            }
+            // Skip non-Linux entries for the same architecture, if any.
+            int platformEnd = body.indexOf('}', archAt);
+            String platform = platformEnd > archAt
+                    ? body.substring(archAt, platformEnd) : "";
+            if (platform.contains("\"os\"") && !platform.contains("\"os\":\"linux\"")) {
+                searchFrom = archAt + 1;
+                continue;
+            }
+            return body.substring(start, end);
+        }
+    }
+
+    /** First layers[] digest of a single manifest; null when absent. */
+    private static String findFirstLayerDigest(String body) {
+        int layersAt = body.indexOf("\"layers\"");
+        if (layersAt < 0) return null;
+        int digestAt = body.indexOf("\"digest\":\"", layersAt);
+        if (digestAt < 0) return null;
+        int start = digestAt + "\"digest\":\"".length();
+        int end = body.indexOf('"', start);
+        return end > start ? body.substring(start, end) : null;
+    }
+
+    /** GET a small JSON body; null unless the response is 200. */
+    private static String getJson(String urlString, String authHeader, String accept) {
+        HttpURLConnection connection = null;
+        InputStream in = null;
+        try {
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestMethod("GET");
+            if (authHeader != null) connection.setRequestProperty("Authorization", authHeader);
+            if (accept != null) connection.setRequestProperty("Accept", accept);
+            connection.setInstanceFollowRedirects(true);
+            connection.connect();
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return null;
+            in = connection.getInputStream();
+            StringBuilder sb = new StringBuilder();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                if (sb.length() > 1024 * 1024) return null; // never a manifest; bail out
+            }
+            return sb.toString();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** Tolerantly read a name="value" parameter from a WWW-Authenticate
+     *  Bearer challenge: any parameter order, optional spaces after commas. */
+    private static String bearerParam(String challenge, String name) {
+        if (challenge == null) return null;
+        String needle = name + "=\"";
+        int at = challenge.indexOf(needle);
+        if (at < 0) return null;
+        int start = at + needle.length();
+        int end = challenge.indexOf('"', start);
+        return end > start ? challenge.substring(start, end) : null;
+    }
+
+    /** Value of a top-level "key": "value" pair in a small JSON object; null when absent. */
+    private static String jsonString(String body, String key) {
+        if (body == null) return null;
+        String needle = "\"" + key + "\"";
+        int at = body.indexOf(needle);
+        if (at < 0) return null;
+        int colon = body.indexOf(':', at + needle.length());
+        if (colon < 0) return null;
+        int start = body.indexOf('"', colon);
+        if (start < 0) return null;
+        int end = body.indexOf('"', start + 1);
+        return end > start ? body.substring(start + 1, end) : null;
     }
 
     // ------------------------------------------------------------------
