@@ -1299,11 +1299,6 @@ public final class AiAgentUtils {
                 s.append("echo \"注意：直接打开 http://127.0.0.1:3080 进不去，必须带 token 的完整地址。\"\n");
                 s.append("command -v dsh >/dev/null 2>&1 || { echo \"没有找到 dsh，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("cd ~ || true\n");
-                // dsh reads its key from the environment (apiKeyEnv in
-                // cordis.patch.yml); this script's shell is not a login
-                // shell, so source the model env file written by
-                // ModelConfigApplier. Missing file = no model config, skip.
-                s.append("[ -f \"$HOME/.termux-aiagents/model-env.sh\" ] && . \"$HOME/.termux-aiagents/model-env.sh\"\n");
                 s.append("dsh web --no-open\n");
                 break;
             case OPENCODE:
