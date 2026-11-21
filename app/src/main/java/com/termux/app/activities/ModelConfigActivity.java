@@ -71,6 +71,7 @@ public class ModelConfigActivity extends AppCompatActivity {
     private ArrayAdapter<EntryRow> mAdapter;
     private final List<EntryRow> mRows = new ArrayList<>();
     private boolean mProbing;
+    private boolean mClearingAll;
 
     private static final class EntryRow {
         final ModelConfigStore.Entry entry;
@@ -108,6 +109,8 @@ public class ModelConfigActivity extends AppCompatActivity {
     private Button mFetchModelsButton;
     private Button mAddModelButton;
     private Switch mSetDefaultView;
+    private Switch mDisableWebSearchView;
+    private TextView mDisableWebSearchHintView;
     private LinearLayout mAgentsContainer;
     private TextView mNoAgentsView;
     private CheckBox mAllDistrosView;
@@ -193,6 +196,8 @@ public class ModelConfigActivity extends AppCompatActivity {
         mEmptyView = findViewById(R.id.modelconfig_empty);
         Button addButton = findViewById(R.id.modelconfig_add_button);
         addButton.setOnClickListener(v -> showEdit(null));
+        Button clearAllButton = findViewById(R.id.modelconfig_clear_all_button);
+        clearAllButton.setOnClickListener(v -> showClearAllDialog());
 
         mAdapter = new ArrayAdapter<EntryRow>(this, R.layout.modelconfig_row, mRows) {
             @Override
@@ -372,6 +377,53 @@ public class ModelConfigActivity extends AppCompatActivity {
         Toast.makeText(this, R.string.modelconfig_deleted, Toast.LENGTH_SHORT).show();
     }
 
+    private void showClearAllDialog() {
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.modelconfig_clear_all_title)
+            .setMessage(R.string.modelconfig_clear_all_message)
+            .setPositiveButton(android.R.string.ok,
+                (dialog, which) -> clearAllInBackground())
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    /** Remove every applied config from every container (list screen).
+     * Saved entries are kept; only the applied state is cleared. */
+    private void clearAllInBackground() {
+        if (mClearingAll || mMode != MODE_LIST) return;
+        mClearingAll = true;
+        mListStatusView.setText(R.string.modelconfig_working);
+        new Thread() {
+            @Override
+            public void run() {
+                try {
+                    final int cleared = ModelConfigApplier.clearAllApplied(
+                        ModelConfigActivity.this);
+                    runOnUiThread(() -> {
+                        mClearingAll = false;
+                        if (isFinishing() || mMode != MODE_LIST) return;
+                        mListStatusView.setText(getString(
+                            R.string.modelconfig_clear_all_done, cleared));
+                        buildListRows();
+                        probeAppliedInBackground();
+                    });
+                } catch (Exception e) {
+                    // Never leave the list stuck: reset the flag and show
+                    // the error instead of going silent.
+                    Log.w(LOG_TAG, "Clear all failed", e);
+                    final String error = e.getMessage() == null
+                        ? e.toString() : e.getMessage();
+                    runOnUiThread(() -> {
+                        mClearingAll = false;
+                        if (isFinishing() || mMode != MODE_LIST) return;
+                        mListStatusView.setText(getString(
+                            R.string.modelconfig_apply_failed, error));
+                    });
+                }
+            }
+        }.start();
+    }
+
     // ------------------------------------------------------------------
     // Edit mode
     // ------------------------------------------------------------------
@@ -405,6 +457,9 @@ public class ModelConfigActivity extends AppCompatActivity {
         mFetchModelsButton = findViewById(R.id.modelconfig_edit_fetch_models);
         mAddModelButton = findViewById(R.id.modelconfig_edit_add_model);
         mSetDefaultView = findViewById(R.id.modelconfig_edit_set_default);
+        mDisableWebSearchView = findViewById(R.id.modelconfig_edit_disable_web_search);
+        mDisableWebSearchHintView =
+            findViewById(R.id.modelconfig_edit_disable_web_search_hint);
         mAgentsContainer = findViewById(R.id.modelconfig_edit_agents);
         mNoAgentsView = findViewById(R.id.modelconfig_edit_no_agents);
         mAllDistrosView = findViewById(R.id.modelconfig_edit_all_distros);
@@ -435,12 +490,14 @@ public class ModelConfigActivity extends AppCompatActivity {
             mModels.addAll(mEditing.models);
             mPrimaryModel = mEditing.primaryModel;
             mSetDefaultView.setChecked(mEditing.setDefault);
+            mDisableWebSearchView.setChecked(mEditing.disableWebSearch);
             mSelectedAgents.addAll(mEditing.agentIds);
             mSelectedDistros.addAll(mEditing.distroNames);
             mAllDistros = mEditing.allDistros;
         } else {
             mPrimaryModel = "";
             mSetDefaultView.setChecked(true);
+            mDisableWebSearchView.setChecked(true);
             mAllDistros = false;
         }
         if (mPrimaryModel == null) mPrimaryModel = "";
@@ -505,6 +562,8 @@ public class ModelConfigActivity extends AppCompatActivity {
             mApiKeyView.setSelection(Math.max(0, start), Math.max(0, end));
         });
         mSetDefaultView.setOnCheckedChangeListener((button, checked) -> mDirty = true);
+        mDisableWebSearchView.setOnCheckedChangeListener(
+            (button, checked) -> mDirty = true);
         mAllDistrosView.setChecked(mAllDistros);
         mAllDistrosView.setOnCheckedChangeListener((button, checked) -> {
             mAllDistros = checked;
@@ -689,6 +748,10 @@ public class ModelConfigActivity extends AppCompatActivity {
         }
         mNoteYamlView.setVisibility(yaml ? View.VISIBLE : View.GONE);
         mNoteCodexView.setVisibility(codex ? View.VISIBLE : View.GONE);
+        // The web_search toggle only affects Codex: hide it (and its hint)
+        // when Codex is not selected, so other agents never see it.
+        mDisableWebSearchView.setVisibility(codex ? View.VISIBLE : View.GONE);
+        mDisableWebSearchHintView.setVisibility(codex ? View.VISIBLE : View.GONE);
     }
 
     /** Installed distros + per-container installed agents (rootfs scan,
@@ -1050,6 +1113,7 @@ public class ModelConfigActivity extends AppCompatActivity {
         entry.primaryModel = mPrimaryModel;
         entry.fixPrimaryModel();
         entry.setDefault = mSetDefaultView.isChecked();
+        entry.disableWebSearch = mDisableWebSearchView.isChecked();
         entry.agentIds = new ArrayList<>(mSelectedAgents);
         entry.distroNames = new ArrayList<>(mSelectedDistros);
         entry.allDistros = mAllDistros;
