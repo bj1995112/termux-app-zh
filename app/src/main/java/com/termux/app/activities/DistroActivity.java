@@ -63,6 +63,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -221,6 +222,9 @@ public class DistroActivity extends AppCompatActivity {
     private final Map<String, String> mContainerDisplayNames = new HashMap<>();
     /** Installed container names, from scanning the containers directories. */
     private Set<String> mInstalledContainers = new HashSet<>();
+    /** Containers already offered the model-config re-apply prompt in this
+     * activity lifetime, so a dismissed prompt does not nag on every resume. */
+    private final Set<String> mReapplyPromptedContainers = new HashSet<>();
     private boolean mListLoading = true;
     /** "latest" label, resolved on the UI thread once and reused in background threads. */
     private String mLatestLabel;
@@ -287,6 +291,7 @@ public class DistroActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         new Thread(() -> MirrorSettings.syncPendingInstalls(DistroActivity.this)).start();
+        new Thread(this::checkModelConfigReapply).start();
     }
 
     @Override
@@ -360,6 +365,76 @@ public class DistroActivity extends AppCompatActivity {
     private String displayNameForContainer(String container) {
         String display = mContainerDisplayNames.get(container);
         return display != null ? display : container;
+    }
+
+    // ------------------------------------------------------------------
+    // Model-config re-apply prompt after a distro reinstall
+    // ------------------------------------------------------------------
+
+    /** After a reinstall the apply records survive (keyed by container
+     * name) but the container's files are gone, so the model-config list
+     * would only show "未应用". Prompt once per container per activity
+     * lifetime to re-apply; never auto-apply (design §11). Installs run
+     * in a terminal session with no callback, so like the mirror sync
+     * this is detected on resume with a fresh container scan. */
+    private void checkModelConfigReapply() {
+        Set<String> installed = DistroUtils.scanInstalledContainers();
+        if (installed.isEmpty()) return;
+        final Map<String, List<ModelConfigStore.Entry>> toReapply = new LinkedHashMap<>();
+        final List<String> names = new ArrayList<>();
+        for (String container : installed) {
+            if (mReapplyPromptedContainers.contains(container)) continue;
+            File rootfs = DistroUtils.containerRootfs(container);
+            List<ModelConfigStore.Entry> entries =
+                ModelConfigApplier.entriesNeedingReapply(this, rootfs, container);
+            if (!entries.isEmpty()) {
+                toReapply.put(container, entries);
+                names.add(displayNameForContainer(container));
+            }
+        }
+        if (toReapply.isEmpty()) return;
+        mReapplyPromptedContainers.addAll(toReapply.keySet());
+        final String joined = joinWithComma(names);
+        runOnUiThread(() -> new AlertDialog.Builder(DistroActivity.this)
+            .setTitle(R.string.modelconfig_reapply_title)
+            .setMessage(getString(R.string.modelconfig_reapply_message, joined))
+            .setPositiveButton(R.string.modelconfig_apply, (dialog, which) ->
+                new Thread(() -> reapplyModelConfigs(toReapply)).start())
+            .setNegativeButton(android.R.string.cancel, null)
+            .show());
+    }
+
+    /** Re-apply every recorded entry to its container, on a background
+     * thread. Entries whose key can no longer be decrypted are skipped
+     * (the user re-enters the key in the model-config screen). */
+    private void reapplyModelConfigs(Map<String, List<ModelConfigStore.Entry>> toReapply) {
+        String error = null;
+        for (Map.Entry<String, List<ModelConfigStore.Entry>> e : toReapply.entrySet()) {
+            for (ModelConfigStore.Entry entry : e.getValue()) {
+                String apiKey = entry.getApiKey();
+                if (apiKey == null || apiKey.isEmpty()) {
+                    error = getString(R.string.modelconfig_key_invalid);
+                    continue;
+                }
+                ModelConfigApplier.ApplyResult result = ModelConfigApplier.applyEntry(
+                    DistroActivity.this, entry, apiKey,
+                    Collections.singletonList(e.getKey()));
+                if (!result.errors.isEmpty()) error = result.errors.get(0);
+            }
+        }
+        final String failure = error;
+        final int distros = toReapply.size();
+        runOnUiThread(() -> {
+            if (failure == null) {
+                Toast.makeText(DistroActivity.this,
+                    getString(R.string.modelconfig_applied_done, distros),
+                    Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(DistroActivity.this,
+                    getString(R.string.modelconfig_apply_failed, failure),
+                    Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     // ------------------------------------------------------------------
