@@ -210,7 +210,9 @@ public final class AiAgentUtils {
     public static final List<AgentDef> AGENTS = Arrays.asList(
         new AgentDef("codex", "Codex", R.string.aiagents_desc_codex, false, "codex",
             ".local/bin/codex",
-            new String[]{"root/.local/bin/codex"},
+            new String[]{"root/.local/bin/codex", "usr/local/bin/codex",
+                "usr/bin/codex",
+                "root/.codex/packages/standalone/current/bin/codex"},
             VersionKind.CODEX_RELEASES, null,
             "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
             "codex update || curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
@@ -1416,6 +1418,9 @@ public final class AiAgentUtils {
         "# e.g. npm installs in /usr/bin or /usr/local/bin).\n" +
         "AGENT_PATHS='\n" +
         "codex|Codex|root/.local/bin/codex\n" +
+        "codex|Codex|usr/local/bin/codex\n" +
+        "codex|Codex|usr/bin/codex\n" +
+        "codex|Codex|root/.codex/packages/standalone/current/bin/codex\n" +
         "pi|Pi|usr/bin/pi\n" +
         "pi|Pi|usr/local/bin/pi\n" +
         "agy|Antigravity CLI|root/.local/bin/agy\n" +
