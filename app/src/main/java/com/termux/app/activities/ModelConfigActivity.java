@@ -110,7 +110,6 @@ public class ModelConfigActivity extends AppCompatActivity {
     private TextView mNoteKeyView;
     private TextView mNoteYamlView;
     private TextView mNoteCodexView;
-    private TextView mNoteHermesView;
     private TextView mEditStatusView;
     private Button mTestButton;
     private Button mApplyButton;
@@ -405,7 +404,6 @@ public class ModelConfigActivity extends AppCompatActivity {
         mNoteKeyView = findViewById(R.id.modelconfig_edit_note_key);
         mNoteYamlView = findViewById(R.id.modelconfig_edit_note_yaml);
         mNoteCodexView = findViewById(R.id.modelconfig_edit_note_codex);
-        mNoteHermesView = findViewById(R.id.modelconfig_edit_note_hermes);
         mEditStatusView = findViewById(R.id.modelconfig_edit_status);
         mTestButton = findViewById(R.id.modelconfig_edit_test);
         mApplyButton = findViewById(R.id.modelconfig_edit_apply);
@@ -659,16 +657,12 @@ public class ModelConfigActivity extends AppCompatActivity {
     private void updateNotes() {
         boolean yaml = false;
         boolean codex = false;
-        boolean hermes = false;
         for (String agentId : mSelectedAgents) {
-            if ("dsh".equals(agentId) || "aider".equals(agentId)
-                    || "hermes".equals(agentId)) yaml = true;
+            if ("aider".equals(agentId)) yaml = true;
             if ("codex".equals(agentId)) codex = true;
-            if ("hermes".equals(agentId)) hermes = true;
         }
         mNoteYamlView.setVisibility(yaml ? View.VISIBLE : View.GONE);
         mNoteCodexView.setVisibility(codex ? View.VISIBLE : View.GONE);
-        mNoteHermesView.setVisibility(hermes ? View.VISIBLE : View.GONE);
     }
 
     /** Installed distros + per-container installed agents (rootfs scan,
