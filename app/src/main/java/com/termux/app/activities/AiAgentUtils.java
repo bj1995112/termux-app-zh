@@ -58,8 +58,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public final class AiAgentUtils {
 
@@ -79,8 +83,8 @@ public final class AiAgentUtils {
      * "latest": {"pi": "1.6.0", ...}}. */
     private static final String UPDATE_CACHE_FILE_NAME = "aiagents-updates.json";
 
-    /** Cached latest versions are used for one day without re-fetching. */
-    private static final long UPDATE_CACHE_VALID_MS = 24L * 60L * 60L * 1000L;
+    /** Cached latest versions are used for one hour without re-fetching. */
+    private static final long UPDATE_CACHE_VALID_MS = 1L * 60L * 60L * 1000L;
 
     /** Per-request timeouts for latest-version checks; any failure is
      * silent (no badge, no error) — see fetchLatestVersion. */
@@ -875,7 +879,7 @@ public final class AiAgentUtils {
         }
     }
 
-    /** True when the cache was checked within the last day. */
+    /** True when the cache was checked within the last hour. */
     public static boolean isUpdateCacheValid(long checkedAt) {
         return checkedAt > 0
             && System.currentTimeMillis() - checkedAt < UPDATE_CACHE_VALID_MS;
@@ -909,6 +913,111 @@ public final class AiAgentUtils {
             }
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to save update cache", e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Latest-version refresh (parallel + refresh-if-stale)
+    // ------------------------------------------------------------------
+
+    /** Guard for refreshLatestVersionsIfStale: launch, resume and
+     * drawer-open all trigger it, but only one refresh may run at once. */
+    private static final Object UPDATE_REFRESH_LOCK = new Object();
+    private static volatile boolean sRefreshingUpdates = false;
+
+    /**
+     * Fetch the latest version for each given agent definition in
+     * parallel (4 threads; each fetch has its own 10s connect / 20s
+     * read timeout, so the whole refresh is bounded by ~30s worst case
+     * instead of 30s per agent). distroIdByAgentId picks the per-agent
+     * source variant (agy's glibc vs musl manifest); a missing entry
+     * means "any distro". Failures are silent — a failed agent simply
+     * contributes nothing. Returns only freshly fetched values (never
+     * null). Runs synchronously on the caller's thread; callers must
+     * call it off the UI thread.
+     */
+    public static Map<String, String> fetchLatestVersions(
+            List<AgentDef> defs, Map<String, String> distroIdByAgentId) {
+        Map<String, String> fetched = Collections.synchronizedMap(new HashMap<>());
+        if (defs == null || defs.isEmpty()) return fetched;
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        for (AgentDef def : defs) {
+            final AgentDef current = def;
+            pool.submit(() -> {
+                String distroId = distroIdByAgentId == null
+                    ? "" : distroIdByAgentId.get(current.id);
+                String latest = fetchLatestVersion(current,
+                    distroId == null ? "" : distroId);
+                if (!latest.isEmpty()) fetched.put(current.id, latest);
+            });
+        }
+        pool.shutdown();
+        try {
+            // Each fetch caps at its own timeouts (10s + 20s); 35s covers
+            // a full round even if every request stalls.
+            pool.awaitTermination(35, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return fetched;
+    }
+
+    /**
+     * Refresh the latest-version cache in the background when it is stale
+     * (older than UPDATE_CACHE_VALID_MS, one hour). Safe to call from
+     * onCreate, onResume and drawer-open: it no-ops when the cache is
+     * fresh or a refresh is already running, and never touches the UI
+     * thread itself. onDone, when given, runs on the UI thread after a
+     * refresh that fetched at least one fresh value (so the caller can
+     * repaint a badge); it does not run when the cache was fresh or the
+     * refresh fetched nothing. The latest version is fetched once per
+     * agent id, using the first container it was found in for the
+     * distro variant (agy in two distros with different libc families
+     * compares against the first one's manifest).
+     */
+    public static void refreshLatestVersionsIfStale(final Runnable onDone) {
+        new Thread(() -> {
+            if (isUpdateRefreshRunning()) return;
+            UpdateCache cache = loadUpdateCache();
+            if (isUpdateCacheValid(cache.checkedAt)) return;
+            synchronized (UPDATE_REFRESH_LOCK) {
+                if (sRefreshingUpdates) return;
+                sRefreshingUpdates = true;
+            }
+            boolean anyFetched = false;
+            try {
+                List<InstalledAgent> installed = detectInstalledAgents();
+                Map<String, String> distroByAgent = new LinkedHashMap<>();
+                for (InstalledAgent agent : installed) {
+                    distroByAgent.putIfAbsent(agent.agentId, agent.distroId);
+                }
+                if (distroByAgent.isEmpty()) return;
+                List<AgentDef> defs = new ArrayList<>();
+                for (String id : distroByAgent.keySet()) {
+                    AgentDef def = findDef(id);
+                    if (def != null) defs.add(def);
+                }
+                Map<String, String> fetched = fetchLatestVersions(defs, distroByAgent);
+                if (!fetched.isEmpty()) {
+                    Map<String, String> merged = new HashMap<>(loadUpdateCache().latest);
+                    merged.putAll(fetched);
+                    saveUpdateCache(merged);
+                    anyFetched = true;
+                }
+            } finally {
+                synchronized (UPDATE_REFRESH_LOCK) {
+                    sRefreshingUpdates = false;
+                }
+            }
+            if (anyFetched && onDone != null) {
+                new Handler(Looper.getMainLooper()).post(onDone);
+            }
+        }).start();
+    }
+
+    private static boolean isUpdateRefreshRunning() {
+        synchronized (UPDATE_REFRESH_LOCK) {
+            return sRefreshingUpdates;
         }
     }
 
