@@ -443,6 +443,13 @@
     <string name="modelconfig_type_locked">Type cannot change after saving</string>
     <string name="modelconfig_base_url">Base URL</string>
     <string name="modelconfig_base_url_hint">e.g. https://api.deepseek.com/v1</string>
+    <string name="modelconfig_api_path">API path</string>
+    <string name="modelconfig_api_path_hint">Empty means auto. When set, it replaces the path of the base URL, and each assistant appends its own suffix.</string>
+    <string name="modelconfig_api_path_auto">Auto</string>
+    <string name="modelconfig_api_path_root">Root path (/)</string>
+    <string name="modelconfig_api_path_custom">Custom…</string>
+    <string name="modelconfig_api_path_custom_hint">e.g. /v1</string>
+    <string name="modelconfig_api_path_preview_empty">Select an assistant below to see the real request URL</string>
     <string name="modelconfig_api_key">API Key</string>
     <string name="modelconfig_api_key_hint">Stored only on this phone, never uploaded</string>
     <string name="modelconfig_show_key">Show</string>
