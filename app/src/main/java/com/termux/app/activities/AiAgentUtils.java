@@ -248,14 +248,14 @@ public final class AiAgentUtils {
             new String[]{"root/.local/bin/aider"},
             VersionKind.AIDER_DIST_INFO, null,
             "curl -LsSf https://aider.chat/install.sh | sh",
-            "aider --upgrade",
+            "\"$HOME/.local/bin/aider\" --upgrade",
             WebKind.NONE, 0, true),
         new AgentDef("claude", "Claude Code", R.string.aiagents_desc_claude, false, "claude",
             ".local/bin/claude",
             new String[]{"root/.local/bin/claude"},
             VersionKind.CLAUDE_VERSIONS, null,
             "curl -fsSL https://claude.ai/install.sh | bash",
-            "claude update",
+            "\"$HOME/.local/bin/claude\" update",
             WebKind.NONE, 0, true),
         new AgentDef("hermes", "Hermes Agent", R.string.aiagents_desc_hermes, false, "hermes",
             ".local/bin/hermes",
@@ -1545,8 +1545,11 @@ public final class AiAgentUtils {
         "            ;;\n" +
         "        opencode)\n" +
         "            echo \"启动 OpenCode 网页版（$container）…\"\n" +
-        "            echo \"地址：http://127.0.0.1:4096，密码见会话里的 server password 一行。\"\n" +
-        "            exec proot-distro login \"$container\" -- opencode serve --hostname 127.0.0.1 --port 4096 \"$@\"\n" +
+        "            PW_FILE=\"$PREFIX/var/lib/proot-distro/containers/$container/rootfs/root/.termux-aiagents/opencode-web-password\"\n" +
+        "            [ -f \"$PW_FILE\" ] || PW_FILE=\"$PREFIX/var/lib/proot-distro/installed-rootfs/$container/root/.termux-aiagents/opencode-web-password\"\n" +
+        "            PW=$(cat \"$PW_FILE\" 2>/dev/null)\n" +
+        "            if [ -n \"$PW\" ]; then echo \"地址：http://127.0.0.1:4096，密码：$PW（固定密码，和弹框里的一样）。\"; else echo \"地址：http://127.0.0.1:4096，密码见会话里的 server password 一行。\"; fi\n" +
+        "            exec proot-distro login \"$container\" -- bash -c 'PW=$(cat /root/.termux-aiagents/opencode-web-password 2>/dev/null); [ -n \"$PW\" ] && export OPENCODE_PASSWORD=\"$PW\" OPENCODE_SERVER_PASSWORD=\"$PW\"; exec opencode serve --hostname 127.0.0.1 --port 4096 \"$@\"' _ \"$@\"\n" +
         "            ;;\n" +
         "        pi)\n" +
         "            echo \"启动 Pi 网页版（$container）…\"\n" +
