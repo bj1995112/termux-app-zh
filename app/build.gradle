@@ -42,6 +42,7 @@ android {
 
         implementation project(":terminal-view")
         implementation project(":termux-shared")
+        implementation "org.yaml:snakeyaml:2.2"
     }
 
     defaultConfig {
