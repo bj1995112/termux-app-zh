@@ -24,6 +24,13 @@
         app:summary="@string/storage_preference_summary_not_granted"
         app:persistent="false"/>
 
+
+    <Preference
+        app:key="model_config"
+        app:title="@string/model_config_title"
+        app:summary="@string/modelconfig_settings_summary"
+        app:persistent="false"/>
+
     <SwitchPreferenceCompat
         app:key="show_welcome_message"
         app:title="@string/welcome_message_title"
