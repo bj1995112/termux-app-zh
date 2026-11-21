@@ -2,6 +2,7 @@ package com.termux.app.activities;
 
 import android.app.AlertDialog;
 import android.os.Bundle;
+import android.util.Log;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -1085,6 +1086,7 @@ public class ModelConfigActivity extends AppCompatActivity {
         new Thread() {
             @Override
             public void run() {
+                try {
                 List<ModelConfigStore.Entry> entries =
                     ModelConfigStore.loadEntries(ModelConfigActivity.this);
                 boolean replaced = false;
@@ -1139,6 +1141,21 @@ public class ModelConfigActivity extends AppCompatActivity {
                             getString(R.string.modelconfig_not_applied));
                     }
                 });
+                } catch (Exception e) {
+                    // Never leave the screen stuck busy: without this,
+                    // one crash in the apply thread disables every button
+                    // (applyInBackground returns early on mBusy) and the
+                    // next tap does literally nothing.
+                    Log.w("ModelConfig", "Apply failed", e);
+                    final String error = e.getMessage() == null
+                        ? e.toString() : e.getMessage();
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        if (mMode != MODE_EDIT || generation != mEditGeneration) return;
+                        mEditStatusView.setText(getString(
+                            R.string.modelconfig_apply_failed, error));
+                    });
+                }
             }
         }.start();
     }
