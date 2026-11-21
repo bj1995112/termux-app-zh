@@ -489,4 +489,10 @@
     <string name="modelconfig_working">正在处理…</string>
     <string name="modelconfig_reapply_title">重新应用模型配置</string>
     <string name="modelconfig_reapply_message">下发到 %1$s 的模型配置已丢失（发行版已重装），是否现在重新应用？</string>
+    <string name="modelconfig_disable_web_search">禁用 Codex 联网搜索</string>
+    <string name="modelconfig_disable_web_search_hint">有些中转不支持联网搜索工具，请求会直接失败。用中转时保持开启，用 OpenAI 官方时可以关掉。</string>
+    <string name="modelconfig_clear_all">清除全部已应用</string>
+    <string name="modelconfig_clear_all_title">清除全部已应用配置？</string>
+    <string name="modelconfig_clear_all_message">这会删除每个发行版里所有已应用的服务商配置、环境变量、.bashrc 标记和已应用记录，以及各 Codex 配置里的 web_search 行。已保存的条目会保留，可以重新应用。</string>
+    <string name="modelconfig_clear_all_done">已清除 %1$d 个发行版的配置</string>
 </resources>
