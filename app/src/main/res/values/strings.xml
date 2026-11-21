@@ -462,7 +462,6 @@
     <string name="modelconfig_not_installed">Not installed</string>
     <string name="modelconfig_yaml_note">Applying reformats this file and drops comments; the original is backed up as .termux-bak</string>
     <string name="modelconfig_codex_note">Codex only accepts the Responses API</string>
-    <string name="modelconfig_hermes_note">Hermes requires model context of at least 64K</string>
     <string name="modelconfig_apply_to_distros">Apply to distros</string>
     <string name="modelconfig_all_distros">All installed distros</string>
     <string name="modelconfig_no_distros">No distros installed</string>
