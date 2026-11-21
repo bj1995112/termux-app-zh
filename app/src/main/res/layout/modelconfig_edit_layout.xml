@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <include layout="@layout/partial_primary_toolbar" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/modelconfig_name"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/modelconfig_edit_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:hint="@string/modelconfig_name_hint"
+                android:inputType="text"
+                android:singleLine="true" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_type"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <RadioGroup
+                android:id="@+id/modelconfig_edit_type"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical">
+
+                <RadioButton
+                    android:id="@+id/modelconfig_edit_type_openai"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/modelconfig_type_openai" />
+
+                <RadioButton
+                    android:id="@+id/modelconfig_edit_type_anthropic"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/modelconfig_type_anthropic" />
+
+                <RadioButton
+                    android:id="@+id/modelconfig_edit_type_gemini"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/modelconfig_type_gemini" />
+
+            </RadioGroup>
+
+            <TextView
+                android:id="@+id/modelconfig_edit_type_locked"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/modelconfig_type_locked"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_base_url"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/modelconfig_edit_base_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:hint="@string/modelconfig_base_url_hint"
+                android:inputType="textUri"
+                android:singleLine="true" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_api_key"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/modelconfig_edit_api_key"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:hint="@string/modelconfig_api_key_hint"
+                android:inputType="textPassword"
+                android:singleLine="true" />
+
+            <CheckBox
+                android:id="@+id/modelconfig_edit_show_key"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/modelconfig_show_key" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_note_key"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_key_plain_note"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_models"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_no_models"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_no_models_yet"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <LinearLayout
+                android:id="@+id/modelconfig_edit_models"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/modelconfig_edit_fetch_models"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/modelconfig_fetch_models" />
+
+                <Button
+                    android:id="@+id/modelconfig_edit_add_model"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="@string/modelconfig_add_model" />
+
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/modelconfig_edit_set_default"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_set_default" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_set_default_hint"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_apply_to_agents"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_no_agents"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_no_agents_for_type"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/modelconfig_edit_agents"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_note_yaml"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_yaml_note"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_note_codex"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_codex_note"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_note_hermes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_hermes_note"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/modelconfig_apply_to_distros"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/modelconfig_edit_all_distros"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_all_distros" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_no_distros"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_no_distros"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/modelconfig_edit_distros"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/modelconfig_edit_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/modelconfig_test_no_token"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/modelconfig_edit_test"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/modelconfig_test_connection" />
+
+                <Button
+                    android:id="@+id/modelconfig_edit_apply"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="@string/modelconfig_apply" />
+
+                <Button
+                    android:id="@+id/modelconfig_edit_save"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="@string/modelconfig_save" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </ScrollView>
+
+</LinearLayout>
