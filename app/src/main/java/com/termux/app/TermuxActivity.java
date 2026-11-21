@@ -307,6 +307,16 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // singleTask: a new intent (e.g. the Settings "External storage" entry)
+        // arrives here, not as a fresh launch — adopt it so onStart() can see
+        // the EXTRA_REQUEST_STORAGE_PERMISSION flag. Without this, getIntent()
+        // keeps the original launch intent and the tap does nothing.
+        setIntent(intent);
+    }
+
+    @Override
     public void onStart() {
         super.onStart();
 
