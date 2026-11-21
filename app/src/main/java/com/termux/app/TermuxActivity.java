@@ -921,8 +921,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     }
 
     /** Installed version of one drawer agent row (local file reads only),
-     * or "" when unknown. agy has no local version source, so it never
-     * badges — same as the AI-assistant screen. */
+     * or "" when unknown. agy reads the version recorded at install time
+     * (~/.termux-aiagents/versions/agy), so an agy installed before that
+     * record existed still shows "版本未知" until its next install/update. */
     private String agentInstalledVersion(AiAgentUtils.InstalledAgent agent) {
         AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
         if (def == null) return "";
@@ -955,6 +956,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     /** One drawer AI-assistant row: the name on the left and, when an
      * update is available, a tappable "可更新 ↑" pill on the right.
+     * A second, smaller line under the name shows the installed version
+     * ("1.6.0", "1.6.0 · 有新版本 1.7.0", or "版本未知" when the version
+     * cannot be read). The version line is display-only — tapping it
+     * does the same as tapping the name — and the pill is untouched.
      * Tapping the name enters the agent (as before); tapping the pill
      * updates it. The row background matches the distro rows. */
     private void newAgentRow(LinearLayout rows, final AiAgentUtils.InstalledAgent agent,
@@ -971,21 +976,39 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             container.setBackground(ContextCompat.getDrawable(this,
                 R.drawable.session_background_selected));
         }
+        LinearLayout textColumn = new LinearLayout(this);
+        textColumn.setOrientation(LinearLayout.VERTICAL);
+        textColumn.setLayoutParams(new LinearLayout.LayoutParams(0,
+            ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView name = (TextView) getLayoutInflater()
-            .inflate(R.layout.item_terminal_sessions_list, container, false);
+            .inflate(R.layout.item_terminal_sessions_list, textColumn, false);
         name.setBackground(null);
-        LinearLayout.LayoutParams nameParams =
-            (LinearLayout.LayoutParams) name.getLayoutParams();
-        nameParams.width = 0;
-        nameParams.weight = 1;
-        name.setLayoutParams(nameParams);
+        name.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         String rowText = getString(R.string.aiagents_drawer_row,
             agent.displayName, agent.distroDisplay);
         if (AiAgentUtils.hasWeb(agent.agentId)) {
             rowText += " · " + getString(R.string.aiagents_web_open);
         }
         name.setText(rowText);
-        name.setOnClickListener(v -> {
+        TextView version = new TextView(this);
+        version.setTextSize(12);
+        TypedValue secondaryColor = new TypedValue();
+        getTheme().resolveAttribute(android.R.attr.textColorSecondary, secondaryColor, true);
+        version.setTextColor(secondaryColor.data);
+        version.setPadding(dpToPx(6), 0, 0, dpToPx(2));
+        if (hasUpdate) {
+            // The "已安装" prefix of aiagents_installed_with_update would
+            // repeat what the section already says (every row here IS
+            // installed), so the drawer has its own shorter wording.
+            version.setText(getString(R.string.aiagents_drawer_version_with_update,
+                installedVersion, latestVersion));
+        } else if (installedVersion == null || installedVersion.isEmpty()) {
+            version.setText(R.string.aiagents_version_unknown);
+        } else {
+            version.setText(installedVersion);
+        }
+        View.OnClickListener enterListener = v -> {
             getDrawer().closeDrawers();
             if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
                 AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
@@ -994,13 +1017,20 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 // `dsh web`): tapping the row opens its web UI instead.
                 AiAgentUtils.startWebSession(TermuxActivity.this, agent, null);
             }
-        });
-        name.setLongClickable(true);
-        name.setOnLongClickListener(v -> {
+        };
+        View.OnLongClickListener menuListener = v -> {
             showAgentDrawerMenu(agent);
             return true;
-        });
-        container.addView(name);
+        };
+        name.setOnClickListener(enterListener);
+        version.setOnClickListener(enterListener);
+        name.setLongClickable(true);
+        version.setLongClickable(true);
+        name.setOnLongClickListener(menuListener);
+        version.setOnLongClickListener(menuListener);
+        textColumn.addView(name);
+        textColumn.addView(version);
+        container.addView(textColumn);
         if (hasUpdate) {
             TextView label = new TextView(this);
             label.setText(R.string.aiagents_update_available);

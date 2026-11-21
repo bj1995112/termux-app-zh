@@ -131,6 +131,12 @@ public class AiAgentsActivity extends AppCompatActivity {
      * from the cache on start and refreshed by checkUpdatesInBackground. */
     private final Map<String, String> mLatestVersions = new HashMap<>();
 
+    /** Version histories from the last fetch (agent id -> newest-first
+     * versions), loaded from the cache on start when fresh (24h) and
+     * refreshed by checkUpdatesInBackground and by the version dialog. */
+    private final Map<String, List<String>> mVersionHistories = new HashMap<>();
+    private long mHistoryCheckedAt;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -171,6 +177,17 @@ public class AiAgentsActivity extends AppCompatActivity {
                     Button webButton = view.findViewById(R.id.aiagents_row_web);
                     title.setText(row.def.displayName);
                     subtitle.setText(subtitleFor(row));
+                    // Tapping the subtitle (the version line) opens the
+                    // version picker; tapping the rest of the row keeps
+                    // its old meaning (update dialog / toggle checkbox).
+                    subtitle.setOnClickListener(v -> {
+                        if (!row.supported) {
+                            Toast.makeText(AiAgentsActivity.this,
+                                R.string.aiagents_unsupported, Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        showVersionDialog(row);
+                    });
                     check.setChecked(row.selected);
                     check.setEnabled(!row.installed && row.supported);
                     check.setVisibility(row.installed || !row.supported ? View.GONE : View.VISIBLE);
@@ -214,6 +231,10 @@ public class AiAgentsActivity extends AppCompatActivity {
         if (AiAgentUtils.isUpdateCacheValid(cache.checkedAt)) {
             mLatestVersions.putAll(cache.latest);
         }
+        if (AiAgentUtils.isHistoryCacheValid(cache.historyCheckedAt)) {
+            mVersionHistories.putAll(cache.history);
+            mHistoryCheckedAt = cache.historyCheckedAt;
+        }
 
         detectAgentsInBackground();
     }
@@ -236,17 +257,35 @@ public class AiAgentsActivity extends AppCompatActivity {
         if (!row.supported) {
             return desc + "\n" + getString(R.string.aiagents_unsupported);
         }
+        return desc + "\n" + statusLineFor(row);
+    }
+
+    /** Second line of a row: installed version + latest version, e.g.
+     * "已安装 1.6.0 · 最新 1.6.0" or "未安装 · 最新 1.6.0". The version
+     * dialog reuses exactly this line as its header, so the two places
+     * can never disagree. An installed agent whose version cannot be
+     * read (an old agy install without a record file, Hermes, Claude
+     * with an unreadable versions dir) shows "已安装 · 版本未知". */
+    private String statusLineFor(AgentRow row) {
         if (row.installed) {
             if (row.version != null && !row.version.isEmpty()) {
                 if (AiAgentUtils.isNewerVersionAvailable(row.version, row.latestVersion)) {
-                    return desc + "\n" + getString(R.string.aiagents_installed_with_update,
+                    return getString(R.string.aiagents_installed_with_update,
                         row.version, row.latestVersion);
                 }
-                return desc + "\n" + getString(R.string.aiagents_installed, row.version);
+                if (row.latestVersion != null && !row.latestVersion.isEmpty()) {
+                    return getString(R.string.aiagents_installed_with_latest,
+                        row.version, row.latestVersion);
+                }
+                return getString(R.string.aiagents_installed, row.version);
             }
-            return desc + "\n" + getString(R.string.aiagents_installed_unknown);
+            return getString(R.string.aiagents_installed_unknown) + " · "
+                + getString(R.string.aiagents_version_unknown);
         }
-        return desc + "\n" + getString(R.string.aiagents_not_installed);
+        if (row.latestVersion != null && !row.latestVersion.isEmpty()) {
+            return getString(R.string.aiagents_not_installed_with_latest, row.latestVersion);
+        }
+        return getString(R.string.aiagents_not_installed);
     }
 
     private void updateStatus(String status) {
@@ -361,16 +400,26 @@ public class AiAgentsActivity extends AppCompatActivity {
                 }
                 Map<String, String> fetched =
                     AiAgentUtils.fetchLatestVersions(installed, distroByAgent);
+                // "检查更新" refreshes the histories too (same tap, same
+                // installed set); a failed history fetch keeps the cached
+                // one and never blocks the latest-version result.
+                Map<String, List<String>> histories =
+                    AiAgentUtils.fetchVersionHistories(installed, distroByAgent);
                 boolean anyFetched = !fetched.isEmpty();
+                boolean anyHistory = !histories.isEmpty();
                 final Map<String, String> merged;
-                if (anyFetched) {
+                final Map<String, List<String>> mergedHistory;
+                if (anyFetched || anyHistory) {
                     merged = new HashMap<>();
                     AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
                     merged.putAll(cache.latest);
                     merged.putAll(fetched);
-                    AiAgentUtils.saveUpdateCache(merged);
+                    mergedHistory = new HashMap<>(cache.history);
+                    mergedHistory.putAll(histories);
+                    AiAgentUtils.saveUpdateCache(merged, mergedHistory);
                 } else {
                     merged = null;
+                    mergedHistory = null;
                 }
                 runOnUiThread(() -> {
                     if (isFinishing()) return;
@@ -378,6 +427,12 @@ public class AiAgentsActivity extends AppCompatActivity {
                     if (merged != null) {
                         mLatestVersions.clear();
                         mLatestVersions.putAll(merged);
+                    }
+                    if (mergedHistory != null) {
+                        mVersionHistories.clear();
+                        mVersionHistories.putAll(mergedHistory);
+                        AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
+                        mHistoryCheckedAt = cache.historyCheckedAt;
                     }
                     applyLatestVersionsToRows();
                     mAdapter.notifyDataSetChanged();
@@ -441,6 +496,154 @@ public class AiAgentsActivity extends AppCompatActivity {
     }
 
     // ------------------------------------------------------------------
+    // Version picker (history dialog)
+    // ------------------------------------------------------------------
+
+    /** Version picker for one row: the cached history (24h) shows at
+     * once; otherwise the history is fetched first (a small loading
+     * dialog covers the wait) and the picker opens when it lands. A
+     * failed fetch still opens the picker with "查不到历史" — the list
+     * itself is never blocked and nothing errors. Only opened from the
+     * row's subtitle tap; the row body keeps its old meaning. */
+    private void showVersionDialog(final AgentRow row) {
+        List<String> cached = mVersionHistories.get(row.def.id);
+        if (cached != null && !cached.isEmpty()
+            && AiAgentUtils.isHistoryCacheValid(mHistoryCheckedAt)) {
+            showVersionDialogWithHistory(row, cached);
+            return;
+        }
+        final boolean[] cancelled = {false};
+        final AlertDialog loading = new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_choose_version))
+            .setMessage(getString(R.string.aiagents_version_loading))
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+        loading.setOnCancelListener(dialog -> cancelled[0] = true);
+        new Thread() {
+            @Override
+            public void run() {
+                List<String> history =
+                    AiAgentUtils.fetchVersionHistory(row.def, mDistroId);
+                if (!history.isEmpty()) {
+                    Map<String, List<String>> one = new HashMap<>();
+                    one.put(row.def.id, history);
+                    AiAgentUtils.saveVersionHistory(one);
+                }
+                runOnUiThread(() -> {
+                    if (isFinishing() || cancelled[0]) return;
+                    loading.dismiss();
+                    if (!history.isEmpty()) {
+                        mVersionHistories.put(row.def.id, history);
+                        AiAgentUtils.UpdateCache cache =
+                            AiAgentUtils.loadUpdateCache();
+                        mHistoryCheckedAt = cache.historyCheckedAt;
+                    }
+                    showVersionDialogWithHistory(row, history);
+                });
+            }
+        }.start();
+    }
+
+    /** The picker itself: header line (same text as the row subtitle),
+     * then the newest 3 versions, latest first, latest checked by
+     * default; the newest is tagged "最新", the installed one "当前".
+     * Picking an older version asks for confirmation first (see
+     * onVersionInstallChosen). Rows that cannot install a pinned
+     * version — Hermes (view-only) or an unsupported distro — show the
+     * history with no Install button, and a tap explains why. */
+    private void showVersionDialogWithHistory(final AgentRow row, List<String> history) {
+        final AiAgentUtils.AgentDef def = row.def;
+        String header = statusLineFor(row);
+        boolean canInstall = row.supported
+            && AiAgentUtils.supportsVersionInstall(def);
+        if (history == null || history.isEmpty()) {
+            new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.aiagents_choose_version))
+                .setMessage(header + "\n"
+                    + getString(R.string.aiagents_version_history_unavailable))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+            return;
+        }
+        final String[] items = new String[history.size()];
+        for (int i = 0; i < history.size(); i++) {
+            String version = history.get(i);
+            String label = version;
+            if (i == 0) {
+                label += " · " + getString(R.string.aiagents_version_latest);
+            }
+            if (row.installed && version.equals(row.version)) {
+                label += " · " + getString(R.string.aiagents_version_current);
+            }
+            items[i] = label;
+        }
+        final int[] selected = {0};
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_choose_version))
+            .setMessage(header)
+            .setSingleChoiceItems(items, 0, (dialog, which) -> {
+                selected[0] = which;
+                if (!canInstall) {
+                    if (!row.supported) {
+                        Toast.makeText(AiAgentsActivity.this,
+                            R.string.aiagents_unsupported, Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(AiAgentsActivity.this,
+                            getString(R.string.aiagents_version_not_supported,
+                                def.displayName),
+                            Toast.LENGTH_SHORT).show();
+                    }
+                }
+            })
+            .setNegativeButton(android.R.string.cancel, null);
+        if (canInstall) {
+            builder.setPositiveButton(R.string.aiagents_version_install,
+                (dialog, which) -> onVersionInstallChosen(row,
+                    history.get(selected[0]), selected[0] == 0));
+        }
+        builder.show();
+    }
+
+    /** Install the picked version: the latest goes straight in; an older
+     * version asks first — it may have known issues, and a downgrade
+     * replaces the current install. agy gets one extra line: its binary
+     * self-updates in the background, so an older agy may lift itself
+     * back to the latest on its own. */
+    private void onVersionInstallChosen(final AgentRow row, final String version,
+            boolean isLatest) {
+        if (isLatest) {
+            installVersion(row, version);
+            return;
+        }
+        String message = getString(R.string.aiagents_install_old_version, version);
+        if (row.installed) {
+            message += "\n" + getString(R.string.aiagents_downgrade_note);
+        }
+        if ("agy".equals(row.def.id)) {
+            message += "\n" + getString(R.string.aiagents_downgrade_agy_note);
+        }
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_choose_version))
+            .setMessage(message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.aiagents_version_install,
+                (dialog, which) -> installVersion(row, version))
+            .show();
+    }
+
+    /** Start the install session for one agent at a pinned version
+     * (update=true when it is already installed, so the script header
+     * reads "正在更新"). The version rides in the pinned map; see
+     * buildAgentScript and versionedInstallSnippet. */
+    private void installVersion(AgentRow row, String version) {
+        List<AiAgentUtils.AgentDef> single = new ArrayList<>();
+        single.add(row.def);
+        Map<String, String> pinned = new HashMap<>();
+        pinned.put(row.def.id, version);
+        startAgentSession(single, row.installed, pinned);
+    }
+
+    // ------------------------------------------------------------------
     // Sessions: write the install script into the container and run it
     // ------------------------------------------------------------------
 
@@ -448,6 +651,14 @@ public class AiAgentsActivity extends AppCompatActivity {
      * in a new visible terminal session. Deliberately does not finish():
      * Back from the session returns here and onResume re-detects. */
     private void startAgentSession(List<AiAgentUtils.AgentDef> agents, boolean update) {
+        startAgentSession(agents, update, null);
+    }
+
+    /** As above, with pinnedVersions mapping agent id -> version to install
+     * (from the version picker); null/empty means "latest", the old
+     * behaviour. A pinned map always holds a single agent. */
+    private void startAgentSession(List<AiAgentUtils.AgentDef> agents, boolean update,
+            Map<String, String> pinnedVersions) {
         File rootfs = DistroUtils.containerRootfs(mContainer);
         if (rootfs == null) {
             Toast.makeText(this, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
@@ -461,7 +672,8 @@ public class AiAgentsActivity extends AppCompatActivity {
                 throw new IOException("Cannot create " + parent.getAbsolutePath());
             }
             try (FileOutputStream out = new FileOutputStream(scriptFile)) {
-                out.write(buildAgentScript(agents, update).getBytes(StandardCharsets.UTF_8));
+                out.write(buildAgentScript(agents, update, pinnedVersions)
+                    .getBytes(StandardCharsets.UTF_8));
             }
             scriptFile.setReadable(true, true);
         } catch (Exception e) {
@@ -483,8 +695,12 @@ public class AiAgentsActivity extends AppCompatActivity {
         Toast.makeText(this, R.string.aiagents_install_started, Toast.LENGTH_LONG).show();
     }
 
-    /** Full install/update script run inside the container (as root). */
-    private String buildAgentScript(List<AiAgentUtils.AgentDef> agents, boolean update) {
+    /** Full install/update script run inside the container (as root).
+     * pinnedVersions maps agent id -> version (version picker); a pinned
+     * agent is installed by versionedInstallSnippet instead of its
+     * install/update snippet. */
+    private String buildAgentScript(List<AiAgentUtils.AgentDef> agents, boolean update,
+            Map<String, String> pinnedVersions) {
         StringBuilder s = new StringBuilder();
         s.append("#!/bin/bash\n");
         s.append("# Generated by Termux \"AI 助手\" (AiAgentsActivity) - do not edit.\n");
@@ -571,7 +787,12 @@ public class AiAgentsActivity extends AppCompatActivity {
                 s.append("  export PATH=\"$HOME/.local/bin:$PATH\"\n");
             }
             if (def.needsNode) s.append("if node_ok; then\n");
-            s.append("  ").append(update ? def.updateSnippet : def.installSnippet).append("\n");
+            String pinned = pinnedVersions == null ? null : pinnedVersions.get(def.id);
+            if (pinned != null && !pinned.isEmpty()) {
+                s.append("  ").append(versionedInstallSnippet(def, pinned)).append("\n");
+            } else {
+                s.append("  ").append(update ? def.updateSnippet : def.installSnippet).append("\n");
+            }
             if ("codex".equals(def.id)) {
                 s.append("  echo \"提示：如果 Codex 报 bwrap 权限错误，在 proot 里改用：codex -s danger-full-access\"\n");
             }
@@ -586,7 +807,17 @@ public class AiAgentsActivity extends AppCompatActivity {
             s.append("    echo \"").append(def.displayName).append(" 已装好\"\n");
             s.append("    ").append(def.command).append(" --version 2>/dev/null || true\n");
             if ("agy".equals(def.id)) {
-                s.append("    record_agy_version\n");
+                if (pinned != null && !pinned.isEmpty()) {
+                    // A pinned agy install must record the version that
+                    // was actually installed, not the manifest's latest:
+                    // record_agy_version() reads the manifest and would
+                    // claim the newest version for an old install.
+                    s.append("    mkdir -p \"$HOME/.termux-aiagents/versions\" 2>/dev/null\n");
+                    s.append("    printf '%s' \"").append(pinned)
+                        .append("\" > \"$HOME/.termux-aiagents/versions/agy\" 2>/dev/null || true\n");
+                } else {
+                    s.append("    record_agy_version\n");
+                }
             }
             s.append("  else\n");
             s.append("    failed=\"$failed ").append(def.displayName).append("\"\n");
@@ -601,6 +832,85 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("fi\n");
         s.append("read -r -p \"按回车关闭此会话\"\n");
         return s.toString();
+    }
+
+    /** Shell lines that install one agent at a pinned version (version
+     * picker). The version comes only from fetchVersionHistory, which
+     * validates it, so it is safe to interpolate. Hermes has no branch
+     * here on purpose: supportsVersionInstall keeps it view-only.
+     *
+     * - Pi / dsh / OpenCode / Claude: npm install -g &lt;pkg&gt;@&lt;version&gt;
+     *   (Pi keeps --ignore-scripts; Claude must NOT use it — its
+     *   postinstall downloads the platform-native binary, and
+     *   bin/claude.exe is only a wrapper without it).
+     * - Aider: uv tool install --force replaces the installed version
+     *   in place (no separate uninstall step). --upgrade only goes to
+     *   latest, so a pinned install must go through uv directly; uv
+     *   itself is installed first when missing.
+     * - agy: the official installer only installs latest, so a pinned
+     *   version downloads the release tarball for that tag instead —
+     *   same layout the installer produces (single `antigravity`
+     *   binary copied to ~/.local/bin/agy). glibc uses
+     *   agy_cli_linux_arm64.tar.gz, Alpine the _musl file.
+     * - Codex: same idea with the standalone musl tarball. The binary
+     *   is placed in the official releases layout
+     *   ~/.codex/packages/standalone/releases/&lt;version&gt;-&lt;target&gt;/bin/codex
+     *   with `current` re-pointed at it and ~/.local/bin/codex re-linked,
+     *   so detection (which reads the releases dir) reports the new
+     *   version. Older release dirs are removed first — otherwise a
+     *   downgrade would leave the newer dir behind and detection would
+     *   keep reporting the newer version. The package layout's extras
+     *   (codex-package.json, rg, bwrap) are not recreated: a later
+     *   `codex update` restores the full package. */
+    private String versionedInstallSnippet(AiAgentUtils.AgentDef def, String version) {
+        switch (def.id) {
+            case "pi":
+                return "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@" + version;
+            case "dsh":
+                return "npm install -g @deepseek-ai/dsh@" + version;
+            case "opencode":
+                return "npm install -g @opencode/cli@" + version;
+            case "claude":
+                return "npm install -g @anthropic-ai/claude-code@" + version;
+            case "aider":
+                return "command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH=\"$HOME/.local/bin:$PATH\"; }\n"
+                    + "  uv tool install --force aider-chat@" + version;
+            case "agy": {
+                String file = "alpine".equals(mDistroId)
+                    ? "agy_cli_linux_arm64_musl.tar.gz" : "agy_cli_linux_arm64.tar.gz";
+                String tmpDir = "/tmp/agy-" + version;
+                return "curl -fsSL \"https://github.com/google-antigravity/antigravity-cli/releases/download/"
+                    + version + "/" + file + "\" -o \"" + tmpDir + ".tar.gz\""
+                    + " && rm -rf \"" + tmpDir + "\" && mkdir -p \"" + tmpDir + "\""
+                    + " && tar -xzf \"" + tmpDir + ".tar.gz\" -C \"" + tmpDir + "\""
+                    + " && mkdir -p \"$HOME/.local/bin\""
+                    + " && cp \"" + tmpDir + "/antigravity\" \"$HOME/.local/bin/agy\""
+                    + " && chmod +x \"$HOME/.local/bin/agy\""
+                    + " && rm -rf \"" + tmpDir + "\" \"" + tmpDir + ".tar.gz\"";
+            }
+            case "codex": {
+                String releaseDir = version + "-aarch64-unknown-linux-musl";
+                String tmpDir = "/tmp/codex-" + version;
+                String releases = "$HOME/.codex/packages/standalone/releases";
+                return "curl -fsSL \"https://github.com/openai/codex/releases/download/rust-v"
+                    + version + "/codex-aarch64-unknown-linux-musl.tar.gz\" -o \"" + tmpDir + ".tar.gz\""
+                    + " && rm -rf \"" + tmpDir + "\" && mkdir -p \"" + tmpDir + "\""
+                    + " && tar -xzf \"" + tmpDir + ".tar.gz\" -C \"" + tmpDir + "\""
+                    + " && [ -f \"" + tmpDir + "/codex-aarch64-unknown-linux-musl\" ]"
+                    + " && mkdir -p \"" + releases + "\""
+                    + " && (rm -rf \"" + releases + "\"/* 2>/dev/null || true)"
+                    + " && mkdir -p \"" + releases + "/" + releaseDir + "/bin\""
+                    + " && mv \"" + tmpDir + "/codex-aarch64-unknown-linux-musl\" \"" + releases + "/" + releaseDir + "/bin/codex\""
+                    + " && chmod +x \"" + releases + "/" + releaseDir + "/bin/codex\""
+                    + " && ln -sf \"bin/codex\" \"" + releases + "/" + releaseDir + "/codex\""
+                    + " && ln -sfn \"" + releases + "/" + releaseDir + "\" \"$HOME/.codex/packages/standalone/current\""
+                    + " && mkdir -p \"$HOME/.local/bin\""
+                    + " && ln -sf \"$HOME/.codex/packages/standalone/current/bin/codex\" \"$HOME/.local/bin/codex\""
+                    + " && rm -rf \"" + tmpDir + "\" \"" + tmpDir + ".tar.gz\"";
+            }
+            default:
+                return "";
+        }
     }
 
     // ------------------------------------------------------------------

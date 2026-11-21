@@ -39,6 +39,7 @@ import com.termux.R;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.settings.preferences.SharedPreferenceUtils;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -60,10 +61,12 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
 
 public final class AiAgentUtils {
 
@@ -80,11 +83,22 @@ public final class AiAgentUtils {
 
     /** Cache file for latest-version checks (Termux home, same place as the
      * distro list cache). Format: {"checkedAt": <epoch ms>,
-     * "latest": {"pi": "1.6.0", ...}}. */
+     * "latest": {"pi": "1.6.0", ...}, "historyCheckedAt": <epoch ms>,
+     * "history": {"pi": ["1.6.0", "1.5.2", "1.5.1"], ...}}. */
     private static final String UPDATE_CACHE_FILE_NAME = "aiagents-updates.json";
 
     /** Cached latest versions are used for one hour without re-fetching. */
     private static final long UPDATE_CACHE_VALID_MS = 1L * 60L * 60L * 1000L;
+
+    /** Cached version histories are used for 24 hours without re-fetching
+     * (a history fetch is the expensive one: the full npm metadata for
+     * OpenCode is several MB, so it must not re-download on every dialog
+     * open). The history timestamp lives in the same cache file, under
+     * "historyCheckedAt" — see UpdateCache. */
+    private static final long HISTORY_CACHE_VALID_MS = 24L * 60L * 60L * 1000L;
+
+    /** At most this many past versions are kept per agent (latest + 2). */
+    private static final int MAX_HISTORY_VERSIONS = 3;
 
     /** Per-request timeouts for latest-version checks; any failure is
      * silent (no badge, no error) — see fetchLatestVersion. */
@@ -259,8 +273,14 @@ public final class AiAgentUtils {
             WebKind.NONE, 0, true),
         new AgentDef("claude", "Claude Code", R.string.aiagents_desc_claude, false, "claude",
             ".local/bin/claude",
-            new String[]{"root/.local/bin/claude"},
-            VersionKind.CLAUDE_VERSIONS, null,
+            // npm installs (-g @anthropic-ai/claude-code[@<version>], the
+            // pinned-version path) land in /usr/bin or /usr/local/bin and
+            // write no versions/ dir; the official installer lands in
+            // ~/.local/bin, so that path stays first. probeVersion falls
+            // back to the npm package.json when the versions/ dir is empty.
+            new String[]{"root/.local/bin/claude", "usr/bin/claude",
+                "usr/local/bin/claude"},
+            VersionKind.CLAUDE_VERSIONS, "@anthropic-ai/claude-code",
             "curl -fsSL https://claude.ai/install.sh | bash",
             "\"$HOME/.local/bin/claude\" update",
             WebKind.NONE, 0, true),
@@ -431,8 +451,7 @@ public final class AiAgentUtils {
                     return probeMaxVersionDir(
                         new File(rootfs, "root/.codex/packages/standalone/releases"));
                 case CLAUDE_VERSIONS:
-                    return probeMaxVersionDir(
-                        new File(rootfs, "root/.local/share/claude/versions"));
+                    return probeClaudeVersion(rootfs);
                 case AIDER_DIST_INFO:
                     return probeAiderVersion(rootfs);
                 case HERMES_STAMP:
@@ -489,6 +508,32 @@ public final class AiAgentUtils {
         if (versions.isEmpty()) return "";
         Collections.sort(versions, (a, b) -> compareVersionsDescending(a, b));
         return versions.get(0);
+    }
+
+    /** Installed Claude Code version: the official installer writes
+     * ~/.local/share/claude/versions/<version>/, but an npm install
+     * (including a pinned older version from the version dialog) lands
+     * in /usr/lib or /usr/local/lib/node_modules and writes no versions/
+     * dir, so fall back to that package.json. The versions/ dir wins
+     * when both exist (the installer path is the one `claude update`
+     * maintains). */
+    private static String probeClaudeVersion(File rootfs) {
+        String dirVersion = probeMaxVersionDir(
+            new File(rootfs, "root/.local/share/claude/versions"));
+        if (!dirVersion.isEmpty()) return dirVersion;
+        for (String prefix : new String[]{"usr/lib", "usr/local/lib"}) {
+            File pkg = new File(rootfs,
+                prefix + "/node_modules/@anthropic-ai/claude-code/package.json");
+            if (!pkg.isFile()) continue;
+            try {
+                String version = new JSONObject(DistroUtils.readFile(pkg))
+                    .optString("version", "");
+                if (!version.isEmpty()) return version;
+            } catch (Exception e) {
+                Log.w(LOG_TAG, "Failed to read Claude npm package.json", e);
+            }
+        }
+        return "";
     }
 
     private static String probeAiderVersion(File rootfs) {
@@ -799,6 +844,222 @@ public final class AiAgentUtils {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Version history (version picker dialog)
+    // ------------------------------------------------------------------
+
+    /**
+     * The newest few published versions of an agent, newest first, at most
+     * MAX_HISTORY_VERSIONS (latest + 2). The first entry is the same
+     * version fetchLatestVersion returns. Empty when the agent has no
+     * known history source or the fetch failed — the dialog then shows
+     * "查不到历史" and never errors. No version is ever hardcoded.
+     *
+     * Sources (all verified live 2026-11-22, see agent-version-history
+     * design.md §1):
+     * - Pi / dsh / OpenCode / Claude: the full npm metadata's "time"
+     *   object, newest first; OpenCode skips 0.0.0-dev-* builds (the
+     *   dev dist-tag publishes several a day and would otherwise fill
+     *   the whole list). The abbreviated npm metadata has no "time",
+     *   so the full document is fetched (gzipped, see fetchUrlText).
+     * - Aider: PyPI "releases", each version's newest upload_time, newest
+     *   first — never sorted as strings (0.9.0 is a 2023 release and
+     *   would otherwise sort above 0.86.x).
+     * - Codex / Hermes / agy: the GitHub releases list (?per_page=20),
+     *   newest first; drafts and prereleases are skipped (Codex
+     *   publishes rust-vX.Y.Z-alpha.N prereleases), and for Hermes any
+     *   tag containing "canary" is skipped too.
+     */
+    public static List<String> fetchVersionHistory(AgentDef def, String distroId) {
+        if (def == null) return new ArrayList<>();
+        try {
+            switch (def.id) {
+                case "pi":
+                case "dsh":
+                case "opencode":
+                    return fetchNpmHistory(def.npmPackage,
+                        "opencode".equals(def.id));
+                case "claude":
+                    return fetchNpmHistory(def.npmPackage, false);
+                case "aider":
+                    return fetchPyPIHistory();
+                case "codex":
+                    return fetchGithubReleaseHistory(
+                        "https://api.github.com/repos/openai/codex/releases?per_page=20",
+                        true, false);
+                case "agy":
+                    return fetchGithubReleaseHistory(
+                        "https://api.github.com/repos/google-antigravity/antigravity-cli/releases?per_page=20",
+                        false, false);
+                case "hermes":
+                    return fetchGithubReleaseHistory(
+                        "https://api.github.com/repos/NousResearch/hermes-agent/releases?per_page=20",
+                        false, true);
+                default:
+                    return new ArrayList<>();
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch version history for " + def.id, e);
+            return new ArrayList<>();
+        }
+    }
+
+    /** npm full metadata: "time" maps version -> first-publish time
+     * (ISO 8601, so a plain string sort is chronological). Newest first,
+     * at most MAX_HISTORY_VERSIONS, skipping dev builds when asked and
+     * anything that does not parse as a version. */
+    private static List<String> fetchNpmHistory(String npmPackage, boolean skipDevVersions) {
+        List<String> result = new ArrayList<>();
+        if (npmPackage == null || npmPackage.isEmpty()) return result;
+        try {
+            String body = fetchUrlText("https://registry.npmjs.org/" + npmPackage);
+            if (body == null) return result;
+            JSONObject time = new JSONObject(body).optJSONObject("time");
+            if (time == null) return result;
+            List<String[]> dated = new ArrayList<>();
+            Iterator<String> versions = time.keys();
+            while (versions.hasNext()) {
+                String version = versions.next();
+                if ("created".equals(version) || "modified".equals(version)) continue;
+                if (skipDevVersions && version.startsWith("0.0.0-dev")) continue;
+                String when = time.optString(version, "");
+                if (when.isEmpty() || validatedVersion(version).isEmpty()) continue;
+                dated.add(new String[]{version, when});
+            }
+            Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
+                result.add(validatedVersion(dated.get(i)[0]));
+            }
+            return result;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch npm history for " + npmPackage, e);
+            return result;
+        }
+    }
+
+    /** PyPI: "releases" maps version -> files; a version's date is its
+     * newest file's upload_time_iso_8601. Newest first, at most
+     * MAX_HISTORY_VERSIONS. Sorting by upload time (not by version
+     * string) is what keeps the 2023-era 0.9.0 out of the top 3. */
+    private static List<String> fetchPyPIHistory() {
+        List<String> result = new ArrayList<>();
+        try {
+            String body = fetchUrlText("https://pypi.org/pypi/aider-chat/json");
+            if (body == null) return result;
+            JSONObject releases = new JSONObject(body).optJSONObject("releases");
+            if (releases == null) return result;
+            List<String[]> dated = new ArrayList<>();
+            Iterator<String> versions = releases.keys();
+            while (versions.hasNext()) {
+                String version = versions.next();
+                if (validatedVersion(version).isEmpty()) continue;
+                JSONArray files = releases.optJSONArray(version);
+                String newest = "";
+                if (files != null) {
+                    for (int i = 0; i < files.length(); i++) {
+                        JSONObject file = files.optJSONObject(i);
+                        String when = file == null
+                            ? "" : file.optString("upload_time_iso_8601", "");
+                        if (when.compareTo(newest) > 0) newest = when;
+                    }
+                }
+                if (!newest.isEmpty()) dated.add(new String[]{version, newest});
+            }
+            Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
+                result.add(validatedVersion(dated.get(i)[0]));
+            }
+            return result;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch PyPI history for aider-chat", e);
+            return result;
+        }
+    }
+
+    /** GitHub releases list (?per_page=20), newest first. Drafts and
+     * prereleases are always skipped; canary tags are skipped too when
+     * asked (Hermes). Codex prefers the release "name" (a plain version)
+     * and falls back to tag_name minus "rust-v"; the others use tag_name
+     * minus a leading "v". Newest first by published_at, at most
+     * MAX_HISTORY_VERSIONS. */
+    private static List<String> fetchGithubReleaseHistory(String url,
+            boolean preferName, boolean skipCanary) {
+        List<String> result = new ArrayList<>();
+        try {
+            String body = fetchUrlText(url);
+            if (body == null) return result;
+            JSONArray releases = new JSONArray(body);
+            List<String[]> dated = new ArrayList<>();
+            for (int i = 0; i < releases.length(); i++) {
+                JSONObject release = releases.optJSONObject(i);
+                if (release == null) continue;
+                if (release.optBoolean("draft", false)
+                    || release.optBoolean("prerelease", false)) continue;
+                String tag = release.optString("tag_name", "").trim();
+                if (skipCanary && tag.toLowerCase(Locale.ROOT).contains("canary")) continue;
+                String version = "";
+                if (preferName) {
+                    version = validatedVersion(release.optString("name", "").trim());
+                }
+                if (version.isEmpty()) {
+                    if (tag.startsWith("rust-v")) tag = tag.substring("rust-v".length());
+                    version = validatedVersion(tag);
+                }
+                if (version.isEmpty()) continue;
+                dated.add(new String[]{version,
+                    release.optString("published_at", "")});
+            }
+            Collections.sort(dated, (a, b) -> b[1].compareTo(a[1]));
+            for (int i = 0; i < dated.size() && result.size() < MAX_HISTORY_VERSIONS; i++) {
+                result.add(dated.get(i)[0]);
+            }
+            return result;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to fetch GitHub history from " + url, e);
+            return result;
+        }
+    }
+
+    /**
+     * Version histories for several agents in parallel (same 4-thread /
+     * 35s shape as fetchLatestVersions). Only agents with a non-empty
+     * history contribute. Runs synchronously on the caller's thread;
+     * callers must call it off the UI thread.
+     */
+    public static Map<String, List<String>> fetchVersionHistories(
+            List<AgentDef> defs, Map<String, String> distroIdByAgentId) {
+        Map<String, List<String>> fetched = Collections.synchronizedMap(new HashMap<>());
+        if (defs == null || defs.isEmpty()) return fetched;
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        for (AgentDef def : defs) {
+            final AgentDef current = def;
+            pool.submit(() -> {
+                String distroId = distroIdByAgentId == null
+                    ? "" : distroIdByAgentId.get(current.id);
+                List<String> history = fetchVersionHistory(current,
+                    distroId == null ? "" : distroId);
+                if (!history.isEmpty()) fetched.put(current.id, history);
+            });
+        }
+        pool.shutdown();
+        try {
+            pool.awaitTermination(35, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return fetched;
+    }
+
+    /** True when the app can install a pinned (older) version of this
+     * agent. Hermes is view-only: its releases carry no installable
+     * package for a pinned version and its installer only knows the
+     * stable channel, so the dialog shows its history but no Install
+     * button. Every other agent has a pinned install path (see
+     * AiAgentsActivity.versionedInstallSnippet). */
+    public static boolean supportsVersionInstall(AgentDef def) {
+        return def != null && !"hermes".equals(def.id);
+    }
+
     /** A fetched version string, or "" when it does not parse (a changed
      * endpoint must never produce a bogus badge). */
     private static String validatedVersion(String version) {
@@ -808,7 +1069,11 @@ public final class AiAgentUtils {
     }
 
     /** One HTTPS GET; null on any failure (timeout, non-200, empty body).
-     * Same HttpURLConnection idiom as DistroActivity's Docker Hub fetch. */
+     * Same HttpURLConnection idiom as DistroActivity's Docker Hub fetch.
+     * Asks for gzip: the full npm metadata behind a history fetch is
+     * several MB uncompressed (OpenCode ~4.3 MB) but ~0.6 MB gzipped, so
+     * the wire cost stays small; servers that ignore the header just
+     * answer plain and the Content-Encoding check below skips the wrap. */
     private static String fetchUrlText(String urlString) {
         HttpURLConnection connection = null;
         try {
@@ -818,9 +1083,14 @@ public final class AiAgentUtils {
             connection.setReadTimeout(UPDATE_CHECK_READ_TIMEOUT_MS);
             connection.setRequestProperty("User-Agent", "termux-app-zh-aiagents/1.0");
             connection.setRequestProperty("Accept", "application/json, text/plain, */*");
+            connection.setRequestProperty("Accept-Encoding", "gzip");
             int status = connection.getResponseCode();
             if (status != HttpURLConnection.HTTP_OK) return null;
-            return readStream(connection.getInputStream());
+            InputStream in = connection.getInputStream();
+            if ("gzip".equalsIgnoreCase(connection.getContentEncoding())) {
+                in = new GZIPInputStream(in);
+            }
+            return readStream(in);
         } catch (Exception e) {
             Log.w(LOG_TAG, "Fetch failed for " + urlString, e);
             return null;
@@ -843,14 +1113,29 @@ public final class AiAgentUtils {
     // Latest-version cache (update detection)
     // ------------------------------------------------------------------
 
-    /** One cached check: when it ran, and the latest version per agent id. */
+    /** One cached check: when it ran, the latest version per agent id,
+     * and — since the version-history round — when the histories were
+     * last fetched and the history per agent id (newest first, at most
+     * MAX_HISTORY_VERSIONS). Latest and history have separate clocks:
+     * latest is re-checked hourly, history daily (see
+     * HISTORY_CACHE_VALID_MS). Old caches without the history fields
+     * load as "no history", so the format stays backward compatible. */
     public static final class UpdateCache {
         public final long checkedAt;
         public final Map<String, String> latest;
+        public final long historyCheckedAt;
+        public final Map<String, List<String>> history;
 
         UpdateCache(long checkedAt, Map<String, String> latest) {
+            this(checkedAt, latest, 0, new HashMap<String, List<String>>());
+        }
+
+        UpdateCache(long checkedAt, Map<String, String> latest,
+                    long historyCheckedAt, Map<String, List<String>> history) {
             this.checkedAt = checkedAt;
             this.latest = latest;
+            this.historyCheckedAt = historyCheckedAt;
+            this.history = history;
         }
     }
 
@@ -858,6 +1143,7 @@ public final class AiAgentUtils {
      * is corrupt (the next check rebuilds it). */
     public static UpdateCache loadUpdateCache() {
         Map<String, String> latest = new HashMap<>();
+        Map<String, List<String>> history = new HashMap<>();
         File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, UPDATE_CACHE_FILE_NAME);
         if (!cacheFile.isFile()) return new UpdateCache(0, latest);
         try {
@@ -872,7 +1158,25 @@ public final class AiAgentUtils {
                     if (!version.isEmpty()) latest.put(id, version);
                 }
             }
-            return new UpdateCache(checkedAt, latest);
+            long historyCheckedAt = root.optLong("historyCheckedAt", 0);
+            JSONObject histories = root.optJSONObject("history");
+            if (histories != null) {
+                Iterator<String> ids = histories.keys();
+                while (ids.hasNext()) {
+                    String id = ids.next();
+                    JSONArray versionsArray = histories.optJSONArray(id);
+                    if (versionsArray == null) continue;
+                    List<String> versionsList = new ArrayList<>();
+                    for (int i = 0; i < versionsArray.length()
+                        && versionsList.size() < MAX_HISTORY_VERSIONS; i++) {
+                        String version = validatedVersion(
+                            versionsArray.optString(i, "").trim());
+                        if (!version.isEmpty()) versionsList.add(version);
+                    }
+                    if (!versionsList.isEmpty()) history.put(id, versionsList);
+                }
+            }
+            return new UpdateCache(checkedAt, latest, historyCheckedAt, history);
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to read update cache", e);
             return new UpdateCache(0, latest);
@@ -885,13 +1189,61 @@ public final class AiAgentUtils {
             && System.currentTimeMillis() - checkedAt < UPDATE_CACHE_VALID_MS;
     }
 
+    /** True when the version histories were fetched within the last 24 hours. */
+    public static boolean isHistoryCacheValid(long historyCheckedAt) {
+        return historyCheckedAt > 0
+            && System.currentTimeMillis() - historyCheckedAt < HISTORY_CACHE_VALID_MS;
+    }
+
     /** Save latest versions with "now" as the check time (AtomicFile, same
      * as the distro list cache). Callers pass the merged map: freshly
-     * fetched values overwrite the old cache, failed fetches keep theirs. */
+     * fetched values overwrite the old cache, failed fetches keep theirs.
+     * The cached histories and their check time are preserved untouched. */
     public static void saveUpdateCache(Map<String, String> latest) {
+        UpdateCache current = loadUpdateCache();
+        Map<String, String> merged = new HashMap<>(current.latest);
+        if (latest != null) merged.putAll(latest);
+        saveUpdateCacheInternal(merged, current.history,
+            System.currentTimeMillis(), current.historyCheckedAt);
+    }
+
+    /** Save latest versions together with freshly fetched histories
+     * (the "检查更新" path: one tap refreshes both). Either map may be
+     * empty — an empty map keeps the cached side and does not advance
+     * its check time, so a failed history fetch never marks "checked". */
+    public static void saveUpdateCache(Map<String, String> latest,
+            Map<String, List<String>> history) {
+        UpdateCache current = loadUpdateCache();
+        Map<String, String> mergedLatest = new HashMap<>(current.latest);
+        if (latest != null) mergedLatest.putAll(latest);
+        Map<String, List<String>> mergedHistory = new HashMap<>(current.history);
+        if (history != null) mergedHistory.putAll(history);
+        saveUpdateCacheInternal(mergedLatest, mergedHistory,
+            latest != null && !latest.isEmpty()
+                ? System.currentTimeMillis() : current.checkedAt,
+            history != null && !history.isEmpty()
+                ? System.currentTimeMillis() : current.historyCheckedAt);
+    }
+
+    /** Save freshly fetched histories only (the version dialog path):
+     * the latest map and its check time are preserved untouched. */
+    public static void saveVersionHistory(Map<String, List<String>> history) {
+        UpdateCache current = loadUpdateCache();
+        Map<String, List<String>> mergedHistory = new HashMap<>(current.history);
+        if (history != null) mergedHistory.putAll(history);
+        saveUpdateCacheInternal(current.latest, mergedHistory, current.checkedAt,
+            history != null && !history.isEmpty()
+                ? System.currentTimeMillis() : current.historyCheckedAt);
+    }
+
+    /** Write the cache file (AtomicFile, same as the distro list cache):
+     * {"checkedAt": ..., "latest": {...}, "historyCheckedAt": ...,
+     * "history": {"pi": ["1.6.0", ...], ...}}. */
+    private static void saveUpdateCacheInternal(Map<String, String> latest,
+            Map<String, List<String>> history, long checkedAt, long historyCheckedAt) {
         try {
             JSONObject root = new JSONObject();
-            root.put("checkedAt", System.currentTimeMillis());
+            root.put("checkedAt", checkedAt);
             JSONObject versions = new JSONObject();
             for (Map.Entry<String, String> entry : latest.entrySet()) {
                 if (entry.getValue() != null && !entry.getValue().isEmpty()) {
@@ -899,6 +1251,19 @@ public final class AiAgentUtils {
                 }
             }
             root.put("latest", versions);
+            root.put("historyCheckedAt", historyCheckedAt);
+            JSONObject histories = new JSONObject();
+            for (Map.Entry<String, List<String>> entry : history.entrySet()) {
+                if (entry.getValue() == null || entry.getValue().isEmpty()) continue;
+                JSONArray versionsArray = new JSONArray();
+                for (String version : entry.getValue()) {
+                    if (version != null && !version.isEmpty()) {
+                        versionsArray.put(version);
+                    }
+                }
+                if (versionsArray.length() > 0) histories.put(entry.getKey(), versionsArray);
+            }
+            root.put("history", histories);
             File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, UPDATE_CACHE_FILE_NAME);
             File parent = cacheFile.getParentFile();
             if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return;
@@ -1550,6 +1915,8 @@ public final class AiAgentUtils {
         "opencode|OpenCode|usr/local/bin/opencode\n" +
         "aider|Aider|root/.local/bin/aider\n" +
         "claude|Claude Code|root/.local/bin/claude\n" +
+        "claude|Claude Code|usr/bin/claude\n" +
+        "claude|Claude Code|usr/local/bin/claude\n" +
         "hermes|Hermes Agent|root/.local/bin/hermes\n" +
         "hermes|Hermes Agent|root/.hermes/hermes-agent/.hermes/bin/hermes\n" +
         "'\n" +

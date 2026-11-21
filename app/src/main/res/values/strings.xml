@@ -327,6 +327,20 @@
     <string name="aiagents_no_updates">All installed assistants are up to date</string>
     <string name="aiagents_installed_with_update">Installed %1$s · Update available: %2$s</string>
     <string name="aiagents_update_new_version">New version available: %1$s (installed: %2$s).</string>
+    <string name="aiagents_not_installed_with_latest">Not installed · Latest %1$s</string>
+    <string name="aiagents_installed_with_latest">Installed %1$s · Latest %2$s</string>
+    <string name="aiagents_version_unknown">Unknown version</string>
+    <string name="aiagents_choose_version">Choose version</string>
+    <string name="aiagents_version_latest">Latest</string>
+    <string name="aiagents_version_current">Current</string>
+    <string name="aiagents_version_history_unavailable">Version history unavailable</string>
+    <string name="aiagents_version_loading">Loading version history…</string>
+    <string name="aiagents_version_install">Install</string>
+    <string name="aiagents_install_old_version">Install %1$s? Older versions may have known issues.</string>
+    <string name="aiagents_downgrade_note">Downgrading will replace the current version.</string>
+    <string name="aiagents_downgrade_agy_note">Note: agy updates itself in the background, so an older version may update itself back to the latest version.</string>
+    <string name="aiagents_version_not_supported">Installing an older version is not supported for %1$s yet</string>
+    <string name="aiagents_drawer_version_with_update">%1$s · Update available: %2$s</string>
 
     <string name="prompt_style_title">Command-Line Style</string>
     <string name="welcome_message_title">Show welcome message at startup</string>

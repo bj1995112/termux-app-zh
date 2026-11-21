@@ -323,6 +323,20 @@
     <string name="aiagents_no_updates">已安装的助手都是最新版本</string>
     <string name="aiagents_installed_with_update">已安装 %1$s · 有新版本 %2$s</string>
     <string name="aiagents_update_new_version">有新版本：%1$s（已安装 %2$s）。</string>
+    <string name="aiagents_not_installed_with_latest">未安装 · 最新 %1$s</string>
+    <string name="aiagents_installed_with_latest">已安装 %1$s · 最新 %2$s</string>
+    <string name="aiagents_version_unknown">版本未知</string>
+    <string name="aiagents_choose_version">选择版本</string>
+    <string name="aiagents_version_latest">最新</string>
+    <string name="aiagents_version_current">当前</string>
+    <string name="aiagents_version_history_unavailable">查不到历史</string>
+    <string name="aiagents_version_loading">正在加载历史版本…</string>
+    <string name="aiagents_version_install">安装</string>
+    <string name="aiagents_install_old_version">安装 %1$s？旧版可能有已知问题。</string>
+    <string name="aiagents_downgrade_note">降级会覆盖当前版。</string>
+    <string name="aiagents_downgrade_agy_note">提醒：agy 二进制自带后台自更新，装旧版后它可能自己升回最新版。</string>
+    <string name="aiagents_version_not_supported">%1$s 暂不支持安装旧版本</string>
+    <string name="aiagents_drawer_version_with_update">%1$s · 有新版本 %2$s</string>
 
     <string name="prompt_style_title">命令行样式</string>
     <string name="welcome_message_title">启动时显示欢迎信息</string>
