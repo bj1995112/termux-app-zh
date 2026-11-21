@@ -204,6 +204,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     private static final String LOG_TAG = "TermuxActivity";
 
+    /** Intent extra: ask TermuxActivity to request external-storage permission
+     * (sent by the Settings → External storage entry). */
+    public static final String EXTRA_REQUEST_STORAGE_PERMISSION = "com.termux.storage.request_permission";
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         Logger.logDebug(LOG_TAG, "onCreate");
@@ -320,6 +324,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mPreferences.isTerminalMarginAdjustmentEnabled())
             addTermuxActivityRootViewGlobalLayoutListener();
+
+        // Settings → External storage entry: the activity is visible again,
+        // so the permission dialog can open now. Fires once per extra.
+        if (getIntent() != null && getIntent().getBooleanExtra(EXTRA_REQUEST_STORAGE_PERMISSION, false)) {
+            getIntent().removeExtra(EXTRA_REQUEST_STORAGE_PERMISSION);
+            requestStoragePermission(false);
+        }
 
         registerTermuxActivityBroadcastReceiver();
     }
