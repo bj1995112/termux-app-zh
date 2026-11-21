@@ -8,13 +8,16 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.util.TypedValue;
 import android.view.ContextMenu;
 import android.view.ContextMenu.ContextMenuInfo;
 import android.view.Gravity;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -23,6 +26,7 @@ import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.RelativeLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -42,6 +46,7 @@ import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY;
 import com.termux.app.activities.DistroActivity;
 import com.termux.app.activities.DistroUtils;
 import com.termux.app.activities.AiAgentUtils;
+import com.termux.app.activities.AiAgentsActivity;
 import com.termux.app.activities.HelpActivity;
 import com.termux.app.activities.SettingsActivity;
 import com.termux.app.activities.TermuxStyleActivity;
@@ -274,6 +279,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         setInstalledDistrosView();
 
+        setDrawerSplitHandle();
+
+        // Update badges: refresh the latest-version cache when it is
+        // stale (one hour). The helper no-ops when the cache is fresh or
+        // a refresh is already running; the drawer reads the cache.
+        AiAgentUtils.refreshLatestVersionsIfStale(null);
+
         DistroActivity.ensureDistroCommand();
 
         AiAgentUtils.ensureAiCommand();
@@ -362,6 +374,12 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         // Check if a crash happened on last run of the app or if a plugin crashed and show a
         // notification with the crash details if it did
         TermuxCrashUtils.notifyAppCrashFromCrashLogFile(this, LOG_TAG);
+
+        // Coming back to the app: refresh the latest-version cache when
+        // it is stale, and repaint the drawer badge if the drawer is
+        // open. The helper no-ops when the cache is fresh.
+        AiAgentUtils.refreshLatestVersionsIfStale(
+            () -> refreshAgentsBadgeIfDrawerOpen());
 
         mIsOnResumeAfterOnCreate = false;
     }
@@ -638,6 +656,126 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         });
     }
 
+    // ------------------------------------------------------------------
+    // Drawer sections: collapsible headers + draggable split
+    // ------------------------------------------------------------------
+
+    /** Activity-private prefs for the drawer UI state. */
+    private static final String DRAWER_UI_PREFS = "drawer_ui";
+    private static final String PREF_DRAWER_DISTROS_COLLAPSED = "distros_collapsed";
+    private static final String PREF_DRAWER_AGENTS_COLLAPSED = "agents_collapsed";
+    private static final String PREF_DRAWER_SESSIONS_HEIGHT_DP = "sessions_height_dp";
+    /** Session list height limits for the drag (dp). */
+    private static final int DRAWER_SESSIONS_MIN_HEIGHT_DP = 80;
+    private static final int DRAWER_LOWER_MIN_HEIGHT_DP = 48;
+
+    private SharedPreferences drawerPrefs() {
+        return getSharedPreferences(DRAWER_UI_PREFS, Context.MODE_PRIVATE);
+    }
+
+    private boolean isDistrosSectionCollapsed() {
+        return drawerPrefs().getBoolean(PREF_DRAWER_DISTROS_COLLAPSED, false);
+    }
+
+    private boolean isAgentsSectionCollapsed() {
+        return drawerPrefs().getBoolean(PREF_DRAWER_AGENTS_COLLAPSED, false);
+    }
+
+    private void setSectionCollapsed(boolean distros, boolean collapsed) {
+        drawerPrefs().edit()
+            .putBoolean(distros
+                ? PREF_DRAWER_DISTROS_COLLAPSED : PREF_DRAWER_AGENTS_COLLAPSED,
+                collapsed)
+            .apply();
+    }
+
+    /** The lower scroll area (and its drag handle) show only when at
+     * least one of the two sections is non-empty; the divider between
+     * the sections shows only when both are. */
+    private void updateLowerScrollVisibility() {
+        ScrollView lower = findViewById(R.id.drawer_lower_scroll);
+        View handle = findViewById(R.id.drawer_split_handle);
+        View divider = findViewById(R.id.drawer_sections_divider);
+        LinearLayout distros = findViewById(R.id.installed_distros_container);
+        LinearLayout agents = findViewById(R.id.installed_agents_container);
+        boolean distrosVisible = distros != null
+            && distros.getVisibility() == View.VISIBLE;
+        boolean agentsVisible = agents != null
+            && agents.getVisibility() == View.VISIBLE;
+        boolean anyVisible = distrosVisible || agentsVisible;
+        if (lower != null) lower.setVisibility(anyVisible ? View.VISIBLE : View.GONE);
+        if (handle != null) handle.setVisibility(anyVisible ? View.VISIBLE : View.GONE);
+        if (divider != null) {
+            divider.setVisibility(distrosVisible && agentsVisible
+                ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    /** Draggable split between the session list and the lower sections:
+     * dragging the handle vertically resizes the session area (the lower
+     * area takes the rest). The height is saved in dp and restored on
+     * the next open; with no saved height the two areas share the
+     * drawer evenly (both weight 1 in the layout). Only vertical drags
+     * are handled — a horizontal swipe still closes the drawer. */
+    private void setDrawerSplitHandle() {
+        View handle = findViewById(R.id.drawer_split_handle);
+        ListView sessions = findViewById(R.id.terminal_sessions_list);
+        ScrollView lower = findViewById(R.id.drawer_lower_scroll);
+        if (handle == null || sessions == null || lower == null) return;
+        applySavedDrawerSplit();
+        final float[] dragStart = new float[2]; // raw Y, sessions height at down
+        handle.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    getDrawer().requestDisallowInterceptTouchEvent(true);
+                    dragStart[0] = event.getRawY();
+                    dragStart[1] = sessions.getHeight();
+                    return true;
+                case MotionEvent.ACTION_MOVE: {
+                    int total = sessions.getHeight() + lower.getHeight();
+                    int min = dpToPx(DRAWER_SESSIONS_MIN_HEIGHT_DP);
+                    int max = total - dpToPx(DRAWER_LOWER_MIN_HEIGHT_DP);
+                    int height = (int) (dragStart[1] + (event.getRawY() - dragStart[0]));
+                    setDrawerSessionsHeight(Math.max(min, Math.min(max, height)));
+                    return true;
+                }
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    getDrawer().requestDisallowInterceptTouchEvent(false);
+                    saveDrawerSessionsHeight(sessions.getHeight());
+                    return true;
+                default:
+                    return false;
+            }
+        });
+    }
+
+    private void setDrawerSessionsHeight(int heightPx) {
+        ListView sessions = findViewById(R.id.terminal_sessions_list);
+        if (sessions == null) return;
+        LinearLayout.LayoutParams params =
+            (LinearLayout.LayoutParams) sessions.getLayoutParams();
+        params.height = heightPx;
+        params.weight = 0;
+        sessions.setLayoutParams(params);
+    }
+
+    private void applySavedDrawerSplit() {
+        int savedDp = drawerPrefs().getInt(PREF_DRAWER_SESSIONS_HEIGHT_DP, -1);
+        if (savedDp <= 0) return;
+        setDrawerSessionsHeight(dpToPx(savedDp));
+    }
+
+    private void saveDrawerSessionsHeight(int heightPx) {
+        int dp = Math.round(heightPx / getResources().getDisplayMetrics().density);
+        drawerPrefs().edit().putInt(PREF_DRAWER_SESSIONS_HEIGHT_DP, dp).apply();
+    }
+
+    private int dpToPx(int dp) {
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp,
+            getResources().getDisplayMetrics()));
+    }
+
     private void setDistroButtonView() {
         findViewById(R.id.distro_button).setOnClickListener(v -> {
             ActivityUtils.startActivity(this, new Intent(this, DistroActivity.class));
@@ -652,6 +790,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             public void onDrawerOpened(View drawerView) {
                 refreshInstalledDistrosInDrawer();
                 refreshInstalledAgentsInDrawer();
+                // A stale update cache refreshes in the background; the
+                // badge repaints when it lands (only if still open).
+                AiAgentUtils.refreshLatestVersionsIfStale(
+                    () -> refreshAgentsBadgeIfDrawerOpen());
             }
         });
         refreshInstalledDistrosInDrawer();
@@ -666,9 +808,27 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         List<DistroUtils.InstalledDistro> installed = DistroUtils.getInstalledDistros();
         if (installed.isEmpty()) {
             container.setVisibility(View.GONE);
+            updateLowerScrollVisibility();
             return;
         }
         container.setVisibility(View.VISIBLE);
+        // Collapsible header: title + count stay visible when folded,
+        // the rows hide. The state is remembered across drawer opens.
+        boolean collapsed = isDistrosSectionCollapsed();
+        TextView arrow = findViewById(R.id.installed_distros_arrow);
+        TextView count = findViewById(R.id.installed_distros_count);
+        LinearLayout header = findViewById(R.id.installed_distros_header);
+        if (arrow != null) arrow.setText(collapsed ? "▸" : "▾");
+        if (count != null) count.setText("(" + installed.size() + ")");
+        if (header != null) {
+            header.setOnClickListener(v -> {
+                setSectionCollapsed(true, !isDistrosSectionCollapsed());
+                refreshInstalledDistrosInDrawer();
+            });
+        }
+        rows.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+        updateLowerScrollVisibility();
+        if (collapsed) return;
         int shown = Math.min(installed.size(), DistroUtils.MAX_DRAWER_DISTRO_ROWS);
         for (int i = 0; i < shown; i++) {
             final DistroUtils.InstalledDistro distro = installed.get(i);
@@ -702,8 +862,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
      * all distros ("Codex · Ubuntu 26.04"). Tap opens a terminal session
      * that runs the agent directly inside its container; more than 5 rows
      * get an overflow row that opens the distro list. Hidden when no agent
-     * is installed anywhere. Detection is a rootfs binary scan (no session,
-     * no version probing), the same cost class as the distro scan above. */
+     * is installed anywhere. Detection is a rootfs binary scan (no session),
+     * the same cost class as the distro scan above; the update badge adds
+     * one small version-file read per agent plus the cached latest map
+     * (no network on drawer open — a stale cache refreshes in the
+     * background and repaints the badge when it lands). */
     private void refreshInstalledAgentsInDrawer() {
         LinearLayout container = findViewById(R.id.installed_agents_container);
         LinearLayout rows = findViewById(R.id.installed_agents_rows);
@@ -712,37 +875,39 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         List<AiAgentUtils.InstalledAgent> installed = AiAgentUtils.detectInstalledAgents();
         if (installed.isEmpty()) {
             container.setVisibility(View.GONE);
+            updateAgentsBadge(0);
+            updateLowerScrollVisibility();
             return;
         }
         container.setVisibility(View.VISIBLE);
-        int shown = Math.min(installed.size(), AiAgentUtils.MAX_DRAWER_AGENT_ROWS);
-        for (int i = 0; i < shown; i++) {
-            final AiAgentUtils.InstalledAgent agent = installed.get(i);
-            TextView row = newInstalledDistroRow(rows);
-            String rowText = getString(R.string.aiagents_drawer_row,
-                agent.displayName, agent.distroDisplay);
-            if (AiAgentUtils.hasWeb(agent.agentId)) {
-                rowText += " · " + getString(R.string.aiagents_web_open);
-            }
-            row.setText(rowText);
-            row.setOnClickListener(v -> {
-                getDrawer().closeDrawers();
-                if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
-                    AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
-                } else {
-                    // dsh has no terminal entry (upstream documents only
-                    // `dsh web`): tapping the row opens its web UI instead.
-                    AiAgentUtils.startWebSession(TermuxActivity.this, agent, null);
-                }
+        boolean collapsed = isAgentsSectionCollapsed();
+        TextView arrow = findViewById(R.id.installed_agents_arrow);
+        TextView count = findViewById(R.id.installed_agents_count);
+        LinearLayout header = findViewById(R.id.installed_agents_header);
+        if (arrow != null) arrow.setText(collapsed ? "▸" : "▾");
+        if (count != null) count.setText("(" + installed.size() + ")");
+        if (header != null) {
+            header.setOnClickListener(v -> {
+                setSectionCollapsed(false, !isAgentsSectionCollapsed());
+                refreshInstalledAgentsInDrawer();
             });
-            row.setLongClickable(true);
-            row.setOnLongClickListener(v -> {
-                showAgentDrawerMenu(agent);
-                return true;
-            });
-            rows.addView(row);
         }
-        if (installed.size() > AiAgentUtils.MAX_DRAWER_AGENT_ROWS) {
+        rows.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+        updateLowerScrollVisibility();
+        AiAgentUtils.UpdateCache cache = AiAgentUtils.loadUpdateCache();
+        int shown = Math.min(installed.size(), AiAgentUtils.MAX_DRAWER_AGENT_ROWS);
+        int updates = 0;
+        for (int i = 0; i < installed.size(); i++) {
+            final AiAgentUtils.InstalledAgent agent = installed.get(i);
+            final String installedVersion = agentInstalledVersion(agent);
+            final String latestVersion = cache.latest.get(agent.agentId);
+            final boolean hasUpdate = AiAgentUtils.isNewerVersionAvailable(
+                installedVersion, latestVersion);
+            if (hasUpdate) updates++;
+            if (collapsed || i >= shown) continue;
+            newAgentRow(rows, agent, hasUpdate, installedVersion, latestVersion);
+        }
+        if (!collapsed && installed.size() > AiAgentUtils.MAX_DRAWER_AGENT_ROWS) {
             TextView moreRow = newInstalledDistroRow(rows);
             moreRow.setText(getString(R.string.distro_more_in_drawer,
                 installed.size() - AiAgentUtils.MAX_DRAWER_AGENT_ROWS));
@@ -752,6 +917,138 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             });
             rows.addView(moreRow);
         }
+        updateAgentsBadge(updates);
+    }
+
+    /** Installed version of one drawer agent row (local file reads only),
+     * or "" when unknown. agy has no local version source, so it never
+     * badges — same as the AI-assistant screen. */
+    private String agentInstalledVersion(AiAgentUtils.InstalledAgent agent) {
+        AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
+        if (def == null) return "";
+        File rootfs = DistroUtils.containerRootfs(agent.container);
+        return rootfs == null ? "" : AiAgentUtils.probeVersion(rootfs, def);
+    }
+
+    /** "N 可更新" pill on the AI-assistant header; hidden when nothing
+     * has an update. The count covers every installed agent, not just
+     * the rows shown (the overflow row hides the rest). */
+    private void updateAgentsBadge(int updates) {
+        TextView badge = findViewById(R.id.installed_agents_badge);
+        if (badge == null) return;
+        if (updates <= 0) {
+            badge.setVisibility(View.GONE);
+            return;
+        }
+        badge.setText(getString(R.string.drawer_ai_updates_count, updates));
+        badge.setVisibility(View.VISIBLE);
+    }
+
+    /** Repaint the agents section when a background update refresh lands,
+     * but only while the drawer is open (otherwise the next open reads
+     * the fresh cache anyway). */
+    private void refreshAgentsBadgeIfDrawerOpen() {
+        if (getDrawer().isDrawerOpen(Gravity.LEFT)) {
+            refreshInstalledAgentsInDrawer();
+        }
+    }
+
+    /** One drawer AI-assistant row: the name on the left and, when an
+     * update is available, a tappable "可更新 ↑" pill on the right.
+     * Tapping the name enters the agent (as before); tapping the pill
+     * updates it. The row background matches the distro rows. */
+    private void newAgentRow(LinearLayout rows, final AiAgentUtils.InstalledAgent agent,
+                             boolean hasUpdate, final String installedVersion,
+                             final String latestVersion) {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.HORIZONTAL);
+        container.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        if (ThemeUtils.shouldEnableDarkTheme(this, NightMode.getAppNightMode().getName())) {
+            container.setBackground(ContextCompat.getDrawable(this,
+                R.drawable.session_background_black_selected));
+        } else {
+            container.setBackground(ContextCompat.getDrawable(this,
+                R.drawable.session_background_selected));
+        }
+        TextView name = (TextView) getLayoutInflater()
+            .inflate(R.layout.item_terminal_sessions_list, container, false);
+        name.setBackground(null);
+        LinearLayout.LayoutParams nameParams =
+            (LinearLayout.LayoutParams) name.getLayoutParams();
+        nameParams.width = 0;
+        nameParams.weight = 1;
+        name.setLayoutParams(nameParams);
+        String rowText = getString(R.string.aiagents_drawer_row,
+            agent.displayName, agent.distroDisplay);
+        if (AiAgentUtils.hasWeb(agent.agentId)) {
+            rowText += " · " + getString(R.string.aiagents_web_open);
+        }
+        name.setText(rowText);
+        name.setOnClickListener(v -> {
+            getDrawer().closeDrawers();
+            if (AiAgentUtils.hasTerminalEntry(agent.agentId)) {
+                AiAgentUtils.startAgentSession(TermuxActivity.this, agent);
+            } else {
+                // dsh has no terminal entry (upstream documents only
+                // `dsh web`): tapping the row opens its web UI instead.
+                AiAgentUtils.startWebSession(TermuxActivity.this, agent, null);
+            }
+        });
+        name.setLongClickable(true);
+        name.setOnLongClickListener(v -> {
+            showAgentDrawerMenu(agent);
+            return true;
+        });
+        container.addView(name);
+        if (hasUpdate) {
+            TextView label = new TextView(this);
+            label.setText(R.string.aiagents_update_available);
+            label.setTextSize(12);
+            label.setTextColor(ContextCompat.getColor(this, android.R.color.white));
+            label.setBackground(ContextCompat.getDrawable(this,
+                R.drawable.drawer_update_badge));
+            label.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            labelParams.setMarginEnd(dpToPx(12));
+            label.setLayoutParams(labelParams);
+            label.setOnClickListener(v -> showAgentUpdateDialog(
+                agent, installedVersion, latestVersion));
+            container.addView(label);
+        }
+        rows.addView(container);
+    }
+
+    /** Confirm dialog for a drawer "可更新 ↑" pill: same wording as the
+     * AI-assistant screen's update dialog, then the update runs there
+     * via the auto-update extra (the user already confirmed here). */
+    private void showAgentUpdateDialog(final AiAgentUtils.InstalledAgent agent,
+                                       String installedVersion, String latestVersion) {
+        AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
+        if (def == null) return;
+        String message = getString(R.string.aiagents_update_confirm, agent.displayName);
+        if (AiAgentUtils.isNewerVersionAvailable(installedVersion, latestVersion)) {
+            message += "\n" + getString(R.string.aiagents_update_new_version,
+                latestVersion, installedVersion);
+        }
+        if ("dsh".equals(agent.agentId)) {
+            message += "\n" + getString(R.string.aiagents_update_dsh_note);
+        }
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_update_title, agent.displayName))
+            .setMessage(message)
+            .setPositiveButton(R.string.aiagents_update, (dialog, which) -> {
+                getDrawer().closeDrawers();
+                Intent intent = new Intent(this, AiAgentsActivity.class);
+                intent.putExtra(AiAgentsActivity.EXTRA_CONTAINER_NAME, agent.container);
+                intent.putExtra(AiAgentsActivity.EXTRA_DISTRO_ID, agent.distroId);
+                intent.putExtra(AiAgentsActivity.EXTRA_DISPLAY_NAME, agent.distroDisplay);
+                intent.putExtra(AiAgentsActivity.EXTRA_AUTO_UPDATE_AGENT_ID, agent.agentId);
+                ActivityUtils.startActivity(this, intent);
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
     }
 
     /** Long-press menu on a drawer "AI 助手" row: enter the terminal, or
