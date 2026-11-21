@@ -103,6 +103,10 @@ public final class ModelConfigStore {
         public String name;
         public int type;
         public String baseUrl;
+        /** API path override: "" = auto, "/" = root, else a path like
+         * "/v1". When set it replaces the path of baseUrl wholesale and
+         * the per-agent /v1 rules no longer apply. */
+        public String apiPath = "";
         /** Base64(IV + ciphertext + GCM tag), or "" when no key is stored. */
         public String encryptedKey;
         public List<String> models;
@@ -192,6 +196,7 @@ public final class ModelConfigStore {
                 obj.put("name", name);
                 obj.put("type", type);
                 obj.put("baseUrl", baseUrl);
+                obj.put("apiPath", apiPath);
                 obj.put("providerId", providerId);
                 obj.put("key", encryptedKey);
                 obj.put("models", new JSONArray(models));
@@ -223,6 +228,7 @@ public final class ModelConfigStore {
                     obj.optString("primaryModel", ""), obj.optBoolean("setDefault", true),
                     agentIds, distroNames, obj.optBoolean("allDistros", false),
                     obj.optLong("createdAt", 0), obj.optLong("lastAppliedAt", 0));
+                entry.apiPath = obj.optString("apiPath", "");
                 entry.fixPrimaryModel();
                 return entry;
             } catch (Exception e) {
@@ -380,12 +386,51 @@ public final class ModelConfigStore {
         }
     }
 
+    /** Normalize a user-typed API path: "" = auto, "/" = root, otherwise
+     * a leading-/ path with no trailing slash. */
+    public static String normalizeApiPath(String path) {
+        if (path == null) return "";
+        String p = path.trim();
+        if (p.isEmpty()) return "";
+        if (!p.startsWith("/")) p = "/" + p;
+        while (p.length() > 1 && p.endsWith("/")) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
+    }
+
+    /** True when the entry pins an API path (the auto rules no longer
+     * apply: no DeepSeek /v1 strip, no anthropic /v1 strip). */
+    public static boolean hasApiPath(Entry entry) {
+        return entry != null && !normalizeApiPath(entry.apiPath).isEmpty();
+    }
+
+    /** Origin (scheme://host[:port]) of a URL, or the URL itself when it
+     * has no path to strip. */
+    public static String originOf(String url) {
+        if (url == null) return "";
+        int scheme = url.indexOf("://");
+        int start = scheme >= 0 ? scheme + 3 : 0;
+        int slash = url.indexOf('/', start);
+        return slash >= 0 ? url.substring(0, slash) : url;
+    }
+
+    /** Effective base URL for a (type, baseUrl, apiPath) triple: when a
+     * path is pinned it replaces the base URL's path wholesale. */
+    public static String effectiveBaseUrl(int type, String baseUrl, String apiPath) {
+        String base = baseUrl == null ? "" : baseUrl.trim();
+        if (base.isEmpty()) base = defaultBaseUrl(type);
+        String path = normalizeApiPath(apiPath);
+        if (!path.isEmpty()) {
+            return originOf(base) + ("/".equals(path) ? "" : path);
+        }
+        return base.replaceAll("/+$", "");
+    }
+
     /** Effective base URL: the user's, or the type default; trailing
      * slashes stripped so "/models" appends cleanly. */
     public static String effectiveBaseUrl(Entry entry) {
-        String base = entry.baseUrl == null ? "" : entry.baseUrl.trim();
-        if (base.isEmpty()) base = defaultBaseUrl(entry.type);
-        return base.replaceAll("/+$", "");
+        return effectiveBaseUrl(entry.type, entry.baseUrl, entry.apiPath);
     }
 
     // ------------------------------------------------------------------
@@ -410,7 +455,12 @@ public final class ModelConfigStore {
      * (best effort — custom gateways may not implement the endpoint, so a
      * non-200 is reported as a status, never a death sentence). */
     public static FetchResult fetchModels(int type, String baseUrl, String apiKey) {
-        String url = effectiveBaseUrlFor(type, baseUrl) + "/models";
+        return fetchModels(type, baseUrl, "", apiKey);
+    }
+
+    /** Same, with a pinned API path ("" = auto). */
+    public static FetchResult fetchModels(int type, String baseUrl, String apiPath, String apiKey) {
+        String url = effectiveBaseUrl(type, baseUrl, apiPath) + "/models";
         if (type == TYPE_GEMINI) {
             try {
                 url += "?key=" + java.net.URLEncoder.encode(apiKey, "UTF-8");
@@ -445,12 +495,6 @@ public final class ModelConfigStore {
         } finally {
             if (connection != null) connection.disconnect();
         }
-    }
-
-    private static String effectiveBaseUrlFor(int type, String baseUrl) {
-        String base = baseUrl == null ? "" : baseUrl.trim();
-        if (base.isEmpty()) base = defaultBaseUrl(type);
-        return base.replaceAll("/+$", "");
     }
 
     /** OpenAI/Anthropic: {"data": [{"id": ...}]}. Gemini:
