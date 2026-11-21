@@ -9,9 +9,9 @@ Termux v0.119.0-beta.3 的简体中文版，装完即用。
 
 ## 下载
 
-最新版本：[v0.119.0-beta.3-zh.0.01](https://github.com/bj1995112/termux-app-zh/releases/tag/v0.119.0-beta.3-zh.0.01)
+最新版本：[v0.119.0-beta.3-zh.0.03](https://github.com/bj1995112/termux-app-zh/releases/tag/v0.119.0-beta.3-zh.0.03)
 
-- APK：`termux-app-zh-v0.119.0-beta.3-zh.0.01-arm64-v8a.apk`（41.6 MB，仅 arm64-v8a）
+- APK：`termux-app-zh-v0.119.0-beta.3-zh.0.03-arm64-v8a.apk`（41.9 MB，仅 arm64-v8a）
 - 发布页的下载链接永久有效，无需登录 GitHub
 
 ## 安装说明
@@ -23,13 +23,15 @@ Termux v0.119.0-beta.3 的简体中文版，装完即用。
 
 ## 功能
 
-- **界面简体中文**：全部 165 条界面字符串已汉化
-- **内置 Termux:Styling**：114 套配色 + 8 款精选字体，长按会话 → 样式即可切换，配色和字体名已汉化
+- **界面**：完整简体中文；内置 Termux:Styling（114 套配色 + 8 款精选字体），长按会话 → 样式即可切换
 - **Linux 发行版**：抽屉 → Linux 发行版，一键安装 Ubuntu / Debian / Arch / Alpine / Fedora / openSUSE / Void；版本列表自动拉取最新版本号和更新日期，可自选版本；已安装的发行版显示在抽屉里，点一下直接进入
 - **AI 助手**：在发行版里选择性安装 Codex / Pi / Antigravity CLI / DeepSeek Harness / OpenCode / Aider / Claude Code，支持单独更新；抽屉里有 AI 助手快捷进入，终端里可用 `ai` 命令
 - **网页版**：dsh / OpenCode / Pi 可在手机浏览器里打开使用；OpenCode 密码每个发行版固定不变，首次登录后保持登录
 - **命令行样式**：设置 → 命令行样式，24 套提示符主题 + 提示符颜色，换主题自动同步到已安装的发行版
-- **主页干净**：新会话不再显示欢迎文字（设置里可恢复）；设置里去掉了捐赠和关于；会话长按可重命名或删除
+- **下载源**：设置 → 下载源，一键检测并推荐（实测每个源的速度）；预设：官方 / 清华 / 中科大 / 阿里 / 腾讯 / 华为 / 自定义；镜像仓库：DaoCloud / dockerproxy / 1ms.run / Docker Hub；测速文件自动删
+- **模型配置**：设置 → 模型配置，给每个助手配 API 地址、密钥和模型，可拉取模型列表、设主模型，支持自定义 API 路径；Codex 联网搜索开关；一键清除全部已应用
+- **抽屉**：Linux / AI 助手分区可折叠；会话区和 Linux/AI 分区之间可拖动分隔线；AI 助手有更新时显示角标（每小时检查，打开 Termux 也查）
+- **主页干净**：新会话不再显示欢迎文字（设置里可恢复）；会话长按可重命名或删除
 - **常用工具**：装好发行版后，可选择性安装 git、curl、vim 等常用工具
 
 ## 版本号
