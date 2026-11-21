@@ -68,7 +68,169 @@
                     android:choiceMode="singleChoice"
                     android:longClickable="true" />
 
-<LinearLayout
+                <!-- Draggable split between the session list above and the
+                     Linux / AI sections below. The handle is a 16dp touch
+                     zone with a centred grip line; dragging it resizes the
+                     session area (the height is saved and restored). -->
+                <FrameLayout
+                    android:id="@+id/drawer_split_handle"
+                    android:layout_width="match_parent"
+                    android:layout_height="16dp"
+                    android:background="?attr/termuxActivityDrawerBackground"
+                    android:clickable="true"
+                    android:contentDescription="@string/drawer_split_handle">
+
+                    <View
+                        android:layout_width="48dp"
+                        android:layout_height="3dp"
+                        android:layout_gravity="center"
+                        android:background="?android:attr/textColorSecondary" />
+                </FrameLayout>
+
+                <!-- Lower area: the two collapsible sections. Bounded by
+                     weight (shares the drawer with the session list) and
+                     scrollable on its own, so long lists never push the
+                     buttons below off-screen. Hidden when both sections
+                     are empty, so the session list takes the space. -->
+                <ScrollView
+                    android:id="@+id/drawer_lower_scroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:scrollbars="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <LinearLayout
+                            android:id="@+id/installed_distros_container"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:visibility="gone">
+
+                            <LinearLayout
+                                android:id="@+id/installed_distros_header"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="horizontal"
+                                android:gravity="center_vertical"
+                                android:paddingStart="16dp"
+                                android:paddingTop="8dp"
+                                android:paddingEnd="16dp"
+                                android:paddingBottom="4dp">
+
+                                <TextView
+                                    android:id="@+id/installed_distros_arrow"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:paddingEnd="6dp"
+                                    android:text="▾"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp" />
+
+                                <TextView
+                                    android:id="@+id/installed_distros_title"
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_weight="1"
+                                    android:text="@string/distro_installed_title"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:id="@+id/installed_distros_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp" />
+                            </LinearLayout>
+
+                            <LinearLayout
+                                android:id="@+id/installed_distros_rows"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+
+                        <View
+                            android:id="@+id/drawer_sections_divider"
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:layout_marginStart="16dp"
+                            android:layout_marginTop="4dp"
+                            android:layout_marginEnd="16dp"
+                            android:layout_marginBottom="4dp"
+                            android:background="?android:attr/listDivider" />
+
+                        <LinearLayout
+                            android:id="@+id/installed_agents_container"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:visibility="gone">
+
+                            <LinearLayout
+                                android:id="@+id/installed_agents_header"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="horizontal"
+                                android:gravity="center_vertical"
+                                android:paddingStart="16dp"
+                                android:paddingTop="8dp"
+                                android:paddingEnd="16dp"
+                                android:paddingBottom="4dp">
+
+                                <TextView
+                                    android:id="@+id/installed_agents_arrow"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:paddingEnd="6dp"
+                                    android:text="▾"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp" />
+
+                                <TextView
+                                    android:id="@+id/installed_agents_title"
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_weight="1"
+                                    android:text="@string/aiagents_drawer_title"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:id="@+id/installed_agents_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="?android:attr/textColorSecondary"
+                                    android:textSize="12sp" />
+
+                                <TextView
+                                    android:id="@+id/installed_agents_badge"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginStart="6dp"
+                                    android:background="@drawable/drawer_update_badge"
+                                    android:textColor="@android:color/white"
+                                    android:textSize="11sp"
+                                    android:visibility="gone" />
+                            </LinearLayout>
+
+                            <LinearLayout
+                                android:id="@+id/installed_agents_rows"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </LinearLayout>
+                    </LinearLayout>
+                </ScrollView>
+
+                <LinearLayout
                     style="?android:attr/buttonBarStyle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -81,58 +243,6 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="@string/action_open_distro" />
-                </LinearLayout>
-
-<LinearLayout
-                    android:id="@+id/installed_distros_container"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:id="@+id/installed_distros_title"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:paddingStart="16dp"
-                        android:paddingTop="8dp"
-                        android:paddingEnd="16dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/distro_installed_title"
-                        android:textColor="?android:attr/textColorSecondary"
-                        android:textSize="12sp" />
-
-                    <LinearLayout
-                        android:id="@+id/installed_distros_rows"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
-                </LinearLayout>
-
-<LinearLayout
-                    android:id="@+id/installed_agents_container"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:visibility="gone">
-
-                    <TextView
-                        android:id="@+id/installed_agents_title"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:paddingStart="16dp"
-                        android:paddingTop="8dp"
-                        android:paddingEnd="16dp"
-                        android:paddingBottom="4dp"
-                        android:text="@string/aiagents_drawer_title"
-                        android:textColor="?android:attr/textColorSecondary"
-                        android:textSize="12sp" />
-
-                    <LinearLayout
-                        android:id="@+id/installed_agents_rows"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
                 </LinearLayout>
 
                 <LinearLayout
