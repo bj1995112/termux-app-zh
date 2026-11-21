@@ -493,4 +493,10 @@
     <string name="modelconfig_working">Working…</string>
     <string name="modelconfig_reapply_title">Re-apply model config</string>
     <string name="modelconfig_reapply_message">The model config applied to %1$s is gone (distro reinstalled). Re-apply it now?</string>
+    <string name="modelconfig_disable_web_search">Disable Codex web search</string>
+    <string name="modelconfig_disable_web_search_hint">Some relays reject the web search tool, and the request fails. Keep it on for relays; turn it off for direct OpenAI use.</string>
+    <string name="modelconfig_clear_all">Clear all applied</string>
+    <string name="modelconfig_clear_all_title">Clear all applied configs?</string>
+    <string name="modelconfig_clear_all_message">This removes every applied provider block, environment key, .bashrc marker and apply record from every distro, and the web_search line from each Codex config. Saved entries are kept and can be applied again.</string>
+    <string name="modelconfig_clear_all_done">Cleared applied configs from %1$d distros</string>
 </resources>
