@@ -439,6 +439,13 @@
     <string name="modelconfig_type_locked">类型保存后不可改</string>
     <string name="modelconfig_base_url">Base URL</string>
     <string name="modelconfig_base_url_hint">例如：https://api.deepseek.com/v1</string>
+    <string name="modelconfig_api_path">API 路径</string>
+    <string name="modelconfig_api_path_hint">留空为自动。填了就替换基础地址里的路径，各助手会在后面再加自己的后缀。</string>
+    <string name="modelconfig_api_path_auto">自动</string>
+    <string name="modelconfig_api_path_root">根路径（/）</string>
+    <string name="modelconfig_api_path_custom">自定义…</string>
+    <string name="modelconfig_api_path_custom_hint">例如 /v1</string>
+    <string name="modelconfig_api_path_preview_empty">先在下面选一个助手，查看实际请求地址</string>
     <string name="modelconfig_api_key">API Key</string>
     <string name="modelconfig_api_key_hint">只在手机里保存，不会上传</string>
     <string name="modelconfig_show_key">显示</string>
