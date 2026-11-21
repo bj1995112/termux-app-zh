@@ -499,4 +499,7 @@
     <string name="modelconfig_clear_all_title">Clear all applied configs?</string>
     <string name="modelconfig_clear_all_message">This removes every applied provider block, environment key, .bashrc marker and apply record from every distro, and the web_search line from each Codex config. Saved entries are kept and can be applied again.</string>
     <string name="modelconfig_clear_all_done">Cleared applied configs from %1$d distros</string>
+    <string name="drawer_ai_updates_count">%1$d updates</string>
+    <string name="aiagents_update_available">Update ↑</string>
+    <string name="drawer_split_handle">Drag to resize the sections</string>
 </resources>
