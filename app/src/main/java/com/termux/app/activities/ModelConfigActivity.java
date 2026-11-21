@@ -8,6 +8,7 @@ import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -16,6 +17,7 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -95,6 +97,9 @@ public class ModelConfigActivity extends AppCompatActivity {
     private RadioButton mTypeAnthropicView;
     private RadioButton mTypeGeminiView;
     private EditText mBaseUrlView;
+    private Spinner mApiPathSpinner;
+    private EditText mApiPathCustomView;
+    private TextView mApiPathPreviewView;
     private EditText mApiKeyView;
     private CheckBox mShowKeyView;
     private LinearLayout mModelsContainer;
@@ -389,6 +394,9 @@ public class ModelConfigActivity extends AppCompatActivity {
         mTypeAnthropicView = findViewById(R.id.modelconfig_edit_type_anthropic);
         mTypeGeminiView = findViewById(R.id.modelconfig_edit_type_gemini);
         mBaseUrlView = findViewById(R.id.modelconfig_edit_base_url);
+        mApiPathSpinner = findViewById(R.id.modelconfig_edit_api_path);
+        mApiPathCustomView = findViewById(R.id.modelconfig_edit_api_path_custom);
+        mApiPathPreviewView = findViewById(R.id.modelconfig_edit_api_path_preview);
         mApiKeyView = findViewById(R.id.modelconfig_edit_api_key);
         mShowKeyView = findViewById(R.id.modelconfig_edit_show_key);
         mModelsContainer = findViewById(R.id.modelconfig_edit_models);
@@ -452,6 +460,7 @@ public class ModelConfigActivity extends AppCompatActivity {
             mDirty = true;
             rebuildAgentRows();
             updateNotes();
+            updateApiPathPreview();
         });
 
         TextWatcher dirtyWatcher = new TextWatcher() {
@@ -471,6 +480,21 @@ public class ModelConfigActivity extends AppCompatActivity {
         mNameView.addTextChangedListener(dirtyWatcher);
         mBaseUrlView.addTextChangedListener(dirtyWatcher);
         mApiKeyView.addTextChangedListener(dirtyWatcher);
+        setupApiPathRow(mEditing == null ? "" : mEditing.apiPath);
+        mBaseUrlView.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                updateApiPathPreview();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
         mShowKeyView.setOnCheckedChangeListener((button, checked) -> {
             int start = mApiKeyView.getSelectionStart();
             int end = mApiKeyView.getSelectionEnd();
@@ -612,6 +636,7 @@ public class ModelConfigActivity extends AppCompatActivity {
                 }
                 mDirty = true;
                 updateNotes();
+                updateApiPathPreview();
             });
             mAgentsContainer.addView(check);
         }
@@ -704,6 +729,111 @@ public class ModelConfigActivity extends AppCompatActivity {
         return mApiKeyView.getText().toString().trim();
     }
 
+    // ---------- API path presets ----------
+
+    /** Stored values for the API path spinner; the last entry is custom. */
+    private static final String[] API_PATH_VALUES = {"", "/v1", "/", "/api/v1"};
+    private static final int API_PATH_CUSTOM_INDEX = 4;
+
+    private List<String> apiPathLabels() {
+        List<String> labels = new ArrayList<>();
+        labels.add(getString(R.string.modelconfig_api_path_auto));
+        labels.add("/v1");
+        labels.add(getString(R.string.modelconfig_api_path_root));
+        labels.add("/api/v1");
+        labels.add(getString(R.string.modelconfig_api_path_custom));
+        return labels;
+    }
+
+    /** Spinner position for a stored path: a preset, or custom. */
+    private int apiPathSelection(String stored) {
+        String path = ModelConfigStore.normalizeApiPath(stored);
+        for (int i = 0; i < API_PATH_VALUES.length; i++) {
+            if (API_PATH_VALUES[i].equals(path)) return i;
+        }
+        return API_PATH_CUSTOM_INDEX;
+    }
+
+    private void setupApiPathRow(String stored) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+            android.R.layout.simple_spinner_item, apiPathLabels());
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        mApiPathSpinner.setAdapter(adapter);
+        int selection = apiPathSelection(stored);
+        mApiPathSpinner.setSelection(selection);
+        if (selection == API_PATH_CUSTOM_INDEX) {
+            mApiPathCustomView.setText(stored == null ? "" : stored.trim());
+        }
+        mApiPathCustomView.setVisibility(
+            selection == API_PATH_CUSTOM_INDEX ? View.VISIBLE : View.GONE);
+        mApiPathSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                mDirty = true;
+                mApiPathCustomView.setVisibility(
+                    position == API_PATH_CUSTOM_INDEX ? View.VISIBLE : View.GONE);
+                updateApiPathPreview();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        mApiPathCustomView.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                mDirty = true;
+                updateApiPathPreview();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+        updateApiPathPreview();
+    }
+
+    /** The path from the form: "" = auto, a preset, or the custom text. */
+    private String formApiPath() {
+        if (mApiPathSpinner.getSelectedItemPosition() == API_PATH_CUSTOM_INDEX) {
+            return ModelConfigStore.normalizeApiPath(mApiPathCustomView.getText().toString());
+        }
+        return API_PATH_VALUES[mApiPathSpinner.getSelectedItemPosition()];
+    }
+
+    /** One preview line per selected assistant: the real request URL it
+     * will hit, computed with the same logic the applier writes. */
+    private void updateApiPathPreview() {
+        if (mApiPathPreviewView == null) return;
+        if (mSelectedAgents.isEmpty()) {
+            mApiPathPreviewView.setText(R.string.modelconfig_api_path_preview_empty);
+            return;
+        }
+        int type = selectedType();
+        String baseUrl = formBaseUrl();
+        String apiPath = formApiPath();
+        StringBuilder sb = new StringBuilder();
+        for (String agentId : mSelectedAgents) {
+            String url = ModelConfigApplier.requestUrlPreview(type, baseUrl, apiPath, agentId);
+            if (url.isEmpty()) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(agentDisplayName(agentId)).append(": ").append(url);
+        }
+        mApiPathPreviewView.setText(sb.length() == 0
+            ? getString(R.string.modelconfig_api_path_preview_empty) : sb.toString());
+    }
+
+    private String agentDisplayName(String agentId) {
+        for (AiAgentUtils.AgentDef def : AiAgentUtils.AGENTS) {
+            if (def.id.equals(agentId)) return def.displayName;
+        }
+        return agentId;
+    }
+
     private String formBaseUrl() {
         return mBaseUrlView.getText().toString().trim();
     }
@@ -722,7 +852,7 @@ public class ModelConfigActivity extends AppCompatActivity {
             @Override
             public void run() {
                 final ModelConfigStore.FetchResult result =
-                    ModelConfigStore.fetchModels(type, baseUrl, apiKey);
+                    ModelConfigStore.fetchModels(type, baseUrl, formApiPath(), apiKey);
                 runOnUiThread(() -> {
                     setBusy(false);
                     if (mMode != MODE_EDIT || generation != mEditGeneration) return;
@@ -852,7 +982,7 @@ public class ModelConfigActivity extends AppCompatActivity {
             @Override
             public void run() {
                 final ModelConfigStore.FetchResult result =
-                    ModelConfigStore.fetchModels(type, baseUrl, apiKey);
+                    ModelConfigStore.fetchModels(type, baseUrl, formApiPath(), apiKey);
                 runOnUiThread(() -> {
                     setBusy(false);
                     if (mMode != MODE_EDIT || generation != mEditGeneration) return;
@@ -914,6 +1044,7 @@ public class ModelConfigActivity extends AppCompatActivity {
             // Type is locked after saving; selectedType() is the saved one.
         }
         entry.baseUrl = formBaseUrl();
+        entry.apiPath = formApiPath();
         entry.models = new ArrayList<>(mModels);
         entry.primaryModel = mPrimaryModel;
         entry.fixPrimaryModel();
