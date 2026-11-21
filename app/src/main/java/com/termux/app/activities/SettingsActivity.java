@@ -63,6 +63,7 @@ public class SettingsActivity extends AppCompatActivity {
                     configurePromptStylePreference(context);
                     configureDownloadMirrorPreference(context);
                     configureStoragePreference(context);
+                    configureModelConfigPreference(context);
                 }
             }.start();
         }
@@ -134,6 +135,16 @@ public class SettingsActivity extends AppCompatActivity {
                     Intent intent = new Intent(context, TermuxActivity.class);
                     intent.putExtra(TermuxActivity.EXTRA_REQUEST_STORAGE_PERMISSION, true);
                     context.startActivity(intent);
+                    return true;
+                });
+            }
+        }
+
+        private void configureModelConfigPreference(@NonNull Context context) {
+            Preference modelConfigPreference = findPreference("model_config");
+            if (modelConfigPreference != null) {
+                modelConfigPreference.setOnPreferenceClickListener(preference -> {
+                    context.startActivity(new Intent(context, ModelConfigActivity.class));
                     return true;
                 });
             }
