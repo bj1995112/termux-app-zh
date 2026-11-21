@@ -21,6 +21,7 @@ import com.termux.shared.theme.NightMode;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Download-source (换下载源) settings.
@@ -239,7 +240,7 @@ public class MirrorSettingsActivity extends AppCompatActivity {
         MirrorSettings.savePreset(this, candidate);
         mPreset = MirrorSettings.loadPreset(this);
         refreshUi();
-        List<String> containers = DistroUtils.scanInstalledContainers(this);
+        List<String> containers = new ArrayList<>(DistroUtils.scanInstalledContainers());
         if (containers.isEmpty()) return;
         new AlertDialog.Builder(this)
                 .setMessage(getString(R.string.mirror_sync_confirm, containers.size()))
@@ -249,7 +250,7 @@ public class MirrorSettingsActivity extends AppCompatActivity {
     }
 
     private void syncToInstalled() {
-        List<String> containers = DistroUtils.scanInstalledContainers(this);
+        List<String> containers = new ArrayList<>(DistroUtils.scanInstalledContainers());
         if (containers.isEmpty()) {
             Toast.makeText(this, R.string.mirror_no_distros, Toast.LENGTH_SHORT).show();
             return;
