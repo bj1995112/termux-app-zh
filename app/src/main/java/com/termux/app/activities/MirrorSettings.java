@@ -835,9 +835,9 @@ public final class MirrorSettings {
     public static SyncResult syncToAllDistros(Context context, MirrorPreset preset) {
         int synced = 0;
         int failed = 0;
-        List<String> containers = DistroUtils.scanInstalledContainers(context);
+        List<String> containers = new ArrayList<>(DistroUtils.scanInstalledContainers());
         for (String container : containers) {
-            File rootfs = DistroUtils.containerRootfs(context, container);
+            File rootfs = DistroUtils.containerRootfs(container);
             if (rootfs == null) {
                 failed++;
                 continue;
@@ -857,9 +857,9 @@ public final class MirrorSettings {
     public static SyncResult restoreOfficialInAllDistros(Context context) {
         int synced = 0;
         int failed = 0;
-        List<String> containers = DistroUtils.scanInstalledContainers(context);
+        List<String> containers = new ArrayList<>(DistroUtils.scanInstalledContainers());
         for (String container : containers) {
-            File rootfs = DistroUtils.containerRootfs(context, container);
+            File rootfs = DistroUtils.containerRootfs(container);
             if (rootfs == null) {
                 failed++;
                 continue;
@@ -910,7 +910,7 @@ public final class MirrorSettings {
                     continue;
                 }
                 if (now - when > PENDING_MAX_AGE_MS) continue;
-                File rootfs = DistroUtils.containerRootfs(context, container);
+                File rootfs = DistroUtils.containerRootfs(container);
                 if (rootfs == null) {
                     remaining.add(entry);
                     continue;
