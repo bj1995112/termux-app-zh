@@ -30,3 +30,13 @@ jobs:
           gh api repos/bj1995112/termux-app-zh/git/refs -f ref='refs/heads/perm-test' -f sha='${{ github.sha }}' --jq '{ref: .ref}' && echo "BRANCH-CREATE OK" || echo "BRANCH-CREATE FAILED"
           echo "== delete refs/heads/perm-test =="
           gh api repos/bj1995112/termux-app-zh/git/refs/heads/perm-test --method DELETE && echo "BRANCH-DELETE OK" || echo "BRANCH-DELETE FAILED"
+      - name: Try creating a throwaway tag ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "== pre-clean refs/tags/perm-test-tag =="
+          gh api repos/bj1995112/termux-app-zh/git/refs/tags/perm-test-tag --method DELETE || echo "pre-clean: nothing to delete"
+          echo "== create refs/tags/perm-test-tag =="
+          gh api repos/bj1995112/termux-app-zh/git/refs -f ref='refs/tags/perm-test-tag' -f sha='${{ github.sha }}' --jq '{ref: .ref}' && echo "TAG-CREATE OK" || echo "TAG-CREATE FAILED"
+          echo "== delete refs/tags/perm-test-tag =="
+          gh api repos/bj1995112/termux-app-zh/git/refs/tags/perm-test-tag --method DELETE && echo "TAG-DELETE OK" || echo "TAG-DELETE FAILED"
