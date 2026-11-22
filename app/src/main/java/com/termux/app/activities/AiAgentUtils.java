@@ -26,9 +26,12 @@ package com.termux.app.activities;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
@@ -36,6 +39,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.AtomicFile;
 import android.util.Log;
+import android.widget.Button;
 import android.widget.Toast;
 
 import com.termux.R;
@@ -1926,16 +1930,19 @@ public final class AiAgentUtils {
      * polls the container rootfs for the link file the script writes
      * (/tmp/termux-web-&lt;agent&gt;-&lt;container&gt;.url); for Hermes
      * it probes 127.0.0.1:9119 until the dashboard answers. When the
-     * link (or port) appears the browser opens it (Settings &gt; AI 助手
-     * chooses which browser, and whether to open at all); on failure
-     * a dialog shows the reason plus the last lines of the launch
-     * log and offers Retry. The first web launch (any of the four
-     * agents) also appends a one-time battery hint to the success
-     * dialog: the server only stays up while Termux keeps running in
-     * the background, and some phones freeze Termux when it is
-     * backgrounded, which stalls the web UI until Termux is
+     * link (or port) appears the browser opens it — except dsh, whose
+     * link is shown for manual copy instead (see below); Settings &gt;
+     * AI 助手 chooses which browser, and whether to open at all. On
+     * failure a dialog shows the reason plus the last lines of the
+     * launch log and offers Retry. The first web launch (any of the
+     * four agents) also appends a one-time battery hint to the
+     * success dialog: the server only stays up while Termux keeps
+     * running in the background, and some phones freeze Termux when
+     * it is backgrounded, which stalls the web UI until Termux is
      * foregrounded again. The hint is shown at most once
      * (SharedPreferences flag) and never blocks or delays the launch.
+     * Every success dialog has a one-tap "Copy link" button that
+     * writes the link to the clipboard and leaves the dialog open.
      *
      * The four agents differ in how their address is found:
      * - dsh: `dsh web` serves :3080, but the startup URL carries a
@@ -1948,18 +1955,19 @@ public final class AiAgentUtils {
      *   watching its log until the token URL appears; if `dsh web`
      *   exits without printing one, the script writes ERROR and the
      *   app shows the failure plus the log tail. The token URL is
-     *   printed before the service is fully ready: on-device
-     *   2026-11-23 (0.06) the app opened the complete token link at
-     *   once and the browser landed on a "forbidden" page at the
-     *   clean address, while the same link pasted a few seconds
-     *   later worked. The likely cause (inferred, not proven
-     *   on-device) is that the first request hits the Host/Origin
-     *   trust check while it is still initialising and gets 403.
-     *   So after the token appears the script probes a token-less
-     *   GET of the root until it answers 401 (ready, only the token
-     *   exchange is missing; 403 or no answer means keep waiting)
-     *   and only then writes the URL file; the probe never sends
-     *   the token. There is no
+     *   written to the URL file as soon as it appears — the app
+     *   does NOT open it in the browser: dsh refuses a navigation
+     *   that an app opens for it (the browser marks it
+     *   sec-fetch-site: cross-site and dsh answers 403), while the
+     *   same link pasted into the address bar is sec-fetch-site:
+     *   none and works. Confirmed on-device 2026-11-23 with curl
+     *   probes against the live server (cross-site -&gt; 403, none -&gt;
+     *   401). So the app shows the link in a dialog with a
+     *   one-tap copy button instead, whatever the auto-open switch
+     *   says. (0.07 tried waiting for the service to answer 401
+     *   before opening; that premise was wrong — the 403 is a
+     *   per-request origin check, not a readiness window — and the
+     *   probe was removed in 0.08.) There is no
      *   timeout: cancelling the progress dialog stops the wait and
      *   nothing opens afterwards, even if a token link appears later.
      * - OpenCode (v2.3.2): there is NO `opencode web` command in v2, and
@@ -2123,10 +2131,13 @@ public final class AiAgentUtils {
             })
             .show();
         startSession.run();
+        // dsh never auto-opens (see the startWebSession javadoc):
+        // its link is shown for manual copy instead.
+        final boolean copyOnly = def.webKind == WebKind.DSH;
         final Runnable retry = () -> startWebLinkSession(context, agent, timeoutMs,
             progressRes, timeoutRes, onDialogDismissed);
         pollWebLinkFile(context, agent, progress, timeoutMs, timeoutRes, onDialogDismissed, retry,
-            cancelled);
+            cancelled, copyOnly);
     }
 
     /** Poll the container rootfs for the web-link file, up to
@@ -2139,13 +2150,16 @@ public final class AiAgentUtils {
      * user cancels, the poll stops and nothing is opened afterwards.
      * @param cancelled set by the progress dialog's Cancel button;
      *        the poll thread checks it on every round and before
-     *        showing or opening anything. */
+     *        showing or opening anything.
+     * @param copyOnly when true (dsh) the link is shown for manual
+     *        copy instead of being opened in the browser. */
     private static void pollWebLinkFile(final Context context, final InstalledAgent agent,
                                         final AlertDialog progress, final int timeoutMs,
                                         final int timeoutRes,
                                         final Runnable onDialogDismissed,
                                         final Runnable onRetry,
-                                        final AtomicBoolean cancelled) {
+                                        final AtomicBoolean cancelled,
+                                        final boolean copyOnly) {
         final File rootfs = DistroUtils.containerRootfs(agent.container);
         new Thread(() -> {
             String link = null;
@@ -2188,7 +2202,11 @@ public final class AiAgentUtils {
                 if (progress != null && progress.isShowing()) progress.dismiss();
                 if (context instanceof Activity && ((Activity) context).isFinishing()) return;
                 if (resultLink != null) {
-                    showWebLinkSuccess(context, agent, resultLink, onDialogDismissed);
+                    if (copyOnly) {
+                        showWebLinkCopyOnly(context, agent, resultLink, onDialogDismissed);
+                    } else {
+                        showWebLinkSuccess(context, agent, resultLink, onDialogDismissed);
+                    }
                 } else {
                     showWebLinkFailure(context, agent, resultError, onDialogDismissed, onRetry);
                 }
@@ -2197,8 +2215,9 @@ public final class AiAgentUtils {
     }
 
     /** Open the web link in the browser (unless auto-open is off) and
-     * show it (copyable) as a fallback, with the one-time battery hint
-     * on the first web launch. */
+     * show it with a one-tap copy button, with the one-time battery
+     * hint on the first web launch. The copy button leaves the dialog
+     * open so the user can still see the link. */
     private static void showWebLinkSuccess(final Context context, final InstalledAgent agent,
                                            final String link,
                                            final Runnable onDialogDismissed) {
@@ -2206,13 +2225,69 @@ public final class AiAgentUtils {
         String message = context.getString(R.string.aiagents_web_link_msg, link);
         String batteryHint = consumeWebBatteryHint(context);
         if (batteryHint != null) message += "\n\n" + batteryHint;
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
             .setMessage(message)
+            .setNeutralButton(R.string.aiagents_web_copy_link,
+                (d, which) -> copyLinkToClipboard(context, link))
             .setPositiveButton(android.R.string.ok, (dialog, which) -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
+        keepCopyButtonOpen(dialog, context, link);
+    }
+
+    /** dsh only: show the link for manual copy instead of opening it.
+     * dsh refuses a navigation that an app opens for it (the browser
+     * marks it sec-fetch-site: cross-site and dsh answers 403), while
+     * the same link pasted into the address bar is sec-fetch-site:
+     * none and works — confirmed on-device 2026-11-23 with curl
+     * probes. So the app never calls openWebUrl for dsh, whatever
+     * the auto-open switch says; the dialog explains this and offers
+     * one-tap copy, and stays open after copying so the user can
+     * still see the link. */
+    private static void showWebLinkCopyOnly(final Context context, final InstalledAgent agent,
+                                            final String link,
+                                            final Runnable onDialogDismissed) {
+        String message = context.getString(R.string.aiagents_web_dsh_copy_msg, link);
+        String batteryHint = consumeWebBatteryHint(context);
+        if (batteryHint != null) message += "\n\n" + batteryHint;
+        AlertDialog dialog = new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(message)
+            .setNeutralButton(R.string.aiagents_web_copy_link,
+                (d, which) -> copyLinkToClipboard(context, link))
+            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+        keepCopyButtonOpen(dialog, context, link);
+    }
+
+    /** Copy a web link to the clipboard and toast. Used by the
+     * "Copy link" button of every web link dialog. */
+    private static void copyLinkToClipboard(final Context context, final String link) {
+        try {
+            ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null) return;
+            cm.setPrimaryClip(ClipData.newPlainText("web link", link));
+            Toast.makeText(context, R.string.msg_select_url_copied_to_clipboard,
+                Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to copy link to clipboard", e);
+        }
+    }
+
+    /** A stock AlertDialog button dismisses the dialog when tapped.
+     * Replace the "Copy link" neutral button's listener after show()
+     * so tapping it copies the link and leaves the dialog open. */
+    private static void keepCopyButtonOpen(final AlertDialog dialog, final Context context,
+                                           final String link) {
+        if (dialog == null) return;
+        Button copyButton = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        if (copyButton != null) {
+            copyButton.setOnClickListener(v -> copyLinkToClipboard(context, link));
+        }
     }
 
     /** Web launch failed: show the reason plus the last lines of the
@@ -2466,18 +2541,23 @@ public final class AiAgentUtils {
         }).start();
     }
 
-    /** Open the pairing link in the browser and show it (copyable) as a fallback. */
+    /** Open the pairing link in the browser and show it with a
+     * one-tap copy button. The copy button leaves the dialog open
+     * so the user can still see the link. */
     private static void showOpenCodePairSuccess(final Context context, final InstalledAgent agent,
                                                 final String pairLink,
                                                 final Runnable onDialogDismissed) {
         openWebUrl(context, pairLink);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
             .setMessage(context.getString(R.string.aiagents_web_opencode_pair_msg, pairLink))
+            .setNeutralButton(R.string.aiagents_web_copy_link,
+                (d, which) -> copyLinkToClipboard(context, pairLink))
             .setPositiveButton(android.R.string.ok, (dialog, which) -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
+        keepCopyButtonOpen(dialog, context, pairLink);
     }
 
     /** Pairing failed: show the reason and offer Retry (mint a fresh link). */
@@ -2512,6 +2592,17 @@ public final class AiAgentUtils {
         }
     }
 
+    /** The intent Android itself uses to detect browser apps
+     * (Chromium's BROWSER_INTENT, copied from Android's
+     * BrowserRoleBehavior): ACTION_VIEW + BROWSABLE + a bare http
+     * scheme, no host. A scheme-only data part matches every http
+     * link handler. */
+    private static Intent newBrowserProbeIntent() {
+        return new Intent(Intent.ACTION_VIEW)
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .setData(Uri.fromParts("http", "", null));
+    }
+
     /** Package of the browser Android would open for an http link
      * when no browser is chosen in the app ("" when none is set:
      * then the system shows a chooser). Used to keep the
@@ -2523,9 +2614,11 @@ public final class AiAgentUtils {
         if (context == null) return "";
         try {
             PackageManager pm = context.getPackageManager();
-            Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1"));
-            probe.addCategory(Intent.CATEGORY_BROWSABLE);
-            ResolveInfo resolved = pm.resolveActivity(probe, PackageManager.MATCH_DEFAULT_ONLY);
+            // resolveActivity returns the single best match (the
+            // default); MATCH_DEFAULT_ONLY is right here — it is
+            // only the *listing* query that must use MATCH_ALL.
+            ResolveInfo resolved = pm.resolveActivity(newBrowserProbeIntent(),
+                PackageManager.MATCH_DEFAULT_ONLY);
             if (resolved == null || resolved.activityInfo == null) return "";
             String pkg = resolved.activityInfo.packageName;
             if (pkg == null || pkg.equals(context.getPackageName())) return "";
@@ -2540,38 +2633,85 @@ public final class AiAgentUtils {
         }
     }
 
+    /** Well-known browser packages, used only as a supplementary
+     * safety net in listWebBrowsers (see there). The generic query
+     * is the primary source and must list every browser, including
+     * ones not named here. */
+    private static final String[] KNOWN_BROWSER_PACKAGES = {
+        "com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary",
+        "com.microsoft.emmx", "org.mozilla.firefox", "org.mozilla.firefox_beta",
+        "org.mozilla.focus", "com.brave.browser", "com.opera.browser",
+        "com.opera.mini.native", "com.sec.android.app.sbrowser", "mark.via",
+        "com.kiwibrowser.browser", "com.vivaldi.browser", "com.duckduckgo.mobile.android",
+    };
+
     /** Browsers installed on this phone that can open an http link,
      * sorted by label, de-duplicated by package. Termux itself is
      * excluded, and so is the system-default browser: it is already
      * the "system default" row in Settings, so listing it again by
      * name would show the same browser twice. The list is built
      * live: a browser installed after the last settings visit shows
-     * up, an uninstalled one does not. Returns an empty list when
-     * nothing can open http links. */
+     * up, an uninstalled one does not. The primary source is the
+     * generic query below; the well-known packages are only a
+     * safety net, so a browser not named there still shows up.
+     * Returns an empty list when nothing can open http links. */
     public static List<BrowserChoice> listWebBrowsers(Context context) {
         List<BrowserChoice> out = new ArrayList<>();
         if (context == null) return out;
         PackageManager pm = context.getPackageManager();
-        Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1"));
-        probe.addCategory(Intent.CATEGORY_BROWSABLE);
-        List<ResolveInfo> infos;
+        Map<String, String> byPackage = new LinkedHashMap<>();
+        String defaultPkg = getSystemDefaultBrowserPackage(context);
+        // Primary source: the generic query. It MUST use MATCH_ALL.
+        // With MATCH_DEFAULT_ONLY the system returns only the
+        // default browser once one is set — on-device 0.06/0.07
+        // showed exactly that (only the default ever appeared), and
+        // the 0.07 <queries> declaration changed nothing, because
+        // the app targets API 28: package-visibility filtering only
+        // applies to apps targeting API 30+, so <queries> was never
+        // the operative factor here at all. The flag set below is
+        // Chromium's queryAllWebBrowsersInfo, copied from Android's
+        // own BrowserRoleBehavior (Chromium crbug 738506 fixed the
+        // same "only the default browser" symptom by switching from
+        // MATCH_DEFAULT_ONLY to MATCH_ALL). Do NOT go back to
+        // MATCH_DEFAULT_ONLY alone here.
         try {
-            infos = pm.queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY);
+            int flags = PackageManager.MATCH_ALL | PackageManager.MATCH_DIRECT_BOOT_AWARE
+                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE | PackageManager.MATCH_DEFAULT_ONLY;
+            List<ResolveInfo> infos = pm.queryIntentActivities(newBrowserProbeIntent(), flags);
+            if (infos != null) {
+                for (ResolveInfo info : infos) {
+                    if (info == null || info.activityInfo == null) continue;
+                    String pkg = info.activityInfo.packageName;
+                    if (pkg == null || pkg.equals(context.getPackageName())) continue;
+                    if (pkg.equals(defaultPkg)) continue;
+                    if (!byPackage.containsKey(pkg)) {
+                        CharSequence label = info.loadLabel(pm);
+                        byPackage.put(pkg, label == null ? pkg : label.toString());
+                    }
+                }
+            }
         } catch (Exception e) {
             Log.w(LOG_TAG, "Failed to list browsers", e);
-            return out;
         }
-        if (infos == null) return out;
-        String defaultPkg = getSystemDefaultBrowserPackage(context);
-        Map<String, String> byPackage = new LinkedHashMap<>();
-        for (ResolveInfo info : infos) {
-            if (info == null || info.activityInfo == null) continue;
-            String pkg = info.activityInfo.packageName;
-            if (pkg == null || pkg.equals(context.getPackageName())) continue;
-            if (pkg.equals(defaultPkg)) continue;
-            if (!byPackage.containsKey(pkg)) {
-                CharSequence label = info.loadLabel(pm);
+        // Supplementary safety net only: well-known browsers,
+        // checked one by one against the <package> entries in the
+        // manifest. A browser installed later has to show up
+        // through the generic query above, not through this list.
+        for (String pkg : KNOWN_BROWSER_PACKAGES) {
+            if (byPackage.containsKey(pkg) || pkg.equals(defaultPkg)
+                    || pkg.equals(context.getPackageName())) continue;
+            try {
+                ApplicationInfo appInfo = pm.getApplicationInfo(pkg, 0);
+                Intent probe = newBrowserProbeIntent();
+                probe.setPackage(pkg);
+                List<ResolveInfo> infos = pm.queryIntentActivities(probe, 0);
+                if (infos == null || infos.isEmpty()) continue;
+                CharSequence label = pm.getApplicationLabel(appInfo);
                 byPackage.put(pkg, label == null ? pkg : label.toString());
+            } catch (PackageManager.NameNotFoundException e) {
+                // Not installed; skip silently.
+            } catch (Exception e) {
+                Log.w(LOG_TAG, "Failed to check browser " + pkg, e);
             }
         }
         List<Map.Entry<String, String>> entries = new ArrayList<>(byPackage.entrySet());
@@ -2674,21 +2814,20 @@ public final class AiAgentUtils {
                 // address was printed before the token URL, and opening
                 // the bare address cannot sign the browser in, so a
                 // bare address is never written to the URL file. The
-                // token URL is printed before the service is fully
-                // ready: on-device 2026-11-23 (0.06) the app opened the
-                // complete token link at once and the browser landed on
-                // a "forbidden" page at the clean address, while the
-                // same link pasted a few seconds later worked. The
-                // likely cause (inferred, not proven on-device) is that
-                // the first request hits the Host/Origin trust check
-                // while it is still initialising and gets 403, and the
-                // browser never retries. So after the token appears the
-                // script probes a token-less GET of the root until it
-                // answers 401 (ready, only the token exchange is
-                // missing; a 200 also counts as ready) and only then
-                // writes the URL file; 403 or no answer means keep
-                // waiting. The probe never sends the token, so it
-                // cannot consume it. Both waits have no time limit;
+                // token URL is written to the URL file as soon as it
+                // appears; the app never opens it in the browser (the
+                // dialog offers copy instead — see showWebLinkCopyOnly):
+                // dsh refuses an app-opened navigation (the browser
+                // marks it sec-fetch-site: cross-site and dsh answers
+                // 403), while the same link pasted into the address
+                // bar is sec-fetch-site: none and works. Confirmed
+                // on-device 2026-11-23 with curl probes (cross-site
+                // -> 403, none -> 401). 0.07 added a readiness probe
+                // (curl/wget GET of the root until 401) before writing
+                // the URL file; that premise was wrong — the 403 is a
+                // per-request origin check, not a readiness window —
+                // so the probe was removed in 0.08 and the script is
+                // back to token-then-write. There is no time limit;
                 // if `dsh web` exits first, the script writes ERROR so
                 // the app shows the failure plus the log tail. The
                 // app-side wait is cancelled only by the user
@@ -2703,25 +2842,8 @@ public final class AiAgentUtils {
                 s.append("dsh web --no-open >\"$LOG_FILE\" 2>&1 &\n");
                 s.append("DSH_PID=$!\n");
                 s.append("LINK=\"\"\n");
-                s.append("probe_dsh_ready() {\n");
-                s.append("    if command -v curl >/dev/null 2>&1; then\n");
-                s.append("        local CODE=\"$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \"$PROBE_URL\" 2>/dev/null)\"\n");
-                s.append("        [ \"$CODE\" = \"401\" ] || [ \"$CODE\" = \"200\" ]\n");
-                s.append("        return $?\n");
-                s.append("    fi\n");
-                s.append("    if command -v wget >/dev/null 2>&1; then\n");
-                s.append("        local CODE=\"$(wget -q -T 3 -S -O /dev/null \"$PROBE_URL\" 2>&1 | grep -m 1 -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | cut -d' ' -f2)\"\n");
-                s.append("        [ \"$CODE\" = \"401\" ] || [ \"$CODE\" = \"200\" ]\n");
-                s.append("        return $?\n");
-                s.append("    fi\n");
-                s.append("    return 0\n");
-                s.append("}\n");
                 s.append("while true; do LINK=\"$(grep -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null | grep -m 1 'token=')\"; [ -n \"$LINK\" ] && break; kill -0 \"$DSH_PID\" 2>/dev/null || break; sleep 1; done\n");
                 s.append("if [ -z \"$LINK\" ]; then echo \"dsh 网页版地址没找到（服务已退出）。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"dsh web exited without printing a token link\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
-                s.append("PROBE_URL=\"${LINK%%\\?*}\"\n");
-                s.append("READY=0\n");
-                s.append("while true; do if probe_dsh_ready; then READY=1; break; fi; kill -0 \"$DSH_PID\" 2>/dev/null || break; sleep 1; done\n");
-                s.append("if [ \"$READY\" -eq 0 ]; then echo \"dsh 网页版没有就绪（服务已退出）。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"dsh web exited before becoming ready\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
                 s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
                 s.append("echo \"dsh 网页版地址：$LINK\"\n");
                 s.append("wait \"$DSH_PID\"\n");
