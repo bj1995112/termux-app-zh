@@ -1,0 +1,32 @@
+name: Debug Token
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Who is the token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "== identity =="
+          gh api user --jq '{login: .login, type: .type}' || echo "identity FAILED"
+          echo "== repo permissions for this token =="
+          gh api repos/bj1995112/termux-app-zh --jq '.permissions' || echo "repo-perms FAILED"
+          echo "== actions permissions =="
+          gh api repos/bj1995112/termux-app-zh/actions/permissions --jq '{enabled: .enabled, allowed_actions: .allowed_actions}' || echo "actions-perms FAILED"
+      - name: Try creating a throwaway branch ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "== pre-clean refs/heads/perm-test =="
+          gh api repos/bj1995112/termux-app-zh/git/refs/heads/perm-test --method DELETE || echo "pre-clean: nothing to delete"
+          echo "== create refs/heads/perm-test =="
+          gh api repos/bj1995112/termux-app-zh/git/refs -f ref='refs/heads/perm-test' -f sha='${{ github.sha }}' --jq '{ref: .ref}' && echo "BRANCH-CREATE OK" || echo "BRANCH-CREATE FAILED"
+          echo "== delete refs/heads/perm-test =="
+          gh api repos/bj1995112/termux-app-zh/git/refs/heads/perm-test --method DELETE && echo "BRANCH-DELETE OK" || echo "BRANCH-DELETE FAILED"
