@@ -51,11 +51,8 @@ import java.nio.file.Files;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -80,8 +77,12 @@ public final class AiAgentUtils {
     /** Set once the first web-launch battery hint has been shown. */
     private static final String PREF_WEB_BATTERY_HINT_SHOWN = "web_battery_hint_shown";
 
-    /** Timeout for the pre-dialog web-port probe (loopback, fails fast). */
-    private static final int WEB_PORT_PROBE_TIMEOUT_MS = 800;
+    /** How long the app waits for the OpenCode pairing-link file to appear
+     * after starting the pair script (polls every 500 ms). */
+    private static final int OPENCODE_PAIR_WAIT_TIMEOUT_MS = 30000;
+
+    /** Interval between pairing-link file polls. */
+    private static final int OPENCODE_PAIR_POLL_INTERVAL_MS = 500;
 
     /** Cache file for latest-version checks (Termux home, same place as the
      * distro list cache). Format: {"checkedAt": <epoch ms>,
@@ -152,8 +153,8 @@ public final class AiAgentUtils {
         /** `dsh web`: fixed port 3080, but the startup URL carries a fresh
          * session token, so the app cannot open it by itself (see startWebSession). */
         DSH,
-        /** `opencode serve --port 4096`: fixed port + password, so the app
-         * can open http://127.0.0.1:4096 directly. */
+        /** A fresh pairing link per tap (`opencode pair`): the app opens
+         * the first /auth/connect/ link it prints (see startWebSession). */
         OPENCODE,
         /** Official pi-webapp (`npx pi-webapp`): no fixed port, the launcher
          * prints a token-bearing local address, so the app cannot open it
@@ -180,7 +181,8 @@ public final class AiAgentUtils {
         final String installSnippet; // shell lines run inside the container (install)
         final String updateSnippet;  // shell lines run inside the container (update)
         final WebKind webKind;       // NONE when the agent has no web UI
-        final int webPort;           // fixed web port (3080 dsh, 4096 opencode), 0 when none
+        final int webPort;           // fixed web port (3080 dsh), 0 when none
+                                     // (OpenCode: the port comes from the pair link)
         // false when the agent has no terminal/TUI entry: dsh is web-only
         // (upstream documents only `dsh web`; bare `dsh` is undocumented).
         final boolean terminalEntry;
@@ -211,8 +213,9 @@ public final class AiAgentUtils {
     // (npm registry, PyPI, official docs); see ai-agents/design.md §1.
     // Web launch facts verified 2026-11-21 (see web-agents/design.md §1):
     // dsh web = :3080 with a per-start token in the URL; OpenCode 2 has no
-    // `web` command — the web UI is served by `opencode serve --port 4096`
-    // (password-protected); pi-webapp has no fixed port. Claude Code facts
+    // `web` command — the web UI is opened with a fresh pairing link from
+    // `opencode pair` (see the startWebSession javadoc); pi-webapp has no
+    // fixed port. Claude Code facts
     // verified 2026-11-21 against Anthropic docs: the installer is
     // https://claude.ai/install.sh (claude.com/install.sh is a 404), the
     // binary is ~/.local/bin/claude, update is `claude update`, no Node needed.
@@ -266,7 +269,7 @@ public final class AiAgentUtils {
             VersionKind.NPM_PACKAGE_JSON, "@opencode/cli",
             "npm install -g --allow-scripts=@opencode/cli @opencode/cli",
             "npm install -g --allow-scripts=@opencode/cli @opencode/cli",
-            WebKind.OPENCODE, 4096, true),
+            WebKind.OPENCODE, 0, true),  // no fixed port: pair prints its own link
         new AgentDef("aider", "Aider", R.string.aiagents_desc_aider, false, "aider",
             ".local/bin/aider",
             new String[]{"root/.local/bin/aider"},
@@ -1885,20 +1888,20 @@ public final class AiAgentUtils {
      * foreground (DistroUtils.startSessionWithExecutable uses
      * VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY),
      * hiding the dialog behind the terminal until the user presses Back.
-     * The server runs while the session is open; closing the session stops
-     * it (proot has no systemd, so there is no background daemon). For
-     * OpenCode the app probes 127.0.0.1:4096 from its own process before
-     * showing the dialog (proot shares the phone's network namespace, so
-     * no in-container exec is needed): when a server is already running,
-     * the dialog also offers "Restart server", which starts a session
-     * whose script first kills the old serve and then starts a fresh one
-     * with the stable password. There is deliberately NO auto-kill: an
-     * accidental tap must never kill a running server, so the restart is
-     * opt-in only. The normal launch keeps the guarded script (skip if a
-     * server is already listening). A server started before the stable
-     * password (Build #83) still holds its old random password, so the
-     * restart is how the dialog password and the running server are
-     * brought back in sync.
+     * For dsh / Pi / Hermes the dialog is still shown first and the
+     * session starts only from its positive button. For OpenCode the
+     * flow is different, because the pairing link only exists after
+     * `opencode pair` has run: a progress dialog is shown first
+     * ("minting a pairing link"), the session is started from that
+     * dialog, and the app polls the container rootfs for the
+     * pairing-link file the script writes
+     * (/tmp/termux-web-opencode-<container>.url). When the link
+     * appears (up to 30 s) the browser opens it; on failure a dialog
+     * shows the reason and offers Retry. The script does nothing but
+     * run `opencode pair` and take its first /auth/connect/ link: no
+     * fixed port (whatever address pair prints is used as-is), no
+     * password, no standalone serve, and no service setup — `pair`
+     * starts the background service itself when it needs one.
      *
      * The first web launch (any of the four agents) also appends a
      * one-time battery hint to the dialog: the server only stays up while
@@ -1912,20 +1915,23 @@ public final class AiAgentUtils {
      * - dsh: `dsh web` serves :3080, but the startup URL carries a fresh
      *   per-start session token, so the app cannot build a working URL.
      *   The dialog tells the user to copy the token URL from the session.
-     * - OpenCode (v2): there is NO `opencode web` command in v2. The web
-     *   UI is served by `opencode serve --port 4096`, password-protected.
-     *   The password is stable per container (see getOrCreateWebPassword):
-     *   it must not change between launches, because the web UI signs in
-     *   with a session cookie and changing the server password signs
-     *   every browser session out (dev.opencode.ai/docs/cli/web) — a
-     *   fresh password per launch is what made the browser show
-     *   "已从此服务器退出登录" right after a correct login. The app
-     *   passes it via OPENCODE_PASSWORD (and OPENCODE_SERVER_PASSWORD as
-     *   a fallback), shows it in the dialog, and opens
-     *   http://127.0.0.1:4096 with an ACTION_VIEW intent; the user types
-     *   the password into the web UI once and stays signed in.
-     *   (`opencode pair` is NOT a fallback here: it needs the shared
-     *   background service, not a standalone `opencode serve`.)
+     * - OpenCode (v2.3.2): there is NO `opencode web` command in v2, and
+     *   the browser password form is NOT a documented sign-in path at
+     *   all (dev.opencode.ai/docs/cli/web): the password is documented
+     *   only for Basic-auth clients (curl, `opencode --server`, TUI
+     *   attach). On-device 2026-11-23 the form failed with the correct
+     *   password (curl to /api/info returned 200 with the same
+     *   password) while the official pairing link worked. So every tap
+     *   just runs `opencode pair` and opens the first /auth/connect/
+     *   link it prints (one-time use, expires in 5 minutes; the
+     *   browser signs in with a 30-day session cookie). No password
+     *   is shown or typed for the web UI, no port is pinned — the
+     *   link's own host and port are used as-is — and no service
+     *   setup is done in the app: `pair` starts the background
+     *   service itself when it needs one. The old per-container
+     *   password file (/root/.termux-aiagents/opencode-web-password)
+     *   is retired: it was found empty on-device and OpenCode never
+     *   reads it.
      * - Pi: the official pi-webapp has no fixed port; the launcher prints
      *   a token-bearing local address, so the app cannot build a URL.
      *   The dialog tells the user to copy the address from the session
@@ -1950,78 +1956,25 @@ public final class AiAgentUtils {
      * @param onDialogDismissed run when the explanation dialog is closed
      *        (DistroActivity passes finish() here); null is fine.
      */
-    /** Rootfs-relative path of a container's stable OpenCode web password. */
-    private static final String OPENCODE_WEB_PASSWORD_REL_PATH =
-        "root/.termux-aiagents/opencode-web-password";
-
-    /** 12 lowercase hex chars from a cryptographic RNG. */
-    private static String newRandomWebPassword() {
-        byte[] bytes = new byte[6];
-        new SecureRandom().nextBytes(bytes);
-        final char[] hex = "0123456789abcdef".toCharArray();
-        StringBuilder s = new StringBuilder(12);
-        for (byte b : bytes) {
-            s.append(hex[(b >> 4) & 0xF]);
-            s.append(hex[b & 0xF]);
-        }
-        return s.toString();
+    /** Rootfs-relative file the OpenCode pair script writes the fresh
+     * pairing link into (one line:
+     * http://<host>:<port>/auth/connect/...). The app polls this file
+     * from the rootfs; the script deletes any stale copy first, so a
+     * spent (single-use) link can never be re-opened. */
+    private static String openCodePairUrlFileName(String container) {
+        return "termux-web-opencode-" + container + ".url";
     }
 
-    /**
-     * Returns this container's stable OpenCode web password, creating and
-     * storing it on first use. The password must not change between
-     * launches: the web UI signs in with a session cookie, and changing
-     * the server password signs every browser session out
-     * (dev.opencode.ai/docs/cli/web). It is stored in the container
-     * rootfs, so it survives as long as the container does. If the
-     * rootfs cannot be found, or the stored file is empty, or the write
-     * fails, a fresh random password is returned for this call only and
-     * the launch still works exactly as before.
-     */
-    private static String getOrCreateWebPassword(Context context, String container) {
-        String fallback = newRandomWebPassword();
-        File rootfs = DistroUtils.containerRootfs(container);
-        if (rootfs == null) return fallback;
-        File passwordFile = new File(rootfs, OPENCODE_WEB_PASSWORD_REL_PATH);
-        try {
-            if (passwordFile.isFile()) {
-                String stored = DistroUtils.readFile(passwordFile).trim();
-                if (!stored.isEmpty()) return stored;
-            }
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to read stored OpenCode web password", e);
-        }
-        String password = newRandomWebPassword();
-        try {
-            File parent = passwordFile.getParentFile();
-            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
-                return fallback;
-            }
-            try (FileOutputStream out = new FileOutputStream(passwordFile)) {
-                out.write(password.getBytes(StandardCharsets.UTF_8));
-            }
-            passwordFile.setReadable(false, false);
-            passwordFile.setReadable(true, true);
-            passwordFile.setWritable(false, false);
-            passwordFile.setWritable(true, true);
-            passwordFile.setExecutable(false, false);
-            return password;
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Failed to store OpenCode web password", e);
-            passwordFile.delete();
-            return fallback;
-        }
-    }
 
     public static void startWebSession(final Context context, final InstalledAgent agent,
                                        final Runnable onDialogDismissed) {
         final AgentDef def = findDef(agent.agentId);
         if (def == null || def.webKind == WebKind.NONE) return;
-        final String webPassword;
         if (def.webKind == WebKind.OPENCODE) {
-            webPassword = getOrCreateWebPassword(context, agent.container);
-        } else {
-            webPassword = null;
+            // Pairing link only: see the javadoc above and
+            // startOpenCodePairSession. No password is involved.
+            startOpenCodePairSession(context, agent, onDialogDismissed);
+            return;
         }
         File rootfs = DistroUtils.containerRootfs(agent.container);
         if (rootfs == null) {
@@ -2036,7 +1989,7 @@ public final class AiAgentUtils {
                 throw new IOException("Cannot create " + parent.getAbsolutePath());
             }
             try (FileOutputStream out = new FileOutputStream(scriptFile)) {
-                out.write(buildWebScript(def, agent, webPassword)
+                out.write(buildWebScript(def, agent)
                     .getBytes(StandardCharsets.UTF_8));
             }
             scriptFile.setReadable(true, true);
@@ -2061,59 +2014,158 @@ public final class AiAgentUtils {
         final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
             new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
             sessionName, sessionName);
-        // OpenCode only: the same script with a "restart" argument first
-        // kills any old serve, then starts a fresh one with the stable
-        // password. It is only started from the dialog's opt-in
-        // "Restart server" action, never automatically.
-        final Runnable startRestartSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
-            new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName, "restart"},
-            sessionName, sessionName);
-        if (def.webKind == WebKind.OPENCODE) {
-            // Probe the port off the UI thread so the dialog can offer
-            // "Restart server" only when a server may already be running.
-            probeAndShowWebDialog(context, def, agent, webPassword,
-                startSession, startRestartSession, onDialogDismissed);
-        } else {
-            showWebDialog(context, def, agent, webPassword, startSession,
-                null, false, onDialogDismissed);
-        }
+        showWebDialog(context, def, agent, startSession, onDialogDismissed);
     }
 
     /**
-     * Probe whether something is listening on a web port, from the app
-     * process (same network namespace as the container — proot shares
-     * it), so the dialog can offer "Restart server" only when a server
-     * may already be running. TRUE = a server answered, FALSE = the port
-     * is definitely closed (connection refused), null = unknown (e.g.
-     * timed out): the restart action is shown then too, since it is
-     * harmless when nothing is running (it just starts a fresh server).
+     * OpenCode web launch, pairing link only (see the
+     * startWebSession javadoc). Writes the pair script, deletes any
+     * stale pairing-link file, shows a progress dialog, starts the
+     * visible session, and polls the rootfs for the link file the
+     * script writes. No password is shown or typed anywhere here.
      */
-    private static Boolean probeWebPort(int port) {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("127.0.0.1", port), WEB_PORT_PROBE_TIMEOUT_MS);
-            return Boolean.TRUE;
-        } catch (java.net.ConnectException e) {
-            return Boolean.FALSE;
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Web port probe failed", e);
-            return null;
+    private static void startOpenCodePairSession(final Context context, final InstalledAgent agent,
+                                                 final Runnable onDialogDismissed) {
+        final AgentDef def = findDef(agent.agentId);
+        if (def == null) return;
+        File rootfs = DistroUtils.containerRootfs(agent.container);
+        if (rootfs == null) {
+            Toast.makeText(context, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
+            return;
         }
+        String scriptName = "termux-web-" + agent.agentId + "-" + agent.container + ".sh";
+        File scriptFile = new File(rootfs, "tmp/" + scriptName);
+        File urlFile = new File(rootfs, "tmp/" + openCodePairUrlFileName(agent.container));
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(buildWebScript(def, agent)
+                    .getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setReadable(true, true);
+            // Delete any stale pairing link first: a link is single-use,
+            // so last launch's file must never be re-opened.
+            urlFile.delete();
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write web launch script", e);
+            Toast.makeText(context, context.getString(R.string.aiagents_web_script_failed,
+                e.getMessage()), Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
+            .getAbsolutePath();
+        if (!new File(prootDistro).isFile()) {
+            Toast.makeText(context, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String sessionName = context.getString(R.string.aiagents_web_session,
+            agent.displayName, agent.distroDisplay);
+        final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
+            new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
+            sessionName, sessionName);
+        final AlertDialog progress = new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(R.string.aiagents_web_opencode_pair_progress)
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+        startSession.run();
+        pollOpenCodePairLink(context, agent, progress, onDialogDismissed);
     }
 
-    /** Probe the OpenCode port off the UI thread, then show the web dialog on it. */
-    private static void probeAndShowWebDialog(final Context context, final AgentDef def,
-                                              final InstalledAgent agent, final String webPassword,
-                                              final Runnable onStartSession,
-                                              final Runnable onStartRestartSession,
-                                              final Runnable onDialogDismissed) {
+    /**
+     * Poll the container rootfs for the pairing-link file, up to 30 s.
+     * The file holds one line: the pairing link, or "ERROR: <reason>".
+     * Posts the result to the UI thread; the progress dialog is
+     * dismissed there and the browser opened (or the failure dialog
+     * shown). Guards against a finishing activity, like the old probe.
+     */
+    private static void pollOpenCodePairLink(final Context context, final InstalledAgent agent,
+                                             final AlertDialog progress,
+                                             final Runnable onDialogDismissed) {
+        final File rootfs = DistroUtils.containerRootfs(agent.container);
         new Thread(() -> {
-            final Boolean running = probeWebPort(def.webPort);
+            String link = null;
+            String error = null;
+            int attempts = OPENCODE_PAIR_WAIT_TIMEOUT_MS / OPENCODE_PAIR_POLL_INTERVAL_MS;
+            for (int i = 0; i < attempts; i++) {
+                try {
+                    Thread.sleep(OPENCODE_PAIR_POLL_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    break;
+                }
+                if (rootfs == null) break;
+                File urlFile = new File(rootfs, "tmp/" + openCodePairUrlFileName(agent.container));
+                String content = null;
+                try {
+                    if (urlFile.isFile()) content = DistroUtils.readFile(urlFile).trim();
+                } catch (Exception e) {
+                    Log.w(LOG_TAG, "Failed to read pairing-link file", e);
+                }
+                if (content == null || content.isEmpty()) continue;
+                if (content.startsWith("ERROR:")) {
+                    error = content.substring("ERROR:".length()).trim();
+                    break;
+                }
+                if (content.startsWith("http://") && content.contains("/auth/connect/")) {
+                    link = content.split("\\s+")[0];
+                    break;
+                }
+                // Any other content is ignored: the script only ever
+                // writes a link or an ERROR line.
+            }
+            if (error == null && link == null) {
+                error = context.getString(R.string.aiagents_web_opencode_pair_timeout);
+            }
+            final String resultLink = link;
+            final String resultError = error;
             new Handler(Looper.getMainLooper()).post(() -> {
+                if (progress != null && progress.isShowing()) progress.dismiss();
                 if (context instanceof Activity && ((Activity) context).isFinishing()) return;
-                showWebDialog(context, def, agent, webPassword, onStartSession,
-                    onStartRestartSession, running != Boolean.FALSE, onDialogDismissed);
+                if (resultLink != null) {
+                    showOpenCodePairSuccess(context, agent, resultLink, onDialogDismissed);
+                } else {
+                    showOpenCodePairFailure(context, agent, resultError, onDialogDismissed,
+                        () -> startOpenCodePairSession(context, agent, onDialogDismissed));
+                }
             });
         }).start();
+    }
+
+    /** Open the pairing link in the browser and show it (copyable) as a fallback. */
+    private static void showOpenCodePairSuccess(final Context context, final InstalledAgent agent,
+                                                final String pairLink,
+                                                final Runnable onDialogDismissed) {
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(pairLink));
+        context.startActivity(intent);
+        new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(context.getString(R.string.aiagents_web_opencode_pair_msg, pairLink))
+            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+    }
+
+    /** Pairing failed: show the reason and offer Retry (mint a fresh link). */
+    private static void showOpenCodePairFailure(final Context context, final InstalledAgent agent,
+                                                final String reason,
+                                                final Runnable onDialogDismissed,
+                                                final Runnable onRetry) {
+        new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(context.getString(R.string.aiagents_web_opencode_pair_failed, reason))
+            .setPositiveButton(R.string.aiagents_retry, (dialog, which) -> {
+                if (onRetry != null) onRetry.run();
+            })
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
     }
 
     /**
@@ -2131,21 +2183,18 @@ public final class AiAgentUtils {
     }
 
     /**
-     * Explanation dialog for a web launch; OpenCode also gets an "Open browser" button.
-     * The positive button starts the session (and, for OpenCode, opens the
-     * browser); Cancel starts nothing. The dismiss listener still runs
-     * onDialogDismissed in every case, including Cancel. OpenCode shows a
-     * neutral "Restart server" button only when showRestart is true (a
-     * server may already be running, probed before the dialog): it starts
-     * the same script with a "restart" argument and opens the browser.
-     * The first web launch appends the one-time battery hint to the
-     * message (see consumeWebBatteryHint).
+     * Explanation dialog for a web launch (dsh / Pi / Hermes).
+     * OpenCode never reaches this dialog: it uses
+     * startOpenCodePairSession instead (pairing link only, no
+     * password). The positive button starts the session (and, for
+     * Hermes, opens the browser); Cancel starts nothing. The dismiss
+     * listener still runs onDialogDismissed in every case, including
+     * Cancel. The first web launch appends the one-time battery hint
+     * to the message (see consumeWebBatteryHint).
      */
     private static void showWebDialog(final Context context, final AgentDef def,
-                                      final InstalledAgent agent, final String webPassword,
+                                      final InstalledAgent agent,
                                       final Runnable onStartSession,
-                                      final Runnable onStartRestartSession,
-                                      final boolean showRestart,
                                       final Runnable onDialogDismissed) {
         AlertDialog.Builder builder = new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
@@ -2188,30 +2237,6 @@ public final class AiAgentUtils {
                     .setNegativeButton(android.R.string.cancel, null);
                 break;
             }
-            case OPENCODE: {
-                String message = context.getString(R.string.aiagents_web_opencode_msg, webPassword);
-                if (showRestart) {
-                    message += "\n" + context.getString(R.string.aiagents_web_restart_note);
-                }
-                if (batteryHint != null) message += "\n\n" + batteryHint;
-                builder.setMessage(message)
-                    .setPositiveButton(R.string.aiagents_web_open_browser, (dialog, which) -> {
-                        if (onStartSession != null) onStartSession.run();
-                        Intent intent = new Intent(Intent.ACTION_VIEW,
-                            Uri.parse("http://127.0.0.1:" + def.webPort));
-                        context.startActivity(intent);
-                    })
-                    .setNegativeButton(android.R.string.cancel, null);
-                if (showRestart) {
-                    builder.setNeutralButton(R.string.aiagents_web_restart_server, (dialog, which) -> {
-                        if (onStartRestartSession != null) onStartRestartSession.run();
-                        Intent intent = new Intent(Intent.ACTION_VIEW,
-                            Uri.parse("http://127.0.0.1:" + def.webPort));
-                        context.startActivity(intent);
-                    });
-                }
-                break;
-            }
             default:
                 return;
         }
@@ -2219,7 +2244,7 @@ public final class AiAgentUtils {
     }
 
     /** The script a web launch runs inside the container (as root). */
-    private static String buildWebScript(AgentDef def, InstalledAgent agent, String webPassword) {
+    private static String buildWebScript(AgentDef def, InstalledAgent agent) {
         StringBuilder s = new StringBuilder();
         s.append("#!/bin/bash\n");
         s.append("# Generated by Termux \"AI 助手\" web launch - do not edit.\n");
@@ -2233,47 +2258,24 @@ public final class AiAgentUtils {
                 s.append("dsh web --no-open\n");
                 break;
             case OPENCODE:
-                s.append("echo \"正在启动 OpenCode 网页版（").append(agent.distroDisplay).append("）…\"\n");
-                s.append("echo \"地址：http://127.0.0.1:").append(def.webPort).append("\"\n");
-                s.append("echo \"密码：").append(webPassword).append("（也在手机弹出的对话框里）\"\n");
-                s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
-                s.append("export OPENCODE_PASSWORD=\"").append(webPassword).append("\"\n");
-                s.append("export OPENCODE_SERVER_PASSWORD=\"").append(webPassword).append("\"\n");
-                // Opt-in restart (only when the script is run with a
-                // "restart" argument, i.e. from the dialog's "Restart
-                // server" action — never automatically): kill any old
-                // serve first, so a server started before the stable
-                // password (with a random password) cannot keep holding
-                // the port while the dialog shows the new one. The pkill
-                // pattern matches only our own serve invocation
-                // ("opencode serve --hostname 127.0.0.1 --port 4096");
-                // the script's own cmdline is "bash /tmp/termux-web-*.sh"
-                // and does not match. If pkill is missing, or the port
-                // never frees, the guard below prints the already-running
-                // message instead of starting a second server.
-                s.append("if [ \"$1\" = \"restart\" ]; then\n");
-                s.append("    echo \"正在重启 OpenCode 网页版…\"\n");
-                s.append("    if command -v pkill >/dev/null 2>&1; then\n");
-                s.append("        pkill -f \"opencode serve --hostname 127.0.0.1 --port ").append(def.webPort).append("\" 2>/dev/null || true\n");
-                s.append("        for i in 1 2 3 4 5 6 7 8 9 10; do\n");
-                s.append("            (exec 3<>/dev/tcp/127.0.0.1/").append(def.webPort).append(") 2>/dev/null || break\n");
-                s.append("            sleep 1\n");
-                s.append("        done\n");
-                s.append("    else\n");
-                s.append("        echo \"没有找到 pkill，无法停掉旧服务，改用已有服务。\"\n");
-                s.append("    fi\n");
-                s.append("fi\n");
-                // If a server is already listening on the port (e.g. the
-                // user tapped web launch twice), do not start a second one:
-                // it would fail to bind and the session would exit. The
-                // password is stable, so the running server already
-                // accepts it — just point at the browser instead.
-                s.append("if (exec 3<>/dev/tcp/127.0.0.1/").append(def.webPort).append(") 2>/dev/null; then\n");
-                s.append("    echo \"OpenCode 网页版已经在运行，密码不变，直接在浏览器里打开上面的地址登录即可。\"\n");
-                s.append("    read -r -p \"按回车关闭此会话\"\n");
-                s.append("    exit 0\n");
-                s.append("fi\n");
-                s.append("opencode serve --hostname 127.0.0.1 --port ").append(def.webPort).append("\n");
+                // Pairing link only (see the startWebSession javadoc):
+                // the official way to open the web UI. `opencode pair`
+                // starts the background service itself when needed, so
+                // the app does no service setup at all: no fixed port,
+                // no password, no standalone serve. The script writes
+                // the first /auth/connect/ link (one line) to the
+                // pairing-link file the app polls, or an
+                // "ERROR: <reason>" line on failure.
+                s.append("echo \"正在生成 OpenCode 配对链接（").append(agent.distroDisplay).append("）…\"\n");
+                s.append("URL_FILE=\"/tmp/").append(openCodePairUrlFileName(agent.container)).append("\"\n");
+                s.append("rm -f \"$URL_FILE\"\n");
+                s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; echo \"ERROR: opencode not installed\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("PAIR_OUT=\"$(opencode pair 2>&1)\"\n");
+                s.append("LINK=\"$(printf '%s\\n' \"$PAIR_OUT\" | grep -m 1 -o 'http[s]*://[^ ]*/auth/connect/[^ ]*')\"\n");
+                s.append("if [ -z \"$LINK\" ]; then printf '%s\\n' \"$PAIR_OUT\"; echo \"配对链接生成失败。\"; ERR=\"$(printf '%s\\n' \"$PAIR_OUT\" | head -n 1)\"; [ -n \"$ERR\" ] || ERR=\"could not mint a pairing link\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+                s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
+                s.append("echo \"配对链接：$LINK（一次有效，5 分钟内打开）\"\n");
+                s.append("read -r -p \"按回车关闭此会话\" || true\n");
                 break;
             case PI:
                 s.append("echo \"正在启动 Pi 网页版（").append(agent.distroDisplay).append("）…\"\n");
@@ -2499,12 +2501,8 @@ public final class AiAgentUtils {
         "            exec proot-distro login \"$container\" -- dsh web --no-open \"$@\"\n" +
         "            ;;\n" +
         "        opencode)\n" +
-        "            echo \"启动 OpenCode 网页版（$container）…\"\n" +
-        "            PW_FILE=\"$PREFIX/var/lib/proot-distro/containers/$container/rootfs/root/.termux-aiagents/opencode-web-password\"\n" +
-        "            [ -f \"$PW_FILE\" ] || PW_FILE=\"$PREFIX/var/lib/proot-distro/installed-rootfs/$container/root/.termux-aiagents/opencode-web-password\"\n" +
-        "            PW=$(cat \"$PW_FILE\" 2>/dev/null)\n" +
-        "            if [ -n \"$PW\" ]; then echo \"地址：http://127.0.0.1:4096，密码：$PW（固定密码，和弹框里的一样）。\"; else echo \"地址：http://127.0.0.1:4096，密码见会话里的 server password 一行。\"; fi\n" +
-        "            exec proot-distro login \"$container\" -- bash -c 'PW=$(cat /root/.termux-aiagents/opencode-web-password 2>/dev/null); [ -n \"$PW\" ] && export OPENCODE_PASSWORD=\"$PW\" OPENCODE_SERVER_PASSWORD=\"$PW\"; exec opencode serve --hostname 127.0.0.1 --port 4096 \"$@\"' _ \"$@\"\n" +
+        "            echo \"生成 OpenCode 配对链接（$container）…\"\n" +
+        "            exec proot-distro login \"$container\" -- bash -c 'PAIR_OUT=\"$(opencode pair 2>&1)\"; LINK=\"$(printf \"%s\\n\" \"$PAIR_OUT\" | grep -m 1 -o \"http[s]*://[^ ]*/auth/connect/[^ ]*\")\"; if [ -z \"$LINK\" ]; then printf \"%s\\n\" \"$PAIR_OUT\"; echo \"配对链接生成失败。\"; else echo \"配对链接：$LINK（一次有效，5 分钟内打开）\"; fi; read -r -p \"按回车关闭此会话\" || true'\n" +
         "            ;;\n" +
         "        pi)\n" +
         "            echo \"启动 Pi 网页版（$container）…\"\n" +
