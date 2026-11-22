@@ -38,6 +38,25 @@
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
+    <!-- Android 11+ package visibility: without this the app can only
+        see a handful of installed apps, so queryIntentActivities for
+        http(s) VIEW intents would miss browsers like Chrome and the
+        Settings browser list would show only the system default.
+        This declares the intents the app queries; no user grant and
+        no broad package-query permission are needed. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".app.TermuxApplication"
         android:allowBackup="false"

@@ -68,6 +68,7 @@ public class AiAgentSettingsActivity extends AppCompatActivity {
 
         List<AiAgentUtils.BrowserChoice> browsers = AiAgentUtils.listWebBrowsers(this);
         String savedPackage = AiAgentUtils.getWebBrowserPackage(this);
+        String defaultPackage = AiAgentUtils.getSystemDefaultBrowserPackage(this);
         RadioGroup browserGroup = new RadioGroup(this);
         browserGroup.setOrientation(RadioGroup.VERTICAL);
         root.addView(browserGroup);
@@ -76,7 +77,11 @@ public class AiAgentSettingsActivity extends AppCompatActivity {
         systemButton.setText(R.string.aiagent_settings_browser_system);
         systemButton.setTag("");
         browserGroup.addView(systemButton);
-        if (savedPackage == null || savedPackage.isEmpty()) {
+        // A saved package that is the current system default is shown
+        // as "system default": the default browser is no longer listed
+        // by name, so without this no row would be checked.
+        if (savedPackage == null || savedPackage.isEmpty()
+                || savedPackage.equals(defaultPackage)) {
             systemButton.setChecked(true);
         }
         for (AiAgentUtils.BrowserChoice browser : browsers) {

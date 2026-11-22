@@ -1947,7 +1947,19 @@ public final class AiAgentUtils {
      *   in, so a bare address is never opened. The script keeps
      *   watching its log until the token URL appears; if `dsh web`
      *   exits without printing one, the script writes ERROR and the
-     *   app shows the failure plus the log tail. There is no
+     *   app shows the failure plus the log tail. The token URL is
+     *   printed before the service is fully ready: on-device
+     *   2026-11-23 (0.06) the app opened the complete token link at
+     *   once and the browser landed on a "forbidden" page at the
+     *   clean address, while the same link pasted a few seconds
+     *   later worked. The likely cause (inferred, not proven
+     *   on-device) is that the first request hits the Host/Origin
+     *   trust check while it is still initialising and gets 403.
+     *   So after the token appears the script probes a token-less
+     *   GET of the root until it answers 401 (ready, only the token
+     *   exchange is missing; 403 or no answer means keep waiting)
+     *   and only then writes the URL file; the probe never sends
+     *   the token. There is no
      *   timeout: cancelling the progress dialog stops the wait and
      *   nothing opens afterwards, even if a token link appears later.
      * - OpenCode (v2.3.2): there is NO `opencode web` command in v2, and
@@ -2500,16 +2512,48 @@ public final class AiAgentUtils {
         }
     }
 
+    /** Package of the browser Android would open for an http link
+     * when no browser is chosen in the app ("" when none is set:
+     * then the system shows a chooser). Used to keep the
+     * system-default browser out of listWebBrowsers, so it only
+     * appears once, as the "system default" row in Settings. When
+     * no default is set Android answers the system resolver
+     * (chooser) activity instead of a browser; that is "" too. */
+    public static String getSystemDefaultBrowserPackage(Context context) {
+        if (context == null) return "";
+        try {
+            PackageManager pm = context.getPackageManager();
+            Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1"));
+            probe.addCategory(Intent.CATEGORY_BROWSABLE);
+            ResolveInfo resolved = pm.resolveActivity(probe, PackageManager.MATCH_DEFAULT_ONLY);
+            if (resolved == null || resolved.activityInfo == null) return "";
+            String pkg = resolved.activityInfo.packageName;
+            if (pkg == null || pkg.equals(context.getPackageName())) return "";
+            if ("android".equals(pkg)) return "";
+            String cls = resolved.activityInfo.name;
+            if (cls != null && (cls.endsWith("ResolverActivity")
+                    || cls.endsWith("ChooserActivity"))) return "";
+            return pkg;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to resolve default browser", e);
+            return "";
+        }
+    }
+
     /** Browsers installed on this phone that can open an http link,
      * sorted by label, de-duplicated by package. Termux itself is
-     * excluded. The list is built live: a browser installed after
-     * the last settings visit shows up, an uninstalled one does not.
-     * Returns an empty list when nothing can open http links. */
+     * excluded, and so is the system-default browser: it is already
+     * the "system default" row in Settings, so listing it again by
+     * name would show the same browser twice. The list is built
+     * live: a browser installed after the last settings visit shows
+     * up, an uninstalled one does not. Returns an empty list when
+     * nothing can open http links. */
     public static List<BrowserChoice> listWebBrowsers(Context context) {
         List<BrowserChoice> out = new ArrayList<>();
         if (context == null) return out;
         PackageManager pm = context.getPackageManager();
         Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1"));
+        probe.addCategory(Intent.CATEGORY_BROWSABLE);
         List<ResolveInfo> infos;
         try {
             infos = pm.queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY);
@@ -2518,11 +2562,13 @@ public final class AiAgentUtils {
             return out;
         }
         if (infos == null) return out;
+        String defaultPkg = getSystemDefaultBrowserPackage(context);
         Map<String, String> byPackage = new LinkedHashMap<>();
         for (ResolveInfo info : infos) {
             if (info == null || info.activityInfo == null) continue;
             String pkg = info.activityInfo.packageName;
             if (pkg == null || pkg.equals(context.getPackageName())) continue;
+            if (pkg.equals(defaultPkg)) continue;
             if (!byPackage.containsKey(pkg)) {
                 CharSequence label = info.loadLabel(pm);
                 byPackage.put(pkg, label == null ? pkg : label.toString());
@@ -2628,10 +2674,24 @@ public final class AiAgentUtils {
                 // address was printed before the token URL, and opening
                 // the bare address cannot sign the browser in, so a
                 // bare address is never written to the URL file. The
-                // loop below waits without a time limit until the token
-                // URL appears; if `dsh web` exits first, it writes
-                // ERROR so the app shows the failure plus the log tail.
-                // The app-side wait is cancelled only by the user
+                // token URL is printed before the service is fully
+                // ready: on-device 2026-11-23 (0.06) the app opened the
+                // complete token link at once and the browser landed on
+                // a "forbidden" page at the clean address, while the
+                // same link pasted a few seconds later worked. The
+                // likely cause (inferred, not proven on-device) is that
+                // the first request hits the Host/Origin trust check
+                // while it is still initialising and gets 403, and the
+                // browser never retries. So after the token appears the
+                // script probes a token-less GET of the root until it
+                // answers 401 (ready, only the token exchange is
+                // missing; a 200 also counts as ready) and only then
+                // writes the URL file; 403 or no answer means keep
+                // waiting. The probe never sends the token, so it
+                // cannot consume it. Both waits have no time limit;
+                // if `dsh web` exits first, the script writes ERROR so
+                // the app shows the failure plus the log tail. The
+                // app-side wait is cancelled only by the user
                 // (progress dialog Cancel), which stops the poll
                 // thread; the script itself keeps the session alive.
                 s.append("echo \"正在启动 dsh 网页版（").append(agent.distroDisplay).append("）…\"\n");
@@ -2643,8 +2703,25 @@ public final class AiAgentUtils {
                 s.append("dsh web --no-open >\"$LOG_FILE\" 2>&1 &\n");
                 s.append("DSH_PID=$!\n");
                 s.append("LINK=\"\"\n");
+                s.append("probe_dsh_ready() {\n");
+                s.append("    if command -v curl >/dev/null 2>&1; then\n");
+                s.append("        local CODE=\"$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \"$PROBE_URL\" 2>/dev/null)\"\n");
+                s.append("        [ \"$CODE\" = \"401\" ] || [ \"$CODE\" = \"200\" ]\n");
+                s.append("        return $?\n");
+                s.append("    fi\n");
+                s.append("    if command -v wget >/dev/null 2>&1; then\n");
+                s.append("        local CODE=\"$(wget -q -T 3 -S -O /dev/null \"$PROBE_URL\" 2>&1 | grep -m 1 -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | cut -d' ' -f2)\"\n");
+                s.append("        [ \"$CODE\" = \"401\" ] || [ \"$CODE\" = \"200\" ]\n");
+                s.append("        return $?\n");
+                s.append("    fi\n");
+                s.append("    return 0\n");
+                s.append("}\n");
                 s.append("while true; do LINK=\"$(grep -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null | grep -m 1 'token=')\"; [ -n \"$LINK\" ] && break; kill -0 \"$DSH_PID\" 2>/dev/null || break; sleep 1; done\n");
                 s.append("if [ -z \"$LINK\" ]; then echo \"dsh 网页版地址没找到（服务已退出）。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"dsh web exited without printing a token link\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+                s.append("PROBE_URL=\"${LINK%%\\?*}\"\n");
+                s.append("READY=0\n");
+                s.append("while true; do if probe_dsh_ready; then READY=1; break; fi; kill -0 \"$DSH_PID\" 2>/dev/null || break; sleep 1; done\n");
+                s.append("if [ \"$READY\" -eq 0 ]; then echo \"dsh 网页版没有就绪（服务已退出）。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"dsh web exited before becoming ready\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
                 s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
                 s.append("echo \"dsh 网页版地址：$LINK\"\n");
                 s.append("wait \"$DSH_PID\"\n");
