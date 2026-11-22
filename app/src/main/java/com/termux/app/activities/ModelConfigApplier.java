@@ -364,6 +364,7 @@ public final class ModelConfigApplier {
         rebuildModelEnvFile(context, rootfs, container);
         if (!stillApplied) {
             removeBashrcMarker(rootfs);
+            removeProfileMarker(rootfs);
         }
     }
 
@@ -565,6 +566,12 @@ public final class ModelConfigApplier {
         if (!PromptThemeSync.writeFileAtomically(envFile, builder.toString())) return;
         if (PromptThemeSync.isBashContainer(rootfs)) {
             ensureBashrcMarker(rootfs);
+        } else {
+            // Non-bash containers (Alpine: root shell is /bin/ash, which
+            // never reads .bashrc): the same source block goes into
+            // ~/.profile, which a login shell does read. model-env.sh
+            // is plain `export VAR='value'` lines, so ash sources it.
+            ensureProfileMarker(rootfs);
         }
     }
 
@@ -634,6 +641,50 @@ public final class ModelConfigApplier {
             builder.append(line).append('\n');
         }
         PromptThemeSync.writeFileAtomically(bashrc, builder.toString());
+    }
+
+    /** Same managed source block as ensureBashrcMarker, but in ~/.profile
+     * for non-bash containers (see rebuildModelEnvFile). Only ever
+     * called when the container is not bash, so a bash container never
+     * gains a duplicate block in .profile. */
+    private static void ensureProfileMarker(File rootfs) {
+        File profile = new File(homeDir(rootfs), ".profile");
+        String content = PromptThemeSync.readFileOrEmpty(profile);
+        if (content.contains(BASHRC_MARKER_BEGIN)) return;
+        StringBuilder builder = new StringBuilder(content);
+        if (builder.length() > 0 && builder.charAt(builder.length() - 1) != '\n') {
+            builder.append('\n');
+        }
+        builder.append(BASHRC_MANAGED_COMMENT).append('\n');
+        builder.append(BASHRC_MARKER_BEGIN).append('\n');
+        builder.append(BASHRC_SOURCE_LINE).append('\n');
+        builder.append(BASHRC_MARKER_END).append('\n');
+        if (!PromptThemeSync.writeFileAtomically(profile, builder.toString())) {
+            Log.w(LOG_TAG, "Failed to write " + profile.getAbsolutePath());
+        }
+    }
+
+    /** Remove the managed source block from ~/.profile (see removeBashrcMarker). */
+    private static void removeProfileMarker(File rootfs) {
+        File profile = new File(homeDir(rootfs), ".profile");
+        String content = PromptThemeSync.readFileOrEmpty(profile);
+        if (!content.contains(BASHRC_MARKER_BEGIN)) return;
+        String[] lines = content.split("\n", -1);
+        StringBuilder builder = new StringBuilder();
+        boolean inBlock = false;
+        for (String line : lines) {
+            if (line.equals(BASHRC_MARKER_BEGIN)) {
+                inBlock = true;
+                continue;
+            }
+            if (inBlock) {
+                if (line.equals(BASHRC_MARKER_END)) inBlock = false;
+                continue;
+            }
+            if (line.equals(BASHRC_MANAGED_COMMENT)) continue;
+            builder.append(line).append('\n');
+        }
+        PromptThemeSync.writeFileAtomically(profile, builder.toString());
     }
 
     /** Root's home inside the container (from /etc/passwd, /root fallback). */

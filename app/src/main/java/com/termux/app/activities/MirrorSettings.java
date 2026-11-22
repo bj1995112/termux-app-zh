@@ -407,7 +407,15 @@ public final class MirrorSettings {
     /** Shell snippet that installs Node 24 from the npmmirror binary tarball
      *  (NodeSource has no Chinese mirror). Resolves the newest v24.x from
      *  the npmmirror index, falls back to a known-good version, then verifies
-     *  Node >= 24.9 with the same node_ok() check the script already uses. */
+     *  Node >= 24.9 with the same node_ok() check the script already uses.
+     *  After linking node/npm/npx, the npm global prefix is pinned to
+     *  /usr/local (npm config set prefix /usr/local, written to root's
+     *  ~/.npmrc), so later npm -g installs land in /usr/local/bin and
+     *  /usr/local/lib/node_modules instead of the tarball's own dirs —
+     *  the tarball's npm defaults its prefix to the tarball dir itself.
+     *  Only runs for Ubuntu/Debian with a non-official preset (see
+     *  AiAgentsActivity.nodeInstallCommand); Alpine never runs it (apk
+     *  path — and the glibc tarball cannot run on musl anyway). */
     public static String nodeTarballInstallCommand() {
         return "NODE_VER=$(curl -fsSL --max-time 15 " + NODE_TARBALL_INDEX_URL
                 + " 2>/dev/null | grep -o '\"version\":\"v24\\.[0-9.]*\"' | grep -o 'v24\\.[0-9.]*' | sort -V | tail -1)\n"
@@ -417,7 +425,8 @@ public final class MirrorSettings {
                 + " && tar -xJf /tmp/node.tar.xz -C /usr/local/lib/nodejs"
                 + " && ln -sf /usr/local/lib/nodejs/node-$NODE_VER-linux-arm64/bin/node /usr/local/bin/node"
                 + " && ln -sf /usr/local/lib/nodejs/node-$NODE_VER-linux-arm64/bin/npm /usr/local/bin/npm"
-                + " && ln -sf /usr/local/lib/nodejs/node-$NODE_VER-linux-arm64/bin/npx /usr/local/bin/npx";
+                + " && ln -sf /usr/local/lib/nodejs/node-$NODE_VER-linux-arm64/bin/npx /usr/local/bin/npx"
+                + " && /usr/local/bin/npm config set prefix /usr/local";
     }
 
     // ------------------------------------------------------------------

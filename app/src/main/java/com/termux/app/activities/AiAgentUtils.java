@@ -125,7 +125,8 @@ public final class AiAgentUtils {
     public enum VersionKind {
         /** No local version file known: show installed without a version. */
         NONE,
-        /** <prefix>/lib/node_modules/<npm package>/package.json "version". */
+        /** <prefix>/lib/node_modules/<npm package>/package.json "version"
+         *  (see probeNpmPackageJson for the prefixes searched). */
         NPM_PACKAGE_JSON,
         /** ~/.codex/packages/standalone/releases/<version>/ directory names. */
         CODEX_RELEASES,
@@ -240,7 +241,7 @@ public final class AiAgentUtils {
             WebKind.NONE, 0, true),
         new AgentDef("pi", "Pi", R.string.aiagents_desc_pi, true, "pi",
             "",
-            new String[]{"usr/bin/pi", "usr/local/bin/pi"},
+            new String[]{"usr/bin/pi", "usr/local/bin/pi", "root/.npm-global/bin/pi"},
             VersionKind.NPM_PACKAGE_JSON, "@earendil-works/pi-coding-agent",
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
@@ -254,17 +255,17 @@ public final class AiAgentUtils {
             WebKind.NONE, 0, true),
         new AgentDef("dsh", "DeepSeek Harness", R.string.aiagents_desc_dsh, true, "dsh",
             "",
-            new String[]{"usr/bin/dsh", "usr/local/bin/dsh"},
+            new String[]{"usr/bin/dsh", "usr/local/bin/dsh", "root/.npm-global/bin/dsh"},
             VersionKind.NPM_PACKAGE_JSON, "@deepseek-ai/dsh",
             "npm install -g @deepseek-ai/dsh",
             "old_ver=$(npm list -g @deepseek-ai/dsh --depth=0 2>/dev/null | grep -oE '@deepseek-ai/dsh@[0-9][^ ]*' | cut -d@ -f3); if [ -n \"$old_ver\" ]; then echo \"当前版本：$old_ver；如需回退：npm install -g @deepseek-ai/dsh@$old_ver\"; fi; npm install -g @deepseek-ai/dsh",
             WebKind.DSH, 3080, false),
         new AgentDef("opencode", "OpenCode", R.string.aiagents_desc_opencode, true, "opencode",
             "",
-            new String[]{"usr/bin/opencode", "usr/local/bin/opencode"},
+            new String[]{"usr/bin/opencode", "usr/local/bin/opencode", "root/.npm-global/bin/opencode"},
             VersionKind.NPM_PACKAGE_JSON, "@opencode/cli",
-            "npm install -g @opencode/cli",
-            "npm install -g @opencode/cli",
+            "npm install -g --allow-scripts=@opencode/cli @opencode/cli",
+            "npm install -g --allow-scripts=@opencode/cli @opencode/cli",
             WebKind.OPENCODE, 4096, true),
         new AgentDef("aider", "Aider", R.string.aiagents_desc_aider, false, "aider",
             ".local/bin/aider",
@@ -281,7 +282,7 @@ public final class AiAgentUtils {
             // ~/.local/bin, so that path stays first. probeVersion falls
             // back to the npm package.json when the versions/ dir is empty.
             new String[]{"root/.local/bin/claude", "usr/bin/claude",
-                "usr/local/bin/claude"},
+                "usr/local/bin/claude", "root/.npm-global/bin/claude"},
             VersionKind.CLAUDE_VERSIONS, "@anthropic-ai/claude-code",
             "curl -fsSL https://claude.ai/install.sh | bash",
             "\"$HOME/.local/bin/claude\" update",
@@ -428,6 +429,48 @@ public final class AiAgentUtils {
             // why Pi was detected and Codex was not.)
             if (Files.isSymbolicLink(file.toPath()) || file.isFile()) return bin;
         }
+        // npm agents installed under a Node tarball's own npm prefix
+        // (see probeNpmPackageJson): the binary is linked into
+        // <tarball>/bin, which is neither on PATH nor in binPaths, so
+        // the static list above cannot see it. Any node-v* dir counts;
+        // newest first so a re-installed newer Node wins.
+        if (def.npmPackage != null) {
+            String tarballBin = findTarballBinPath(rootfs, def.command);
+            if (tarballBin != null) return tarballBin;
+        }
+        return null;
+    }
+
+    /** Rootfs-relative path of <command> under a Node tarball's own bin
+     * dir (usr/local/lib/nodejs/node-v*/bin/<command>), or null. The
+     * link itself counts (same absolute-symlink rule as findBinPath:
+     * npm's links are relative, but a link must never be followed out
+     * of the container from the host side). */
+    private static String findTarballBinPath(File rootfs, String command) {
+        File nodejsDir = new File(rootfs, "usr/local/lib/nodejs");
+        if (!nodejsDir.isDirectory()) return null;
+        File[] children = nodejsDir.listFiles();
+        if (children == null) return null;
+        List<String> tarballs = new ArrayList<>();
+        for (File child : children) {
+            if (child.isDirectory() && child.getName().startsWith("node-v")) {
+                tarballs.add(child.getName());
+            }
+        }
+        if (tarballs.isEmpty()) return null;
+        Collections.sort(tarballs, (a, b) -> {
+            String versionA = nodeDirVersion(a);
+            String versionB = nodeDirVersion(b);
+            if (versionA.isEmpty() && versionB.isEmpty()) return 0;
+            if (versionA.isEmpty()) return 1;
+            if (versionB.isEmpty()) return -1;
+            return compareVersions(versionB, versionA);
+        });
+        for (String dir : tarballs) {
+            String rel = "usr/local/lib/nodejs/" + dir + "/bin/" + command;
+            File file = new File(rootfs, rel);
+            if (Files.isSymbolicLink(file.toPath()) || file.isFile()) return rel;
+        }
         return null;
     }
 
@@ -439,16 +482,7 @@ public final class AiAgentUtils {
         try {
             switch (def.versionKind) {
                 case NPM_PACKAGE_JSON:
-                    for (String prefix : new String[]{"usr/lib", "usr/local/lib"}) {
-                        File pkg = new File(rootfs,
-                            prefix + "/node_modules/" + def.npmPackage + "/package.json");
-                        if (pkg.isFile()) {
-                            String version = new JSONObject(DistroUtils.readFile(pkg))
-                                .optString("version", "");
-                            if (!version.isEmpty()) return version;
-                        }
-                    }
-                    return "";
+                    return probeNpmPackageJson(rootfs, def.npmPackage);
                 case CODEX_RELEASES:
                     return probeMaxVersionDir(
                         new File(rootfs, "root/.codex/packages/standalone/releases"));
@@ -467,6 +501,92 @@ public final class AiAgentUtils {
             Log.w(LOG_TAG, "Failed to probe version for " + def.id, e);
             return "";
         }
+    }
+
+    /** Version of an npm package from its package.json, searching every
+     * npm global prefix the app can produce, in order:
+     * <ul>
+     * <li>distro-packaged Node and NodeSource (prefix /usr):
+     * usr/lib/node_modules/&lt;pkg&gt;/package.json — npm's prefix
+     * defaults to where node is installed, so every distro package
+     * (Arch pacman, Alpine apk, Fedora dnf, openSUSE zypper, Void
+     * xbps) lands here;</li>
+     * <li>tarball-redirected prefix (prefix /usr/local):
+     * usr/local/lib/node_modules/&lt;pkg&gt;/package.json — what
+     * nodeTarballInstallCommand sets for new installs;</li>
+     * <li>user-level prefix:
+     * root/.npm-global/lib/node_modules/&lt;pkg&gt;/package.json;</li>
+     * <li>a Node tarball's own prefix (before the /usr/local
+     * redirect existed): usr/local/lib/nodejs/node-v*/lib/
+     * node_modules/&lt;pkg&gt;/package.json, newest node-v* first.</li>
+     * </ul>
+     * "" when no prefix has the package. Shared by probeVersion
+     * (NPM_PACKAGE_JSON) and probeClaudeVersion, so detection, the
+     * version read and the install gate can never drift apart. */
+    private static String probeNpmPackageJson(File rootfs, String npmPackage) {
+        for (String prefix : new String[]{"usr", "usr/local"}) {
+            String version = readNpmPackageVersion(new File(rootfs,
+                prefix + "/lib/node_modules/" + npmPackage + "/package.json"));
+            if (!version.isEmpty()) return version;
+        }
+        String version = readNpmPackageVersion(new File(rootfs,
+            "root/.npm-global/lib/node_modules/" + npmPackage + "/package.json"));
+        if (!version.isEmpty()) return version;
+        return probeTarballNpmPackageJson(rootfs, npmPackage);
+    }
+
+    /** Read "version" from one npm package.json, "" when missing or unreadable. */
+    private static String readNpmPackageVersion(File packageJson) {
+        if (!packageJson.isFile()) return "";
+        try {
+            return new JSONObject(DistroUtils.readFile(packageJson))
+                .optString("version", "");
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read npm package.json " + packageJson, e);
+            return "";
+        }
+    }
+
+    /** Version of an npm package installed under a Node tarball's own
+     * global prefix: usr/local/lib/nodejs/node-v*/lib/node_modules/
+     * &lt;pkg&gt;/package.json. Several node-v* dirs may coexist (Node
+     * was re-installed at a newer version); the newest dir wins. ""
+     * when none has the package. */
+    private static String probeTarballNpmPackageJson(File rootfs, String npmPackage) {
+        File nodejsDir = new File(rootfs, "usr/local/lib/nodejs");
+        if (!nodejsDir.isDirectory()) return "";
+        File[] children = nodejsDir.listFiles();
+        if (children == null) return "";
+        List<String> tarballs = new ArrayList<>();
+        for (File child : children) {
+            if (child.isDirectory() && child.getName().startsWith("node-v")) {
+                tarballs.add(child.getName());
+            }
+        }
+        if (tarballs.isEmpty()) return "";
+        Collections.sort(tarballs, (a, b) -> {
+            String versionA = nodeDirVersion(a);
+            String versionB = nodeDirVersion(b);
+            if (versionA.isEmpty() && versionB.isEmpty()) return 0;
+            if (versionA.isEmpty()) return 1;
+            if (versionB.isEmpty()) return -1;
+            return compareVersions(versionB, versionA);
+        });
+        for (String dir : tarballs) {
+            String version = readNpmPackageVersion(new File(nodejsDir,
+                dir + "/lib/node_modules/" + npmPackage + "/package.json"));
+            if (!version.isEmpty()) return version;
+        }
+        return "";
+    }
+
+    /** "node-v24.22.3" -> "24.22.3"; "" for anything else (sorts last). */
+    private static String nodeDirVersion(String dirName) {
+        if (dirName != null && dirName.startsWith("node-v")) {
+            String version = dirName.substring("node-v".length());
+            return isComparableVersion(version) ? version : "";
+        }
+        return "";
     }
 
     /** Installed Hermes version from the source-install stamp written by
@@ -504,7 +624,7 @@ public final class AiAgentUtils {
         for (File child : children) {
             if (child.isDirectory()
                 && child.getName().matches("[0-9]+\\.[0-9]+\\.[0-9]+.*")) {
-                versions.add(child.getName());
+                versions.add(stripArchTargetSuffix(child.getName()));
             }
         }
         if (versions.isEmpty()) return "";
@@ -512,30 +632,32 @@ public final class AiAgentUtils {
         return versions.get(0);
     }
 
+    /** Strip a Codex-style target suffix ("-aarch64-unknown-linux-musl",
+     * "-x86_64-unknown-linux-gnu") from a release dir name, leaving the
+     * clean version ("0.171.0"). Only fires on a known arch suffix, so
+     * Claude's versions/ dirs — already clean versions — pass through
+     * unchanged, as do prerelease names like "0.2.2-rc.5" (no arch
+     * segment). Without the strip, the suffixed name compared newer
+     * than the same clean version (a release outranks the same number
+     * with a suffix) and every Codex install showed a false update. */
+    private static String stripArchTargetSuffix(String dirName) {
+        if (dirName == null) return "";
+        return dirName.replaceFirst("-(aarch64|x86_64)-unknown-linux-(musl|gnu)$", "");
+    }
+
     /** Installed Claude Code version: the official installer writes
      * ~/.local/share/claude/versions/<version>/, but an npm install
      * (including a pinned older version from the version dialog) lands
      * in /usr/lib or /usr/local/lib/node_modules and writes no versions/
-     * dir, so fall back to that package.json. The versions/ dir wins
-     * when both exist (the installer path is the one `claude update`
-     * maintains). */
+     * dir, so fall back to that package.json (via probeNpmPackageJson,
+     * which also covers /usr/local, ~/.npm-global and Node tarball
+     * dirs). The versions/ dir wins when both exist (the installer
+     * path is the one `claude update` maintains). */
     private static String probeClaudeVersion(File rootfs) {
         String dirVersion = probeMaxVersionDir(
             new File(rootfs, "root/.local/share/claude/versions"));
         if (!dirVersion.isEmpty()) return dirVersion;
-        for (String prefix : new String[]{"usr/lib", "usr/local/lib"}) {
-            File pkg = new File(rootfs,
-                prefix + "/node_modules/@anthropic-ai/claude-code/package.json");
-            if (!pkg.isFile()) continue;
-            try {
-                String version = new JSONObject(DistroUtils.readFile(pkg))
-                    .optString("version", "");
-                if (!version.isEmpty()) return version;
-            } catch (Exception e) {
-                Log.w(LOG_TAG, "Failed to read Claude npm package.json", e);
-            }
-        }
-        return "";
+        return probeNpmPackageJson(rootfs, "@anthropic-ai/claude-code");
     }
 
     private static String probeAiderVersion(File rootfs) {

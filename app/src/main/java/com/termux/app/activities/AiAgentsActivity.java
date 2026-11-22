@@ -945,6 +945,8 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("check_installed() {\n");
         s.append("  command -v \"$1\" >/dev/null 2>&1 && return 0\n");
         s.append("  [ -n \"$2\" ] && [ -x \"$HOME/$2\" ] && return 0\n");
+        s.append("  for _nb in /usr/local/lib/nodejs/*/bin/\"$1\"; do [ -x \"$_nb\" ] && return 0; done\n");
+        s.append("  [ -n \"$1\" ] && [ -x \"$HOME/.npm-global/bin/$1\" ] && return 0\n");
         s.append("  return 1\n");
         s.append("}\n");
         s.append("record_agy_version() {\n");
@@ -1059,7 +1061,10 @@ public class AiAgentsActivity extends AppCompatActivity {
      * - Pi / dsh / OpenCode / Claude: npm install -g &lt;pkg&gt;@&lt;version&gt;
      *   (Pi keeps --ignore-scripts; Claude must NOT use it — its
      *   postinstall downloads the platform-native binary, and
-     *   bin/claude.exe is only a wrapper without it).
+     *   bin/claude.exe is only a wrapper without it. OpenCode and
+     *   Claude both pass --allow-scripts=&lt;pkg&gt; because npm 11
+     *   skips postinstall scripts that are not explicitly allowed;
+     *   dsh has no postinstall and stays unchanged.)
      * - Aider: uv tool install --force replaces the installed version
      *   in place (no separate uninstall step). --upgrade only goes to
      *   latest, so a pinned install must go through uv directly; uv
@@ -1086,9 +1091,9 @@ public class AiAgentsActivity extends AppCompatActivity {
             case "dsh":
                 return "npm install -g @deepseek-ai/dsh@" + version;
             case "opencode":
-                return "npm install -g @opencode/cli@" + version;
+                return "npm install -g --allow-scripts=@opencode/cli @opencode/cli@" + version;
             case "claude":
-                return "npm install -g @anthropic-ai/claude-code@" + version;
+                return "npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@" + version;
             case "aider":
                 return "command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH=\"$HOME/.local/bin:$PATH\"; }\n"
                     + "  uv tool install --force aider-chat@" + version;
