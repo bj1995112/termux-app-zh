@@ -442,7 +442,7 @@ public final class AiAgentUtils {
     }
 
     /** Rootfs-relative path of <command> under a Node tarball's own bin
-     * dir (usr/local/lib/nodejs/node-v*/bin/<command>), or null. The
+     * dir (usr/local/lib/nodejs/node-v<version>/bin/<command>), or null. The
      * link itself counts (same absolute-symlink rule as findBinPath:
      * npm's links are relative, but a link must never be followed out
      * of the container from the host side). */
@@ -517,7 +517,7 @@ public final class AiAgentUtils {
      * <li>user-level prefix:
      * root/.npm-global/lib/node_modules/&lt;pkg&gt;/package.json;</li>
      * <li>a Node tarball's own prefix (before the /usr/local
-     * redirect existed): usr/local/lib/nodejs/node-v*/lib/
+     * redirect existed): usr/local/lib/nodejs/node-v<version>/lib/
      * node_modules/&lt;pkg&gt;/package.json, newest node-v* first.</li>
      * </ul>
      * "" when no prefix has the package. Shared by probeVersion
@@ -548,7 +548,7 @@ public final class AiAgentUtils {
     }
 
     /** Version of an npm package installed under a Node tarball's own
-     * global prefix: usr/local/lib/nodejs/node-v*/lib/node_modules/
+     * global prefix: usr/local/lib/nodejs/node-v<version>/lib/node_modules/
      * &lt;pkg&gt;/package.json. Several node-v* dirs may coexist (Node
      * was re-installed at a newer version); the newest dir wins. ""
      * when none has the package. */
