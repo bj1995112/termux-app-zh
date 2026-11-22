@@ -47,7 +47,7 @@ jobs:
           sha256sum "termux-app-zh-v${{ inputs.version }}-arm64-v8a.apk"
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TARGET="${{ inputs.commit }}"
           if [ -z "$TARGET" ]; then TARGET="${{ github.sha }}"; fi
