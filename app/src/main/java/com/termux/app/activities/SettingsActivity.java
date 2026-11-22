@@ -64,6 +64,7 @@ public class SettingsActivity extends AppCompatActivity {
                     configureDownloadMirrorPreference(context);
                     configureStoragePreference(context);
                     configureModelConfigPreference(context);
+                    configureAiAgentSettingsPreference(context);
                 }
             }.start();
         }
@@ -165,6 +166,16 @@ public class SettingsActivity extends AppCompatActivity {
             if (modelConfigPreference != null) {
                 modelConfigPreference.setOnPreferenceClickListener(preference -> {
                     context.startActivity(new Intent(context, ModelConfigActivity.class));
+                    return true;
+                });
+            }
+        }
+
+        private void configureAiAgentSettingsPreference(@NonNull Context context) {
+            Preference aiAgentSettingsPreference = findPreference("ai_agent_settings");
+            if (aiAgentSettingsPreference != null) {
+                aiAgentSettingsPreference.setOnPreferenceClickListener(preference -> {
+                    context.startActivity(new Intent(context, AiAgentSettingsActivity.class));
                     return true;
                 });
             }

@@ -25,9 +25,12 @@ package com.termux.app.activities;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -49,6 +52,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
@@ -83,6 +88,34 @@ public final class AiAgentUtils {
 
     /** Interval between pairing-link file polls. */
     private static final int OPENCODE_PAIR_POLL_INTERVAL_MS = 500;
+
+    /** How long the app waits for the Pi web address to appear after
+     * starting pi-webapp (polls every 500 ms). The first launch
+     * downloads pi-webapp via npx, so this is much longer than the
+     * OpenCode/dsh wait. */
+    private static final int PI_WEB_WAIT_TIMEOUT_MS = 120000;
+
+    /** How long the app waits for the dsh web address to appear after
+     * starting `dsh web` (polls every 500 ms). */
+    private static final int DSH_WEB_WAIT_TIMEOUT_MS = 30000;
+
+    /** How long the app waits for the Hermes dashboard port to answer
+     * after starting `hermes dashboard` (probes every 1000 ms). The
+     * first launch downloads pnpm and builds the web UI, so this is
+     * the longest wait of the four web agents. */
+    private static final int HERMES_PORT_WAIT_TIMEOUT_MS = 300000;
+
+    /** Interval between Hermes port probes. */
+    private static final int HERMES_PORT_POLL_INTERVAL_MS = 1000;
+
+    /** Web-browser choice for web launches, stored in the ai_agents
+     * SharedPreferences: the package name of the browser to open web
+     * links with, or "" for the system default. */
+    public static final String PREF_WEB_BROWSER_PACKAGE = "web_browser_package";
+
+    /** Whether tapping a web button opens the browser automatically
+     * (default true). When false the app only shows the link. */
+    public static final String PREF_WEB_AUTO_OPEN = "web_auto_open";
 
     /** Cache file for latest-version checks (Termux home, same place as the
      * distro list cache). Format: {"checkedAt": <epoch ms>,
@@ -1881,40 +1914,29 @@ public final class AiAgentUtils {
 
     /**
      * Start a web-capable agent's server inside its container (visible
-     * session, same script-file method as the install flow) and explain how
-     * to reach it. The explanation dialog is shown FIRST and the session
-     * starts only from its positive button: starting the session first
-     * would switch to the new session and bring TermuxActivity to the
-     * foreground (DistroUtils.startSessionWithExecutable uses
-     * VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY),
-     * hiding the dialog behind the terminal until the user presses Back.
-     * For dsh / Pi / Hermes the dialog is still shown first and the
-     * session starts only from its positive button. For OpenCode the
-     * flow is different, because the pairing link only exists after
-     * `opencode pair` has run: a progress dialog is shown first
-     * ("minting a pairing link"), the session is started from that
-     * dialog, and the app polls the container rootfs for the
-     * pairing-link file the script writes
-     * (/tmp/termux-web-opencode-<container>.url). When the link
-     * appears (up to 30 s) the browser opens it; on failure a dialog
-     * shows the reason and offers Retry. The script does nothing but
-     * run `opencode pair` and take its first /auth/connect/ link: no
-     * fixed port (whatever address pair prints is used as-is), no
-     * password, no standalone serve, and no service setup — `pair`
-     * starts the background service itself when it needs one.
+     * session, same script-file method as the install flow) and open
+     * its web UI in the phone browser. A progress dialog is shown
+     * first, the session is started from it, and the app then waits
+     * for the server to be reachable: for OpenCode / Pi / dsh it
+     * polls the container rootfs for the link file the script writes
+     * (/tmp/termux-web-&lt;agent&gt;-&lt;container&gt;.url); for Hermes
+     * it probes 127.0.0.1:9119 until the dashboard answers. When the
+     * link (or port) appears the browser opens it (Settings &gt; AI 助手
+     * chooses which browser, and whether to open at all); on failure
+     * a dialog shows the reason plus the last lines of the launch
+     * log and offers Retry. The first web launch (any of the four
+     * agents) also appends a one-time battery hint to the success
+     * dialog: the server only stays up while Termux keeps running in
+     * the background, and some phones freeze Termux when it is
+     * backgrounded, which stalls the web UI until Termux is
+     * foregrounded again. The hint is shown at most once
+     * (SharedPreferences flag) and never blocks or delays the launch.
      *
-     * The first web launch (any of the four agents) also appends a
-     * one-time battery hint to the dialog: the server only stays up while
-     * Termux keeps running in the background, and some phones (Vivo and
-     * other aggressive vendors) freeze Termux when it is backgrounded,
-     * which stalls the web UI until Termux is foregrounded again. The
-     * hint is shown at most once (SharedPreferences flag) and never
-     * blocks or delays the launch.
-     *
-     * The four agents differ in what the app can open by itself:
-     * - dsh: `dsh web` serves :3080, but the startup URL carries a fresh
-     *   per-start session token, so the app cannot build a working URL.
-     *   The dialog tells the user to copy the token URL from the session.
+     * The four agents differ in how their address is found:
+     * - dsh: `dsh web` serves :3080, but the startup URL carries a
+     *   fresh per-start session token that cannot be disabled, so
+     *   the app cannot build a working URL. The script captures the
+     *   first http URL from its full log instead.
      * - OpenCode (v2.3.2): there is NO `opencode web` command in v2, and
      *   the browser password form is NOT a documented sign-in path at
      *   all (dev.opencode.ai/docs/cli/web): the password is documented
@@ -1934,26 +1956,24 @@ public final class AiAgentUtils {
      *   reads it.
      * - Pi: the official pi-webapp has no fixed port; the launcher prints
      *   a token-bearing local address, so the app cannot build a URL.
-     *   The dialog tells the user to copy the address from the session
-     *   (or run `npx pi-webapp status` there). PI_WEBAPP_AUTO_OPEN=0
+     *   The script captures the first http URL from its full log, and
+     *   as a second source polls `npx pi-webapp status`. PI_WEBAPP_AUTO_OPEN=0
      *   stops the launcher from trying to open a browser inside the
      *   container. The launcher may exit after starting its background
      *   service, so the script keeps the session open with a read prompt.
      * - Hermes: `hermes dashboard` serves the built-in web UI on fixed
      *   port 9119, binds 127.0.0.1 only and needs no password on
-     *   loopback, so the app opens http://127.0.0.1:9119 directly, like
-     *   OpenCode. The first run downloads pnpm and builds the web UI's
-     *   JavaScript dependencies, so the dialog says to give it a moment.
-     *   The script resolves the `hermes` binary itself (~/.local/bin
+     *   loopback. The first run downloads pnpm and builds the web UI's
+     *   JavaScript dependencies, so the app waits up to 5 minutes for
+     *   the port to answer before opening the browser. The script
+     *   resolves the `hermes` binary itself (~/.local/bin
      *   first, the launcher inside the checkout as fallback) because
      *   ~/.local/bin is not on PATH in the script shell. If a dashboard
      *   is already listening on 9119 (e.g. the user tapped web launch
      *   twice), the script prints so and exits instead of starting a
-     *   second one. No restart action in v1: there is no password to
-     *   resync, and `hermes dashboard --stop` can stop a running
-     *   dashboard from a session if ever needed.
+     *   second one.
      *
-     * @param onDialogDismissed run when the explanation dialog is closed
+     * @param onDialogDismissed run when the web dialog is closed
      *        (DistroActivity passes finish() here); null is fine.
      */
     /** Rootfs-relative file the OpenCode pair script writes the fresh
@@ -1976,6 +1996,237 @@ public final class AiAgentUtils {
             startOpenCodePairSession(context, agent, onDialogDismissed);
             return;
         }
+        switch (def.webKind) {
+            case PI:
+                startWebLinkSession(context, agent, PI_WEB_WAIT_TIMEOUT_MS,
+                    R.string.aiagents_web_pi_progress, R.string.aiagents_web_pi_timeout,
+                    onDialogDismissed);
+                return;
+            case DSH:
+                startWebLinkSession(context, agent, DSH_WEB_WAIT_TIMEOUT_MS,
+                    R.string.aiagents_web_dsh_progress, R.string.aiagents_web_dsh_timeout,
+                    onDialogDismissed);
+                return;
+            case HERMES:
+                startHermesWebSession(context, agent, onDialogDismissed);
+                return;
+            default:
+                return;
+        }
+    }
+
+    /** Rootfs-relative file a web launch script writes its fresh link
+     * into (one line: an http(s) URL). The app polls this file from
+     * the rootfs; the script deletes any stale copy first, so a spent
+     * (single-use) link can never be re-opened. */
+    private static String webUrlFileName(String agentId, String container) {
+        return "termux-web-" + agentId + "-" + container + ".url";
+    }
+
+    /** Rootfs-relative file a web launch script writes its full
+     * stdout/stderr into, so a failure dialog can show the last lines.
+     * On-device only; never uploaded anywhere. */
+    private static String webLogFileName(String agentId, String container) {
+        return "termux-web-" + agentId + "-" + container + ".log";
+    }
+
+    /** Generic web launch for Pi and dsh (and the shape OpenCode
+     * already uses): write the launch script, delete any stale link
+     * and log files, show a progress dialog, start the visible
+     * session, and poll the rootfs for the link file the script
+     * writes. The script, not the app, knows how its agent prints
+     * its address; the app only ever looks for a generic http(s)
+     * URL in the file. */
+    private static void startWebLinkSession(final Context context, final InstalledAgent agent,
+                                            final int timeoutMs, final int progressRes,
+                                            final int timeoutRes,
+                                            final Runnable onDialogDismissed) {
+        final AgentDef def = findDef(agent.agentId);
+        if (def == null) return;
+        File rootfs = DistroUtils.containerRootfs(agent.container);
+        if (rootfs == null) {
+            Toast.makeText(context, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
+            return;
+        }
+        String scriptName = "termux-web-" + agent.agentId + "-" + agent.container + ".sh";
+        File scriptFile = new File(rootfs, "tmp/" + scriptName);
+        File urlFile = new File(rootfs, "tmp/" + webUrlFileName(agent.agentId, agent.container));
+        File logFile = new File(rootfs, "tmp/" + webLogFileName(agent.agentId, agent.container));
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(buildWebScript(def, agent)
+                    .getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setReadable(true, true);
+            // Delete any stale link and log first: a link is single-use,
+            // so last launch's file must never be re-opened.
+            urlFile.delete();
+            logFile.delete();
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write web launch script", e);
+            Toast.makeText(context, context.getString(R.string.aiagents_web_script_failed,
+                e.getMessage()), Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
+            .getAbsolutePath();
+        if (!new File(prootDistro).isFile()) {
+            Toast.makeText(context, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String sessionName = context.getString(R.string.aiagents_web_session,
+            agent.displayName, agent.distroDisplay);
+        final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
+            new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
+            sessionName, sessionName);
+        final AlertDialog progress = new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(progressRes)
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+        startSession.run();
+        final Runnable retry = () -> startWebLinkSession(context, agent, timeoutMs,
+            progressRes, timeoutRes, onDialogDismissed);
+        pollWebLinkFile(context, agent, progress, timeoutMs, timeoutRes, onDialogDismissed, retry);
+    }
+
+    /** Poll the container rootfs for the web-link file, up to
+     * timeoutMs. The file holds one line: the link, or
+     * "ERROR: <reason>". Accepts any http(s) URL (the script already
+     * prefers a token / pairing link when several URLs are printed);
+     * the app never depends on the exact wording around it. */
+    private static void pollWebLinkFile(final Context context, final InstalledAgent agent,
+                                        final AlertDialog progress, final int timeoutMs,
+                                        final int timeoutRes,
+                                        final Runnable onDialogDismissed,
+                                        final Runnable onRetry) {
+        final File rootfs = DistroUtils.containerRootfs(agent.container);
+        new Thread(() -> {
+            String link = null;
+            String error = null;
+            int attempts = timeoutMs / OPENCODE_PAIR_POLL_INTERVAL_MS;
+            for (int i = 0; i < attempts; i++) {
+                try {
+                    Thread.sleep(OPENCODE_PAIR_POLL_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    break;
+                }
+                if (rootfs == null) break;
+                File urlFile = new File(rootfs, "tmp/" + webUrlFileName(agent.agentId, agent.container));
+                String content = null;
+                try {
+                    if (urlFile.isFile()) content = DistroUtils.readFile(urlFile).trim();
+                } catch (Exception e) {
+                    Log.w(LOG_TAG, "Failed to read web-link file", e);
+                }
+                if (content == null || content.isEmpty()) continue;
+                if (content.startsWith("ERROR:")) {
+                    error = content.substring("ERROR:".length()).trim();
+                    break;
+                }
+                if (content.startsWith("http://") || content.startsWith("https://")) {
+                    link = content.split("\\s+")[0];
+                    break;
+                }
+            }
+            if (error == null && link == null) {
+                error = context.getString(timeoutRes);
+            }
+            final String resultLink = link;
+            final String resultError = error;
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (progress != null && progress.isShowing()) progress.dismiss();
+                if (context instanceof Activity && ((Activity) context).isFinishing()) return;
+                if (resultLink != null) {
+                    showWebLinkSuccess(context, agent, resultLink, onDialogDismissed);
+                } else {
+                    showWebLinkFailure(context, agent, resultError, onDialogDismissed, onRetry);
+                }
+            });
+        }).start();
+    }
+
+    /** Open the web link in the browser (unless auto-open is off) and
+     * show it (copyable) as a fallback, with the one-time battery hint
+     * on the first web launch. */
+    private static void showWebLinkSuccess(final Context context, final InstalledAgent agent,
+                                           final String link,
+                                           final Runnable onDialogDismissed) {
+        openWebUrl(context, link);
+        String message = context.getString(R.string.aiagents_web_link_msg, link);
+        String batteryHint = consumeWebBatteryHint(context);
+        if (batteryHint != null) message += "\n\n" + batteryHint;
+        new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+    }
+
+    /** Web launch failed: show the reason plus the last lines of the
+     * launch log (on-device only) and offer Retry. */
+    private static void showWebLinkFailure(final Context context, final InstalledAgent agent,
+                                           final String reason,
+                                           final Runnable onDialogDismissed,
+                                           final Runnable onRetry) {
+        String detail = reason;
+        String logTail = readLogTail(context, agent);
+        if (logTail != null && !logTail.isEmpty()) detail += "\n\n" + logTail;
+        new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(context.getString(R.string.aiagents_web_link_failed, detail))
+            .setPositiveButton(R.string.aiagents_retry, (dialog, which) -> {
+                if (onRetry != null) onRetry.run();
+            })
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+    }
+
+    /** Last 8 lines of the web launch log for this agent, or null when
+     * there is no log file. Shown in the failure dialog only. */
+    private static String readLogTail(final Context context, final InstalledAgent agent) {
+        try {
+            File rootfs = DistroUtils.containerRootfs(agent.container);
+            if (rootfs == null) return null;
+            File logFile = new File(rootfs, "tmp/" + webLogFileName(agent.agentId, agent.container));
+            if (!logFile.isFile()) return null;
+            String content = DistroUtils.readFile(logFile);
+            if (content == null || content.isEmpty()) return null;
+            String[] lines = content.split("\n");
+            int from = Math.max(0, lines.length - 8);
+            StringBuilder out = new StringBuilder();
+            for (int i = from; i < lines.length; i++) {
+                if (out.length() > 0) out.append("\n");
+                out.append(lines[i]);
+            }
+            return out.toString();
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to read web launch log", e);
+            return null;
+        }
+    }
+
+    /** Hermes web launch: fixed port 9119, no link to mint. Start the
+     * dashboard session, then probe 127.0.0.1:9119 from the app (proot
+     * shares Termux's network namespace, so the container's loopback
+     * is this phone's loopback) until it answers, and only then open
+     * the browser. The first launch downloads pnpm and builds the web
+     * UI, so the wait is up to 5 minutes; a dashboard that is already
+     * running answers the first probe and opens at once. */
+    private static void startHermesWebSession(final Context context, final InstalledAgent agent,
+                                              final Runnable onDialogDismissed) {
+        final AgentDef def = findDef(agent.agentId);
+        if (def == null) return;
         File rootfs = DistroUtils.containerRootfs(agent.container);
         if (rootfs == null) {
             Toast.makeText(context, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
@@ -1999,22 +2250,57 @@ public final class AiAgentUtils {
                 e.getMessage()), Toast.LENGTH_LONG).show();
             return;
         }
-        // Fail fast when proot-distro is missing: no dialog is shown then.
         final String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
             .getAbsolutePath();
         if (!new File(prootDistro).isFile()) {
             Toast.makeText(context, R.string.distro_proot_distro_missing, Toast.LENGTH_LONG).show();
             return;
         }
-        // Dialog FIRST, session second (see the javadoc above): the session
-        // start is deferred into a Runnable that only the dialog's positive
-        // button runs. Cancel starts nothing.
         final String sessionName = context.getString(R.string.aiagents_web_session,
             agent.displayName, agent.distroDisplay);
         final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
             new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
             sessionName, sessionName);
-        showWebDialog(context, def, agent, startSession, onDialogDismissed);
+        final AlertDialog progress = new AlertDialog.Builder(context)
+            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
+            .setMessage(R.string.aiagents_web_hermes_progress)
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (onDialogDismissed != null) onDialogDismissed.run();
+            })
+            .show();
+        startSession.run();
+        final String hermesUrl = "http://127.0.0.1:" + def.webPort;
+        final Runnable retry = () -> startHermesWebSession(context, agent, onDialogDismissed);
+        new Thread(() -> {
+            boolean up = false;
+            int attempts = HERMES_PORT_WAIT_TIMEOUT_MS / HERMES_PORT_POLL_INTERVAL_MS;
+            for (int i = 0; i < attempts; i++) {
+                try {
+                    Thread.sleep(HERMES_PORT_POLL_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    break;
+                }
+                try (Socket socket = new Socket()) {
+                    socket.connect(new InetSocketAddress("127.0.0.1", def.webPort), 1000);
+                    up = true;
+                    break;
+                } catch (Exception ignored) {
+                    // Not up yet; keep waiting.
+                }
+            }
+            final boolean resultUp = up;
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (progress != null && progress.isShowing()) progress.dismiss();
+                if (context instanceof Activity && ((Activity) context).isFinishing()) return;
+                if (resultUp) {
+                    showWebLinkSuccess(context, agent, hermesUrl, onDialogDismissed);
+                } else {
+                    showWebLinkFailure(context, agent,
+                        context.getString(R.string.aiagents_web_hermes_timeout),
+                        onDialogDismissed, retry);
+                }
+            });
+        }).start();
     }
 
     /**
@@ -2140,8 +2426,7 @@ public final class AiAgentUtils {
     private static void showOpenCodePairSuccess(final Context context, final InstalledAgent agent,
                                                 final String pairLink,
                                                 final Runnable onDialogDismissed) {
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(pairLink));
-        context.startActivity(intent);
+        openWebUrl(context, pairLink);
         new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
             .setMessage(context.getString(R.string.aiagents_web_opencode_pair_msg, pairLink))
@@ -2168,6 +2453,120 @@ public final class AiAgentUtils {
             .show();
     }
 
+    // ------------------------------------------------------------------
+    // Web-browser choice for web launches (Settings > AI 助手)
+    // ------------------------------------------------------------------
+
+    /** One browser the user can pick for web launches. */
+    public static final class BrowserChoice {
+        public final String packageName; // "" = system default
+        public final String label;
+
+        public BrowserChoice(String packageName, String label) {
+            this.packageName = packageName;
+            this.label = label;
+        }
+    }
+
+    /** Browsers installed on this phone that can open an http link,
+     * sorted by label, de-duplicated by package. Termux itself is
+     * excluded. The list is built live: a browser installed after
+     * the last settings visit shows up, an uninstalled one does not.
+     * Returns an empty list when nothing can open http links. */
+    public static List<BrowserChoice> listWebBrowsers(Context context) {
+        List<BrowserChoice> out = new ArrayList<>();
+        if (context == null) return out;
+        PackageManager pm = context.getPackageManager();
+        Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1"));
+        List<ResolveInfo> infos;
+        try {
+            infos = pm.queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to list browsers", e);
+            return out;
+        }
+        if (infos == null) return out;
+        Map<String, String> byPackage = new LinkedHashMap<>();
+        for (ResolveInfo info : infos) {
+            if (info == null || info.activityInfo == null) continue;
+            String pkg = info.activityInfo.packageName;
+            if (pkg == null || pkg.equals(context.getPackageName())) continue;
+            if (!byPackage.containsKey(pkg)) {
+                CharSequence label = info.loadLabel(pm);
+                byPackage.put(pkg, label == null ? pkg : label.toString());
+            }
+        }
+        List<Map.Entry<String, String>> entries = new ArrayList<>(byPackage.entrySet());
+        Collections.sort(entries, (a, b) -> a.getValue().compareToIgnoreCase(b.getValue()));
+        for (Map.Entry<String, String> entry : entries) {
+            out.add(new BrowserChoice(entry.getKey(), entry.getValue()));
+        }
+        return out;
+    }
+
+    /** Saved browser package for web launches ("" = system default). */
+    public static String getWebBrowserPackage(Context context) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            context, AI_AGENTS_PREFS_NAME);
+        return prefs.getString(PREF_WEB_BROWSER_PACKAGE, "");
+    }
+
+    public static void setWebBrowserPackage(Context context, String packageName) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            context, AI_AGENTS_PREFS_NAME);
+        prefs.edit().putString(PREF_WEB_BROWSER_PACKAGE,
+            packageName == null ? "" : packageName).apply();
+    }
+
+    /** Whether tapping a web button opens the browser automatically. */
+    public static boolean isWebAutoOpen(Context context) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            context, AI_AGENTS_PREFS_NAME);
+        return prefs.getBoolean(PREF_WEB_AUTO_OPEN, true);
+    }
+
+    public static void setWebAutoOpen(Context context, boolean autoOpen) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            context, AI_AGENTS_PREFS_NAME);
+        prefs.edit().putBoolean(PREF_WEB_AUTO_OPEN, autoOpen).apply();
+    }
+
+    /** Open a web link in the chosen browser. Returns false without
+     * opening anything when auto-open is off (the caller then only
+     * shows the link). A saved browser that is gone or cannot open
+     * the link falls back to the system default once, and the saved
+     * choice is cleared so the next tap does not fail the same way. */
+    public static boolean openWebUrl(Context context, String url) {
+        if (context == null || url == null || url.isEmpty()) return false;
+        if (!isWebAutoOpen(context)) return false;
+        String pkg = getWebBrowserPackage(context);
+        if (pkg != null && !pkg.isEmpty()) {
+            Intent chosen = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            if (!(context instanceof Activity)) {
+                chosen.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
+            chosen.setPackage(pkg);
+            try {
+                context.startActivity(chosen);
+                return true;
+            } catch (ActivityNotFoundException e) {
+                Log.w(LOG_TAG, "Saved browser " + pkg + " cannot open web links; falling back", e);
+                setWebBrowserPackage(context, "");
+            }
+        }
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        if (!(context instanceof Activity)) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
+        try {
+            context.startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException e) {
+            Log.w(LOG_TAG, "No browser can open " + url, e);
+            return false;
+        }
+    }
+
     /**
      * The one-time battery hint for web launches, shown as a note inside
      * the web dialog. Returns the hint text the first time any web UI is
@@ -2182,67 +2581,6 @@ public final class AiAgentUtils {
         return context.getString(R.string.aiagents_web_battery_hint);
     }
 
-    /**
-     * Explanation dialog for a web launch (dsh / Pi / Hermes).
-     * OpenCode never reaches this dialog: it uses
-     * startOpenCodePairSession instead (pairing link only, no
-     * password). The positive button starts the session (and, for
-     * Hermes, opens the browser); Cancel starts nothing. The dismiss
-     * listener still runs onDialogDismissed in every case, including
-     * Cancel. The first web launch appends the one-time battery hint
-     * to the message (see consumeWebBatteryHint).
-     */
-    private static void showWebDialog(final Context context, final AgentDef def,
-                                      final InstalledAgent agent,
-                                      final Runnable onStartSession,
-                                      final Runnable onDialogDismissed) {
-        AlertDialog.Builder builder = new AlertDialog.Builder(context)
-            .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
-            .setOnDismissListener(dialog -> {
-                if (onDialogDismissed != null) onDialogDismissed.run();
-            });
-        final String batteryHint = consumeWebBatteryHint(context);
-        switch (def.webKind) {
-            case DSH: {
-                String message = context.getString(R.string.aiagents_web_dsh_msg);
-                if (batteryHint != null) message += "\n\n" + batteryHint;
-                builder.setMessage(message)
-                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-                        if (onStartSession != null) onStartSession.run();
-                    });
-                break;
-            }
-            case PI: {
-                String message = context.getString(R.string.aiagents_web_pi_msg);
-                if (batteryHint != null) message += "\n\n" + batteryHint;
-                builder.setMessage(message)
-                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-                        if (onStartSession != null) onStartSession.run();
-                    });
-                break;
-            }
-            case HERMES: {
-                // Fixed address, no password on loopback: open the browser
-                // directly, like OpenCode. No restart button in v1 (there
-                // is no password to resync).
-                String message = context.getString(R.string.aiagents_web_hermes_msg);
-                if (batteryHint != null) message += "\n\n" + batteryHint;
-                builder.setMessage(message)
-                    .setPositiveButton(R.string.aiagents_web_open_browser, (dialog, which) -> {
-                        if (onStartSession != null) onStartSession.run();
-                        Intent intent = new Intent(Intent.ACTION_VIEW,
-                            Uri.parse("http://127.0.0.1:" + def.webPort));
-                        context.startActivity(intent);
-                    })
-                    .setNegativeButton(android.R.string.cancel, null);
-                break;
-            }
-            default:
-                return;
-        }
-        builder.show();
-    }
-
     /** The script a web launch runs inside the container (as root). */
     private static String buildWebScript(AgentDef def, InstalledAgent agent) {
         StringBuilder s = new StringBuilder();
@@ -2250,12 +2588,28 @@ public final class AiAgentUtils {
         s.append("# Generated by Termux \"AI 助手\" web launch - do not edit.\n");
         switch (def.webKind) {
             case DSH:
+                // `dsh web` prints exactly one URL:
+                // dsh web: http://127.0.0.1:3080/?token=<fresh token>
+                // The token is minted fresh on every start and cannot be
+                // disabled, so the script captures the first http URL
+                // from the full log instead of matching the exact
+                // wording around it.
                 s.append("echo \"正在启动 dsh 网页版（").append(agent.distroDisplay).append("）…\"\n");
-                s.append("echo \"启动后在下面找到 dsh web: http://127.0.0.1:3080/?token=… 这一行，复制完整地址到手机浏览器打开。\"\n");
-                s.append("echo \"注意：直接打开 http://127.0.0.1:3080 进不去，必须带 token 的完整地址。\"\n");
-                s.append("command -v dsh >/dev/null 2>&1 || { echo \"没有找到 dsh，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("URL_FILE=\"/tmp/").append(webUrlFileName(agent.agentId, agent.container)).append("\"\n");
+                s.append("LOG_FILE=\"/tmp/").append(webLogFileName(agent.agentId, agent.container)).append("\"\n");
+                s.append("rm -f \"$URL_FILE\" \"$LOG_FILE\"\n");
+                s.append("command -v dsh >/dev/null 2>&1 || { echo \"没有找到 dsh，请先在“AI 助手”里安装。\"; echo \"ERROR: dsh not installed\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("cd ~ || true\n");
-                s.append("dsh web --no-open\n");
+                s.append("dsh web --no-open >\"$LOG_FILE\" 2>&1 &\n");
+                s.append("DSH_PID=$!\n");
+                s.append("LINK=\"\"\n");
+                s.append("for i in $(seq 1 30); do LINK=\"$(grep -m 1 -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$LINK\" ] && break; sleep 1; kill -0 \"$DSH_PID\" 2>/dev/null || break; done\n");
+                s.append("if [ -z \"$LINK\" ]; then echo \"dsh 网页版地址没找到。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"could not find the dsh web address\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+                s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
+                s.append("echo \"dsh 网页版地址：$LINK\"\n");
+                s.append("wait \"$DSH_PID\"\n");
+                s.append("echo \"dsh 网页版已停止。\"\n");
+                s.append("read -r -p \"按回车关闭此会话\" || true\n");
                 break;
             case OPENCODE:
                 // Pairing link only (see the startWebSession javadoc):
@@ -2268,28 +2622,44 @@ public final class AiAgentUtils {
                 // "ERROR: <reason>" line on failure.
                 s.append("echo \"正在生成 OpenCode 配对链接（").append(agent.distroDisplay).append("）…\"\n");
                 s.append("URL_FILE=\"/tmp/").append(openCodePairUrlFileName(agent.container)).append("\"\n");
-                s.append("rm -f \"$URL_FILE\"\n");
+                s.append("LOG_FILE=\"/tmp/").append(webLogFileName(agent.agentId, agent.container)).append("\"\n");
+                s.append("rm -f \"$URL_FILE\" \"$LOG_FILE\"\n");
                 s.append("command -v opencode >/dev/null 2>&1 || { echo \"没有找到 opencode，请先在“AI 助手”里安装。\"; echo \"ERROR: opencode not installed\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("PAIR_OUT=\"$(opencode pair 2>&1)\"\n");
+                s.append("printf '%s\\n' \"$PAIR_OUT\" > \"$LOG_FILE\"\n");
                 s.append("LINK=\"$(printf '%s\\n' \"$PAIR_OUT\" | grep -m 1 -o 'http[s]*://[^ ]*/auth/connect/[^ ]*')\"\n");
+                s.append("[ -z \"$LINK\" ] && LINK=\"$(printf '%s\\n' \"$PAIR_OUT\" | grep -m 1 -o 'http[s]*://[^ ]*')\"\n");
                 s.append("if [ -z \"$LINK\" ]; then printf '%s\\n' \"$PAIR_OUT\"; echo \"配对链接生成失败。\"; ERR=\"$(printf '%s\\n' \"$PAIR_OUT\" | head -n 1)\"; [ -n \"$ERR\" ] || ERR=\"could not mint a pairing link\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
                 s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
                 s.append("echo \"配对链接：$LINK（一次有效，5 分钟内打开）\"\n");
                 s.append("read -r -p \"按回车关闭此会话\" || true\n");
                 break;
             case PI:
+                // pi-webapp starts a background service and prints a
+                // token-bearing local address; there is no fixed port.
+                // The script captures the first http URL from the full
+                // log (preferring one with a token), and as a second
+                // source polls `npx pi-webapp status` every 10 s, which
+                // lists the running service's address. Either source
+                // works even if the launcher's wording changes.
                 s.append("echo \"正在启动 Pi 网页版（").append(agent.distroDisplay).append("）…\"\n");
                 s.append("echo \"第一次启动会先下载官方 pi-webapp（npx），稍等一会。\"\n");
-                s.append("echo \"启动后在下面找到带 token 的本地地址，复制到浏览器打开；\"\n");
-                s.append("echo \"也可以在会话里跑 npx pi-webapp status 查看地址。\"\n");
-                s.append("command -v pi >/dev/null 2>&1 || { echo \"没有找到 pi，请先在“AI 助手”里安装。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
-                s.append("command -v npx >/dev/null 2>&1 || { echo \"没有找到 npx（需要 Node），请先在“AI 助手”里安装 Pi（会自动装 Node 24）。\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("URL_FILE=\"/tmp/").append(webUrlFileName(agent.agentId, agent.container)).append("\"\n");
+                s.append("LOG_FILE=\"/tmp/").append(webLogFileName(agent.agentId, agent.container)).append("\"\n");
+                s.append("rm -f \"$URL_FILE\" \"$LOG_FILE\"\n");
+                s.append("command -v pi >/dev/null 2>&1 || { echo \"没有找到 pi，请先在“AI 助手”里安装。\"; echo \"ERROR: pi not installed\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
+                s.append("command -v npx >/dev/null 2>&1 || { echo \"没有找到 npx（需要 Node），请先在“AI 助手”里安装 Pi（会自动装 Node 24）。\"; echo \"ERROR: npx not installed\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; }\n");
                 s.append("cd ~ || true\n");
-                s.append("PI_WEBAPP_AUTO_OPEN=0 npx -y pi-webapp\n");
-                s.append("# pi-webapp starts its service in the background and may exit at\n");
-                s.append("# once; keep this session open so the service keeps running.\n");
+                s.append("PI_WEBAPP_AUTO_OPEN=0 npx -y pi-webapp >\"$LOG_FILE\" 2>&1 &\n");
+                s.append("PI_PID=$!\n");
+                s.append("LINK=\"\"\n");
+                s.append("for i in $(seq 1 60); do LINK=\"$(grep -o 'http[s]*://[^ ]*' \"$LOG_FILE\" 2>/dev/null | grep -m 1 -E 'token=|/auth/connect/')\"; [ -z \"$LINK\" ] && LINK=\"$(grep -m 1 -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$LINK\" ] && break; if [ $((i % 5)) -eq 0 ]; then STATUS_OUT=\"$(npx -y pi-webapp status 2>/dev/null)\"; LINK=\"$(printf '%s\\n' \"$STATUS_OUT\" | grep -m 1 -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*')\"; [ -n \"$LINK\" ] && break; fi; sleep 2; done\n");
+                s.append("if [ -z \"$LINK\" ]; then echo \"Pi 网页版地址没找到。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"could not find the Pi web address\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+                s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
+                s.append("echo \"Pi 网页版地址：$LINK\"\n");
                 s.append("echo \"Pi 网页版服务运行中，关闭此会话即停止。\"\n");
-                s.append("read -r -p \"按回车关闭此会话\"\n");
+                s.append("wait \"$PI_PID\" 2>/dev/null\n");
+                s.append("read -r -p \"按回车关闭此会话\" || true\n");
                 break;
             case HERMES:
                 s.append("echo \"正在启动 Hermes Agent 网页版（").append(agent.distroDisplay).append("）…\"\n");

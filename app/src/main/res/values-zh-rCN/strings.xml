@@ -307,14 +307,18 @@
     <string name="aiagents_quick_start_title">快速启动：%1$s</string>
     <string name="aiagents_web_open">网页版</string>
     <string name="aiagents_web_title">%1$s 网页版</string>
-    <string name="aiagents_web_dsh_msg">已在新会话里启动。在会话输出里找到 dsh web: http://127.0.0.1:3080/?token=… 这一行，复制完整地址到浏览器打开。直接打开 http://127.0.0.1:3080 进不去，必须带 token。</string>
-    <string name="aiagents_web_pi_msg">已在新会话里启动。第一次会先下载官方 pi-webapp，稍等一会。在会话输出里找到带 token 的本地地址，复制到浏览器打开；也可以在会话里跑 npx pi-webapp status 查看地址。</string>
     <string name="aiagents_web_opencode_pair_progress">正在生成 OpenCode 配对链接…</string>
     <string name="aiagents_web_opencode_pair_msg">配对链接（已在浏览器里打开）：\n%1$s\n\n一次有效，请在 5 分钟内打开。过期后点网页版按钮重新取一条新链接。</string>
     <string name="aiagents_web_opencode_pair_failed">打不开 OpenCode 网页版：\n%1$s\n\n点“重试”再试一次。</string>
     <string name="aiagents_web_opencode_pair_timeout">等配对链接超时（30 秒）。点“重试”再试一次。</string>
-    <string name="aiagents_web_hermes_msg">地址：http://127.0.0.1:9119\n不需要密码（只监听本机）。第一次启动会先下载 pnpm、编译网页界面，稍等一会。\n等会话里显示网页版已就绪后，再点“打开浏览器”。</string>
-    <string name="aiagents_web_open_browser">打开浏览器</string>
+    <string name="aiagents_web_pi_progress">正在启动 Pi 网页版…第一次会先下载官方 pi-webapp，稍等一会。</string>
+    <string name="aiagents_web_pi_timeout">等 Pi 网页版地址超时（120 秒）。点“重试”再试一次。</string>
+    <string name="aiagents_web_dsh_progress">正在启动 dsh 网页版…</string>
+    <string name="aiagents_web_dsh_timeout">等 dsh 网页版地址超时（30 秒）。点“重试”再试一次。</string>
+    <string name="aiagents_web_hermes_progress">正在等 Hermes 网页版就绪…第一次会先下载 pnpm、编译网页界面，稍等一会。</string>
+    <string name="aiagents_web_hermes_timeout">等 Hermes 网页版就绪超时（300 秒）。点“重试”再试一次。</string>
+    <string name="aiagents_web_link_msg">网页版链接（已在浏览器里打开）：\n%1$s\n\n如果浏览器没有自动打开，复制上面链接自己打开。</string>
+    <string name="aiagents_web_link_failed">打不开网页版：\n%1$s\n\n点“重试”再试一次。</string>
     <string name="aiagents_web_battery_hint">提示：网页版服务要在 Termux 后台一直跑着才正常。如果网页端卡住没反应，去“设置 → 应用 → Termux → 电池”设为不限制；有些手机会在后台冻住它。</string>
     <string name="aiagents_web_session">%1$s 网页版（%2$s）</string>
     <string name="aiagents_web_script_failed">写网页版启动脚本失败：%1$s</string>
@@ -453,6 +457,14 @@
     <string name="storage_preference_summary_not_granted">未设置，点一下允许访问手机文件</string>
     <string name="model_config_title">模型配置</string>
     <string name="modelconfig_settings_summary">一次填写，下发到多个助手</string>
+    <string name="aiagent_settings_title">AI 助手</string>
+    <string name="aiagent_settings_summary">网页版浏览器与自动打开</string>
+    <string name="aiagent_settings_browser_title">网页版打开的浏览器</string>
+    <string name="aiagent_settings_browser_system">系统默认</string>
+    <string name="aiagent_settings_auto_open_title">自动打开浏览器</string>
+    <string name="aiagent_settings_auto_open_summary">点网页版时自动在浏览器里打开链接；关闭后只显示链接。</string>
+    <string name="aiagent_settings_first_run_note">第一次启动 Pi / Hermes 网页版会先下载和编译，需要等几分钟；App 会等服务就绪后再打开浏览器。</string>
+    <string name="aiagent_settings_saved">已保存</string>
     <string name="modelconfig_list_status">共 %1$d 个配置</string>
     <string name="modelconfig_add">新增</string>
     <string name="modelconfig_empty">还没有配置，点下面的新增</string>

@@ -311,14 +311,18 @@
     <string name="aiagents_quick_start_title">Quick start: %1$s</string>
     <string name="aiagents_web_open">Web</string>
     <string name="aiagents_web_title">%1$s Web</string>
-    <string name="aiagents_web_dsh_msg">Started in a new session. Find the line starting with "dsh web: http://127.0.0.1:3080/?token=" in the session output and open that full address in your browser. Opening http://127.0.0.1:3080 on its own does not work; the token is required.</string>
-    <string name="aiagents_web_pi_msg">Started in a new session. The first launch downloads the official pi-webapp, so give it a moment. Find the token-bearing local address printed in the session output and open it in your browser; you can also run "npx pi-webapp status" in the session to show the address.</string>
     <string name="aiagents_web_opencode_pair_progress">Minting an OpenCode pairing link…</string>
     <string name="aiagents_web_opencode_pair_msg">Pairing link (opened in your browser):\n%1$s\n\nOne-time use — open it within 5 minutes. If it expires, tap the web button again for a fresh link.</string>
     <string name="aiagents_web_opencode_pair_failed">Could not open the OpenCode web UI:\n%1$s\n\nTap Retry to try again.</string>
     <string name="aiagents_web_opencode_pair_timeout">Timed out waiting for the pairing link (30 s). Tap Retry to try again.</string>
-    <string name="aiagents_web_hermes_msg">Address: http://127.0.0.1:9119\nNo password is needed (the dashboard only listens on this phone). The first launch downloads pnpm and builds the web UI, so give it a moment.\nTap Open browser once the session shows the dashboard is up.</string>
-    <string name="aiagents_web_open_browser">Open browser</string>
+    <string name="aiagents_web_pi_progress">Starting the Pi web UI… The first launch downloads the official pi-webapp, so give it a moment.</string>
+    <string name="aiagents_web_pi_timeout">Timed out waiting for the Pi web UI address (120 s). Tap Retry to try again.</string>
+    <string name="aiagents_web_dsh_progress">Starting the dsh web UI…</string>
+    <string name="aiagents_web_dsh_timeout">Timed out waiting for the dsh web UI address (30 s). Tap Retry to try again.</string>
+    <string name="aiagents_web_hermes_progress">Waiting for the Hermes web UI… The first launch downloads pnpm and builds the web UI, so give it a moment.</string>
+    <string name="aiagents_web_hermes_timeout">Timed out waiting for the Hermes web UI (300 s). Tap Retry to try again.</string>
+    <string name="aiagents_web_link_msg">Web UI link (opened in your browser):\n%1$s\n\nIf the browser did not open, copy the link above and open it yourself.</string>
+    <string name="aiagents_web_link_failed">Could not open the web UI:\n%1$s\n\nTap Retry to try again.</string>
     <string name="aiagents_web_battery_hint">Tip: the web server only stays up while Termux keeps running in the background. If the web UI freezes, set Termux battery to Unrestricted (Settings → Apps → Termux → Battery); some phones freeze background apps otherwise.</string>
     <string name="aiagents_web_session">%1$s Web (%2$s)</string>
     <string name="aiagents_web_script_failed">Failed to write web launch script: %1$s</string>
@@ -457,6 +461,14 @@
     <string name="storage_preference_summary_not_granted">Not set up — tap to allow access to phone files</string>
     <string name="model_config_title">Model Config</string>
     <string name="modelconfig_settings_summary">Configure once, apply to many assistants</string>
+    <string name="aiagent_settings_title">AI Assistant</string>
+    <string name="aiagent_settings_summary">Web UI browser and auto-open</string>
+    <string name="aiagent_settings_browser_title">Browser for the web UI</string>
+    <string name="aiagent_settings_browser_system">System default</string>
+    <string name="aiagent_settings_auto_open_title">Open the browser automatically</string>
+    <string name="aiagent_settings_auto_open_summary">Open the link in the browser when you tap the web button; when off, only show the link.</string>
+    <string name="aiagent_settings_first_run_note">The first launch of the Pi / Hermes web UI downloads and builds things first and can take a few minutes; the app waits until the server is ready before opening the browser.</string>
+    <string name="aiagent_settings_saved">Saved</string>
     <string name="modelconfig_list_status">%1$d configs</string>
     <string name="modelconfig_add">Add</string>
     <string name="modelconfig_empty">No configs yet — tap Add below</string>
