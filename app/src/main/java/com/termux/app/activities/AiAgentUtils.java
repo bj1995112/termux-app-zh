@@ -2230,7 +2230,7 @@ public final class AiAgentUtils {
             .setMessage(message)
             .setNeutralButton(R.string.aiagents_web_copy_link,
                 (d, which) -> copyLinkToClipboard(context, link))
-            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+            .setPositiveButton(android.R.string.ok, (d, which) -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
@@ -2257,7 +2257,7 @@ public final class AiAgentUtils {
             .setMessage(message)
             .setNeutralButton(R.string.aiagents_web_copy_link,
                 (d, which) -> copyLinkToClipboard(context, link))
-            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+            .setPositiveButton(android.R.string.ok, (d, which) -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
@@ -2553,7 +2553,7 @@ public final class AiAgentUtils {
             .setMessage(context.getString(R.string.aiagents_web_opencode_pair_msg, pairLink))
             .setNeutralButton(R.string.aiagents_web_copy_link,
                 (d, which) -> copyLinkToClipboard(context, pairLink))
-            .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+            .setPositiveButton(android.R.string.ok, (d, which) -> {
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
