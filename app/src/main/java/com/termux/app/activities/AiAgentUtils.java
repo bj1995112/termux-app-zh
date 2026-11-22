@@ -70,6 +70,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.GZIPInputStream;
 
 public final class AiAgentUtils {
@@ -96,8 +97,12 @@ public final class AiAgentUtils {
     private static final int PI_WEB_WAIT_TIMEOUT_MS = 120000;
 
     /** How long the app waits for the dsh web address to appear after
-     * starting `dsh web` (polls every 500 ms). */
-    private static final int DSH_WEB_WAIT_TIMEOUT_MS = 30000;
+     * starting `dsh web` (polls every 500 ms). 0 means wait
+     * indefinitely: only a token-bearing link counts, so there is no
+     * timeout to hit — the wait ends when the token link appears, when
+     * `dsh web` exits (the script writes ERROR), or when the user
+     * cancels the progress dialog. */
+    private static final int DSH_WEB_WAIT_TIMEOUT_MS = 0;
 
     /** How long the app waits for the Hermes dashboard port to answer
      * after starting `hermes dashboard` (probes every 1000 ms). The
@@ -1935,8 +1940,16 @@ public final class AiAgentUtils {
      * The four agents differ in how their address is found:
      * - dsh: `dsh web` serves :3080, but the startup URL carries a
      *   fresh per-start session token that cannot be disabled, so
-     *   the app cannot build a working URL. The script captures the
-     *   first http URL from its full log instead.
+     *   the app cannot build a working URL. Only a loopback URL
+     *   carrying `?token=` counts: on-device 2026-11-23 a bare
+     *   http://127.0.0.1:3080 address was printed before the token
+     *   URL, and opening the bare address cannot sign the browser
+     *   in, so a bare address is never opened. The script keeps
+     *   watching its log until the token URL appears; if `dsh web`
+     *   exits without printing one, the script writes ERROR and the
+     *   app shows the failure plus the log tail. There is no
+     *   timeout: cancelling the progress dialog stops the wait and
+     *   nothing opens afterwards, even if a token link appears later.
      * - OpenCode (v2.3.2): there is NO `opencode web` command in v2, and
      *   the browser password form is NOT a documented sign-in path at
      *   all (dev.opencode.ai/docs/cli/web): the password is documented
@@ -2004,7 +2017,7 @@ public final class AiAgentUtils {
                 return;
             case DSH:
                 startWebLinkSession(context, agent, DSH_WEB_WAIT_TIMEOUT_MS,
-                    R.string.aiagents_web_dsh_progress, R.string.aiagents_web_dsh_timeout,
+                    R.string.aiagents_web_dsh_progress, R.string.aiagents_web_dsh_failed,
                     onDialogDismissed);
                 return;
             case HERMES:
@@ -2083,40 +2096,57 @@ public final class AiAgentUtils {
         final Runnable startSession = () -> DistroUtils.startSessionWithExecutable(context, prootDistro,
             new String[]{"login", agent.container, "--", "bash", "/tmp/" + scriptName},
             sessionName, sessionName);
+        // Cancelling the progress dialog must really stop the wait:
+        // without this flag the poll thread would keep running and
+        // open the browser the moment a link appeared, after the
+        // user had already cancelled. The flag is checked on every
+        // poll and again before anything is shown or opened.
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
         final AlertDialog progress = new AlertDialog.Builder(context)
             .setTitle(context.getString(R.string.aiagents_web_title, agent.displayName))
             .setMessage(progressRes)
             .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                cancelled.set(true);
                 if (onDialogDismissed != null) onDialogDismissed.run();
             })
             .show();
         startSession.run();
         final Runnable retry = () -> startWebLinkSession(context, agent, timeoutMs,
             progressRes, timeoutRes, onDialogDismissed);
-        pollWebLinkFile(context, agent, progress, timeoutMs, timeoutRes, onDialogDismissed, retry);
+        pollWebLinkFile(context, agent, progress, timeoutMs, timeoutRes, onDialogDismissed, retry,
+            cancelled);
     }
 
     /** Poll the container rootfs for the web-link file, up to
-     * timeoutMs. The file holds one line: the link, or
+     * timeoutMs (0 means wait indefinitely — used only by dsh, which
+     * has no timeout: only a token link counts, and a bare address is
+     * never opened). The file holds one line: the link, or
      * "ERROR: <reason>". Accepts any http(s) URL (the script already
      * prefers a token / pairing link when several URLs are printed);
-     * the app never depends on the exact wording around it. */
+     * the app never depends on the exact wording around it. If the
+     * user cancels, the poll stops and nothing is opened afterwards.
+     * @param cancelled set by the progress dialog's Cancel button;
+     *        the poll thread checks it on every round and before
+     *        showing or opening anything. */
     private static void pollWebLinkFile(final Context context, final InstalledAgent agent,
                                         final AlertDialog progress, final int timeoutMs,
                                         final int timeoutRes,
                                         final Runnable onDialogDismissed,
-                                        final Runnable onRetry) {
+                                        final Runnable onRetry,
+                                        final AtomicBoolean cancelled) {
         final File rootfs = DistroUtils.containerRootfs(agent.container);
         new Thread(() -> {
             String link = null;
             String error = null;
             int attempts = timeoutMs / OPENCODE_PAIR_POLL_INTERVAL_MS;
-            for (int i = 0; i < attempts; i++) {
+            for (int i = 0; timeoutMs <= 0 || i < attempts; i++) {
+                if (cancelled.get()) return;
                 try {
                     Thread.sleep(OPENCODE_PAIR_POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
                     break;
                 }
+                if (cancelled.get()) return;
                 if (rootfs == null) break;
                 File urlFile = new File(rootfs, "tmp/" + webUrlFileName(agent.agentId, agent.container));
                 String content = null;
@@ -2135,12 +2165,14 @@ public final class AiAgentUtils {
                     break;
                 }
             }
+            if (cancelled.get()) return;
             if (error == null && link == null) {
                 error = context.getString(timeoutRes);
             }
             final String resultLink = link;
             final String resultError = error;
             new Handler(Looper.getMainLooper()).post(() -> {
+                if (cancelled.get()) return;
                 if (progress != null && progress.isShowing()) progress.dismiss();
                 if (context instanceof Activity && ((Activity) context).isFinishing()) return;
                 if (resultLink != null) {
@@ -2588,12 +2620,20 @@ public final class AiAgentUtils {
         s.append("# Generated by Termux \"AI 助手\" web launch - do not edit.\n");
         switch (def.webKind) {
             case DSH:
-                // `dsh web` prints exactly one URL:
+                // `dsh web` prints a token-bearing URL:
                 // dsh web: http://127.0.0.1:3080/?token=<fresh token>
                 // The token is minted fresh on every start and cannot be
-                // disabled, so the script captures the first http URL
-                // from the full log instead of matching the exact
-                // wording around it.
+                // disabled. Only a loopback URL carrying token= counts:
+                // on-device 2026-11-23 a bare http://127.0.0.1:3080
+                // address was printed before the token URL, and opening
+                // the bare address cannot sign the browser in, so a
+                // bare address is never written to the URL file. The
+                // loop below waits without a time limit until the token
+                // URL appears; if `dsh web` exits first, it writes
+                // ERROR so the app shows the failure plus the log tail.
+                // The app-side wait is cancelled only by the user
+                // (progress dialog Cancel), which stops the poll
+                // thread; the script itself keeps the session alive.
                 s.append("echo \"正在启动 dsh 网页版（").append(agent.distroDisplay).append("）…\"\n");
                 s.append("URL_FILE=\"/tmp/").append(webUrlFileName(agent.agentId, agent.container)).append("\"\n");
                 s.append("LOG_FILE=\"/tmp/").append(webLogFileName(agent.agentId, agent.container)).append("\"\n");
@@ -2603,8 +2643,8 @@ public final class AiAgentUtils {
                 s.append("dsh web --no-open >\"$LOG_FILE\" 2>&1 &\n");
                 s.append("DSH_PID=$!\n");
                 s.append("LINK=\"\"\n");
-                s.append("for i in $(seq 1 30); do LINK=\"$(grep -m 1 -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$LINK\" ] && break; sleep 1; kill -0 \"$DSH_PID\" 2>/dev/null || break; done\n");
-                s.append("if [ -z \"$LINK\" ]; then echo \"dsh 网页版地址没找到。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"could not find the dsh web address\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+                s.append("while true; do LINK=\"$(grep -o 'http[s]*://\\(127\\.0\\.0\\.1\\|localhost\\)[^ ]*' \"$LOG_FILE\" 2>/dev/null | grep -m 1 'token=')\"; [ -n \"$LINK\" ] && break; kill -0 \"$DSH_PID\" 2>/dev/null || break; sleep 1; done\n");
+                s.append("if [ -z \"$LINK\" ]; then echo \"dsh 网页版地址没找到（服务已退出）。\"; ERR=\"$(tail -n 1 \"$LOG_FILE\" 2>/dev/null)\"; [ -n \"$ERR\" ] || ERR=\"dsh web exited without printing a token link\"; echo \"ERROR: $ERR\" > \"$URL_FILE\"; wait \"$DSH_PID\" 2>/dev/null; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
                 s.append("printf '%s\\n' \"$LINK\" > \"$URL_FILE\"\n");
                 s.append("echo \"dsh 网页版地址：$LINK\"\n");
                 s.append("wait \"$DSH_PID\"\n");

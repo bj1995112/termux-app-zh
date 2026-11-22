@@ -314,7 +314,7 @@
     <string name="aiagents_web_pi_progress">正在启动 Pi 网页版…第一次会先下载官方 pi-webapp，稍等一会。</string>
     <string name="aiagents_web_pi_timeout">等 Pi 网页版地址超时（120 秒）。点“重试”再试一次。</string>
     <string name="aiagents_web_dsh_progress">正在启动 dsh 网页版…</string>
-    <string name="aiagents_web_dsh_timeout">等 dsh 网页版地址超时（30 秒）。点“重试”再试一次。</string>
+    <string name="aiagents_web_dsh_failed">打不开 dsh 网页版。点“重试”再试一次。</string>
     <string name="aiagents_web_hermes_progress">正在等 Hermes 网页版就绪…第一次会先下载 pnpm、编译网页界面，稍等一会。</string>
     <string name="aiagents_web_hermes_timeout">等 Hermes 网页版就绪超时（300 秒）。点“重试”再试一次。</string>
     <string name="aiagents_web_link_msg">网页版链接（已在浏览器里打开）：\n%1$s\n\n如果浏览器没有自动打开，复制上面链接自己打开。</string>
