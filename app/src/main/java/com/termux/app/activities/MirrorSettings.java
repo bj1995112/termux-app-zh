@@ -7,7 +7,6 @@ import android.util.Log;
 import com.termux.R;
 import com.termux.shared.settings.preferences.SharedPreferenceUtils;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -16,8 +15,6 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -299,6 +296,39 @@ public final class MirrorSettings {
         return preset;
     }
 
+    /** Ordered mirror hosts for the certificate-package bootstrap: the
+     *  user's preset first, then the other presets, then the distro's
+     *  official host. The bootstrap tries them in order and takes the
+     *  first that yields a complete verified package set. */
+    public static List<String> distroMirrorHosts(String distroId, MirrorPreset preset) {
+        List<String> hosts = new ArrayList<>();
+        String first = preset != null && preset.distroHost != null && !preset.distroHost.isEmpty()
+                ? preset.distroHost : officialHostForDistro(distroId);
+        hosts.add(first);
+        String[] presetIds = {PRESET_TUNA, PRESET_USTC, PRESET_ALIYUN, PRESET_TENCENT, PRESET_HUAWEI};
+        for (String id : presetIds) {
+            String host = presetForId(id).distroHost;
+            if (!host.isEmpty() && !hosts.contains(host)) hosts.add(host);
+        }
+        String official = officialHostForDistro(distroId);
+        if (!hosts.contains(official)) hosts.add(official);
+        return hosts;
+    }
+
+    /** Official package host for one distro (used when the preset has no
+     *  distro host, and as the last fallback). Arch is the ARM layout:
+     *  the aarch64 container uses Arch Linux ARM mirrors. */
+    private static String officialHostForDistro(String distroId) {
+        if ("ubuntu".equals(distroId)) return OFFICIAL_UBUNTU;
+        if ("debian".equals(distroId)) return OFFICIAL_DEBIAN;
+        if ("arch".equals(distroId)) return "mirror.archlinuxarm.org";
+        if ("alpine".equals(distroId)) return OFFICIAL_ALPINE;
+        if ("fedora".equals(distroId)) return OFFICIAL_FEDORA;
+        if ("opensuse".equals(distroId)) return OFFICIAL_OPENSUSE;
+        if ("void".equals(distroId)) return OFFICIAL_VOID;
+        return OFFICIAL_UBUNTU;
+    }
+
     /** The custom preset as the user configured it (stored custom fields). */
     public static MirrorPreset loadCustomPreset(Context context) {
         SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(context, PREFS_NAME);
@@ -349,143 +379,6 @@ public final class MirrorSettings {
 
     public static boolean isOfficial(MirrorPreset preset) {
         return preset == null || PRESET_OFFICIAL.equals(preset.id);
-    }
-
-    /** True when the container has CA certificates (any of the usual bundle
-     *  paths). Checks the link itself, never following an absolute symlink
-     *  out of the container. A dangling link counts as present here;
-     *  ensureContainerCaCerts resolves links itself and writes through
-     *  a dangling one. */
-    public static boolean containerHasCaCerts(File rootfs) {
-        if (rootfs == null) return false;
-        String[] paths = {
-                "etc/ssl/certs/ca-certificates.crt",
-                "etc/ssl/certs/ca-bundle.crt",
-                "etc/pki/tls/certs/ca-bundle.crt",
-                "etc/ssl/ca-bundle.pem",
-        };
-        for (String rel : paths) {
-            try {
-                if (java.nio.file.Files.exists(
-                        new File(rootfs, rel).toPath(),
-                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
-                    return true;
-                }
-            } catch (RuntimeException ignored) {
-            }
-        }
-        return false;
-    }
-
-    /** Mozilla CA bundle (PEM) downloaded on the phone side for the
-     *  certificate bootstrap. One file covers every mirror: all of them
-     *  use public-CA certificates. */
-    public static final String CA_BUNDLE_URL = "https://curl.se/ca/cacert.pem";
-
-    /** Certificate bootstrap: if the container has no CA bundle, download
-     *  Mozilla's cacert.pem on the phone side (phone TLS works) and write
-     *  it straight into the rootfs at the distro's bundle path. No command
-     *  runs inside the container and the container needs no curl. The real
-     *  ca-certificates package, once installed, replaces this file through
-     *  its own postinst, so this is only a bootstrap. Call on a background
-     *  thread (it downloads). Returns true when the container has a bundle
-     *  afterwards (already had one, or the bootstrap wrote one); false
-     *  means the install proceeds without it, exactly as today. Never
-     *  throws. */
-    public static boolean ensureContainerCaCerts(File rootfs, String distroId) {
-        if (rootfs == null) return false;
-        File target = new File(rootfs, DistroUtils.caBundleRelPath(distroId));
-        try {
-            // The primary path decides: a real file there means the
-            // container has certificates. A symlink counts only when
-            // its target (resolved inside the rootfs) is a real file —
-            // a dangling link must not short-circuit the bootstrap.
-            // (containerHasCaCerts uses NOFOLLOW_LINKS on purpose: an
-            // absolute link would otherwise resolve against the
-            // phone's own filesystem, not the container's.)
-            if (Files.isRegularFile(target.toPath())) return true;
-            if (Files.isSymbolicLink(target.toPath())) {
-                Path link = Files.readSymbolicLink(target.toPath());
-                Path resolved = link.isAbsolute()
-                        ? new File(rootfs, link.toString().substring(1)).toPath().normalize()
-                        : target.toPath().getParent().resolve(link).normalize();
-                Path root = rootfs.toPath().toAbsolutePath().normalize();
-                if (!resolved.startsWith(root)) return false;
-                if (Files.isRegularFile(resolved)) return true;
-                target = resolved.toFile();
-            }
-            File parent = target.getParentFile();
-            if (parent != null) {
-                // Remember which ancestors mkdirs is about to create: with
-                // the app's umask they come out 0700, and apt's _apt user
-                // could not traverse them. Only the created ones are fixed
-                // up; pre-existing directories are left alone.
-                List<File> created = new ArrayList<>();
-                for (File d = parent; d != null && !d.isDirectory(); d = d.getParentFile()) {
-                    created.add(d);
-                }
-                if (!(parent.isDirectory() || parent.mkdirs())) return false;
-                for (File d : created) {
-                    d.setReadable(true, false);
-                    d.setExecutable(true, false);
-                }
-            }
-            byte[] pem = downloadCaBundle();
-            if (pem == null) return false;
-            try (FileOutputStream out = new FileOutputStream(target)) {
-                out.write(pem);
-            }
-            // The bundle must be world-readable (0644, like the real
-            // ca-certificates package installs it). The app's umask makes
-            // the fresh file 0600, and apt's sandboxed downloader runs as
-            // the _apt user, which then cannot read it — apt fails
-            // certificate verification even though the bundle is there.
-            target.setReadable(true, false);
-            target.setWritable(true, true);
-            target.setExecutable(false, false);
-            return containerHasCaCerts(rootfs);
-        } catch (IOException | RuntimeException e) {
-            Log.w(TAG, "certificate bootstrap failed for " + distroId, e);
-            return false;
-        }
-    }
-
-    /** Download the Mozilla bundle; null unless it looks like a PEM
-     *  bundle (starts with a certificate block, plausible size, so
-     *  an error page is never written as a bundle). Same
-     *  HttpURLConnection idiom as downloadToFileSpeedKBps. */
-    private static byte[] downloadCaBundle() {
-        HttpURLConnection connection = null;
-        try {
-            URL url = new URL(CA_BUNDLE_URL);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(30000);
-            connection.setRequestMethod("GET");
-            connection.setInstanceFollowRedirects(true);
-            connection.connect();
-            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return null;
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            try (InputStream in = connection.getInputStream()) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) >= 0) bytes.write(buf, 0, n);
-            }
-            byte[] pem = bytes.toByteArray();
-            if (pem.length < 50_000) return null;
-            // The bundle starts with a ~1 KB comment header, so look
-            // for the first certificate in the first 4 KB, not the
-            // first line (the live file's first BEGIN is at offset
-            // 1105). An error page has no such marker at all.
-            String head = new String(pem, 0, Math.min(pem.length, 4096), StandardCharsets.UTF_8);
-            if (!head.contains("-----BEGIN CERTIFICATE-----")) return null;
-            return pem;
-        } catch (IOException | RuntimeException e) {
-            Log.w(TAG, "downloading " + CA_BUNDLE_URL + " failed", e);
-            return null;
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
     }
 
     /** Effective registry host: the override wins, otherwise the preset's. "" = Docker Hub. */
@@ -580,11 +473,6 @@ public final class MirrorSettings {
     public static int applyToContainer(File rootfs, String distroId, MirrorPreset preset) {
         if (rootfs == null || !rootfs.isDirectory() || distroId == null) return APPLY_FAILED;
         if (preset == null) preset = presetForId(PRESET_OFFICIAL);
-        // Step 0 (certificate bootstrap): bootstrap certificates before
-        // touching sources, so a mirror that redirects to https works even
-        // in a minimal rootfs. Best-effort: a failed bootstrap never fails
-        // the preset apply.
-        ensureContainerCaCerts(rootfs, distroId);
         String target = preset.distroHost; // "" = official
         try {
             if ("ubuntu".equals(distroId)) {
