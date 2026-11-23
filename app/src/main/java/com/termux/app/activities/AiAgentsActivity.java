@@ -277,7 +277,7 @@ public class AiAgentsActivity extends AppCompatActivity {
     private String subtitleFor(AgentRow row) {
         String desc = getString(row.def.descriptionRes);
         if (!row.supported) {
-            return desc + "\n" + getString(R.string.aiagents_unsupported);
+            return desc + "\n" + unsupportedReason(row.def);
         }
         return desc + "\n" + statusLineFor(row);
     }
@@ -380,7 +380,19 @@ public class AiAgentsActivity extends AppCompatActivity {
     private boolean isSupported(AiAgentUtils.AgentDef def) {
         if (def.needsNode && !NODE_VERIFIED.contains(mDistroId)) return false;
         if ("agy".equals(def.id) && "alpine".equals(mDistroId)) return false;
+        // Hermes builds pillow-heif from source, which needs libheif >= 1.23.4;
+        // Alpine 3.22 ships 1.19.8, so it cannot install there (see design.md).
+        if ("hermes".equals(def.id) && "alpine".equals(mDistroId)) return false;
         return true;
+    }
+
+    /** Why this agent is unsupported on the current distro, or the generic
+     * line when the reason is not specific (see isSupported). */
+    private String unsupportedReason(AiAgentUtils.AgentDef def) {
+        if ("hermes".equals(def.id) && "alpine".equals(mDistroId)) {
+            return getString(R.string.aiagents_unsupported_hermes_alpine);
+        }
+        return getString(R.string.aiagents_unsupported);
     }
 
     // ------------------------------------------------------------------
@@ -650,7 +662,7 @@ public class AiAgentsActivity extends AppCompatActivity {
         container.setVisibility(View.VISIBLE);
         if (!row.supported) {
             addExpandedLine(container,
-                getString(R.string.aiagents_unsupported), 13, secondaryColor);
+                unsupportedReason(row.def), 13, secondaryColor);
         }
         if (row.historyLoading) {
             addExpandedLine(container,
@@ -696,7 +708,7 @@ public class AiAgentsActivity extends AppCompatActivity {
                 if (!canInstall) {
                     if (!row.supported) {
                         Toast.makeText(AiAgentsActivity.this,
-                            R.string.aiagents_unsupported, Toast.LENGTH_SHORT).show();
+                            unsupportedReason(row.def), Toast.LENGTH_SHORT).show();
                     } else {
                         Toast.makeText(AiAgentsActivity.this,
                             getString(R.string.aiagents_version_not_supported,
@@ -1037,6 +1049,16 @@ public class AiAgentsActivity extends AppCompatActivity {
                 // script's non-login shell, so export it here for the
                 // checks and the version print below.
                 s.append("  ").append(installOnePackageCommand(mDistroId, "git")).append("\n");
+                // pillow-heif 1.8.1 builds from source and needs the libheif
+                // headers plus a toolchain; install them first or `uv sync`
+                // fails with "headers or library files could not be found
+                // for libheif". Alpine is excluded by isSupported (its
+                // libheif is too old), so no Alpine list here.
+                String buildDeps = hermesBuildDepsCommand(mDistroId);
+                if (!buildDeps.isEmpty()) {
+                    s.append("  ").append(buildDeps)
+                        .append(" || { echo \"Hermes 编译依赖安装失败（libheif-dev 等），请检查上面的报错\"; }\n");
+                }
                 if ("alpine".equals(mDistroId)) {
                     s.append("  apk add libstdc++\n");
                 }
@@ -1225,6 +1247,30 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "xbps-install -Sy nodejs";
             default:
                 return "# unknown distro, Node install skipped";
+        }
+    }
+
+    /** Build dependencies for the Hermes install: pillow-heif 1.8.1 builds
+     * from source and needs the libheif headers plus a C toolchain and the
+     * Python headers. Versions verified 2026-11-24 against the live mirror
+     * indexes (see design.md): every distro here ships libheif >= 1.23.4,
+     * the minimum pillow-heif 1.8.0 requires. Alpine is excluded by
+     * isSupported (3.22 ships libheif 1.19.8), so it returns "" here. */
+    private static String hermesBuildDepsCommand(String distroId) {
+        switch (distroId) {
+            case "ubuntu":
+            case "debian":
+                return "apt-get install -y build-essential pkg-config libheif-dev python3-dev";
+            case "arch":
+                return "pacman -Sy --noconfirm base-devel libheif";
+            case "fedora":
+                return "dnf install -y gcc make pkgconf libheif-devel python3-devel";
+            case "opensuse":
+                return "zypper install -y gcc make pkgconf libheif-devel python314-devel";
+            case "void":
+                return "xbps-install -Sy base-devel pkg-config libheif-devel python3-devel";
+            default:
+                return "";
         }
     }
 
