@@ -355,8 +355,10 @@
     <string name="welcome_message_title">启动时显示欢迎信息</string>
     <string name="welcome_message_summary">新会话开始时显示欢迎信息</string>
     <string name="prompt_theme_section_title">提示符主题</string>
-    <string name="prompt_new_session_note">新会话自动使用所选主题。</string>
+    <string name="prompt_new_session_note">新会话自动使用所选主题；当前会话执行 source ~/.termux/prompt-theme.sh 立即生效。</string>
     <string name="prompt_color_section_title">提示符颜色</string>
+    <string name="prompt_color_hint">拖动色条可任选颜色，提示符会用你选的精确颜色。</string>
+    <string name="prompt_color_presets">常用颜色</string>
     <string name="prompt_display_section_title">终端显示</string>
     <string name="prompt_nerd_font_note">Powerline 主题需要 Nerd 字体，其他主题任何字体都可用。</string>
     <string name="prompt_theme_selected">提示符主题已设为 %1$s</string>

@@ -359,8 +359,10 @@
     <string name="welcome_message_title">Show welcome message at startup</string>
     <string name="welcome_message_summary">Show the welcome message when a new session starts</string>
     <string name="prompt_theme_section_title">Prompt theme</string>
-    <string name="prompt_new_session_note">New sessions pick the theme up automatically.</string>
+    <string name="prompt_new_session_note">New sessions pick the theme up automatically. In the current session, run: source ~/.termux/prompt-theme.sh</string>
     <string name="prompt_color_section_title">Prompt colour</string>
+    <string name="prompt_color_hint">Drag the bar to pick any colour — the prompt uses the exact colour you choose.</string>
+    <string name="prompt_color_presets">Quick colours</string>
     <string name="prompt_display_section_title">Terminal display</string>
     <string name="prompt_nerd_font_note">The Powerline theme needs a Nerd Font; the others work with any font.</string>
     <string name="prompt_theme_selected">Prompt theme set to %1$s</string>

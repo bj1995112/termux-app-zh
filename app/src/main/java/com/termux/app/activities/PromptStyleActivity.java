@@ -5,9 +5,11 @@
 // - The prompt theme + colour are stored in a private SharedPreferences file
 //   ("prompt_style"). The chosen theme is materialised as
 //   ~/.termux/prompt-theme.sh by copying the bundled asset
-//   prompt-theme-base.sh with __THEME_ID__ / __ACCENT__ substituted, and
+//   prompt-theme-base.sh with __THEME_ID__ / __ACCENT_RGB__ /
+//   __ACCENT_IS_CUSTOM__ substituted, and
 //   ~/.bashrc gets a guarded marker block sourcing it (appended once, never
-//   clobbering existing content). New sessions pick the theme up.
+//   clobbering existing content). New sessions pick the theme up, and a
+//   running session can re-source ~/.termux/prompt-theme.sh to apply it.
 //   "Reset to default" removes the marker block and deletes prompt-theme.sh.
 // - Terminal display options are written to ~/.termux/termux.properties
 //   (primary file; other lines are preserved byte-for-byte) and applied with
@@ -28,16 +30,21 @@
 // - \[ and \] are only recognised when literally present in the PS1 string
 //   value; escapes arriving via ${...} expansion at display time are NOT
 //   interpreted. So templates carry escapes literally and variables carry
-//   plain text or colour NUMBERS only. The rainbow theme (22) is the one
+//   plain text or colour TRIPLETS ("R;G;B") only. The rainbow theme (22) is the one
 //   exception: precmd builds its PS1 at assignment time, where the escapes
 //   are baked into the PS1 value and are recognised.
 
 package com.termux.app.activities;
 
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.os.Bundle;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -46,9 +53,10 @@ import android.text.style.ForegroundColorSpan;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
-import android.widget.GridLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -80,7 +88,9 @@ public class PromptStyleActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "prompt_style";
     private static final String KEY_THEME_ID = "theme_id";
+    /** Legacy ANSI accent key, kept only for the one-time migration below. */
     private static final String KEY_ACCENT = "accent_color"; // 0 = theme default
+    private static final String KEY_ACCENT_RGB = "accent_rgb"; // 0xRRGGBB, 0 = theme default
     private static final int DEFAULT_THEME_ID = 1;
 
     private static final String ASSET_NAME = "prompt-theme-base.sh";
@@ -88,10 +98,14 @@ public class PromptStyleActivity extends AppCompatActivity {
 
     private static final int THEME_COUNT = 24;
 
-    /** Default accent ANSI colour per theme (index = theme id - 1). */
-    private static final int[] THEME_DEFAULT_ACCENTS = {
-        32, 36, 34, 32, 32, 33, 32, 32, 35, 36, 33, 32,
-        32, 34, 32, 36, 33, 35, 36, 34, 32, 32, 34, 32
+    /** Default accent colour per theme (0xRRGGBB, index = theme id - 1).
+     * Each entry is the exact old palette colour of the previous ANSI
+     * default, so a user who never picked a colour sees no change. */
+    private static final int[] THEME_DEFAULT_ACCENTS_RGB = {
+        0x00CD00, 0x00CDCD, 0x0000EE, 0x00CD00, 0x00CD00, 0xCDCD00,
+        0x00CD00, 0x00CD00, 0xCD00CD, 0x00CDCD, 0xCDCD00, 0x00CD00,
+        0x00CD00, 0x0000EE, 0x00CD00, 0x00CDCD, 0xCDCD00, 0xCD00CD,
+        0x00CDCD, 0x0000EE, 0x00CD00, 0x00CD00, 0x0000EE, 0x00CD00
     };
 
     private static final int[] THEME_NAME_RES = {
@@ -109,7 +123,9 @@ public class PromptStyleActivity extends AppCompatActivity {
         R.string.prompt_theme_23_name, R.string.prompt_theme_24_name
     };
 
-    /** ANSI colour picker palette: code -> Android colour. */
+    /** Legacy ANSI picker palette: code -> Android colour. Kept only
+     * for the one-time migration of an old accent choice (below); the
+     * picker itself now uses free RGB. */
     private static final int[] PALETTE_CODES = {
         30, 31, 32, 33, 34, 35, 36, 37,
         90, 91, 92, 93, 94, 95, 96, 97
@@ -119,6 +135,12 @@ public class PromptStyleActivity extends AppCompatActivity {
         0xFF0000EE, 0xFFCD00CD, 0xFF00CDCD, 0xFFE5E5E5,
         0xFF7F7F7F, 0xFFFF0000, 0xFF00FF00, 0xFFFFFF00,
         0xFF5C5CFF, 0xFFFF00FF, 0xFF00FFFF, 0xFFFFFFFF
+    };
+
+    /** One-tap preset colours (0xRRGGBB). */
+    private static final int[] PRESET_RGBS = {
+        0xFF3B30, 0xFF9500, 0xFFCC00, 0x34C759,
+        0x00C7BE, 0x007AFF, 0xAF52DE, 0xFF2D92
     };
 
     // Terminal display options (termux.properties keys and value ranges are
@@ -148,12 +170,22 @@ public class PromptStyleActivity extends AppCompatActivity {
 
     private SharedPreferences mPrefs;
     private int mThemeId;
-    private int mAccent; // 0 = use the theme default
+    private int mAccentRgb; // 0xRRGGBB, 0 = use the theme default
     private String mAssetText; // prompt-theme-base.sh, read once
     private boolean mDisplayChanged;
 
     private LinearLayout mThemeRows;
-    private GridLayout mColorGrid;
+    private LinearLayout mColorPickerContainer;
+    private HueBarView mHueBar;
+    private SaturationValueView mSvSquare;
+    private View mCurrentSwatch;
+    private TextView mHexText;
+    /** Preview TextViews per theme id, filled by buildThemeRows(). */
+    private final TextView[] mThemePreviews = new TextView[THEME_COUNT + 1];
+    /** HSV of the colour the picker shows (hue 0-360, sat/val 0-1). */
+    private final float[] mPickerHsv = new float[3];
+    /** Live drag colour (0xRRGGBB), 0 when no drag is in progress. */
+    private int mLiveRgb;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -168,13 +200,23 @@ public class PromptStyleActivity extends AppCompatActivity {
         mPrefs = SharedPreferenceUtils.getPrivateSharedPreferences(this, PREFS_NAME);
         mThemeId = mPrefs.getInt(KEY_THEME_ID, DEFAULT_THEME_ID);
         if (mThemeId < 1 || mThemeId > THEME_COUNT) mThemeId = DEFAULT_THEME_ID;
-        mAccent = mPrefs.getInt(KEY_ACCENT, 0);
+        mAccentRgb = mPrefs.getInt(KEY_ACCENT_RGB, 0);
+        if (mAccentRgb == 0) {
+            // One-time migration: an old ANSI accent choice becomes the same
+            // colour in RGB, then the legacy key is removed.
+            int oldAnsi = mPrefs.getInt(KEY_ACCENT, 0);
+            if (oldAnsi != 0) {
+                mAccentRgb = ansiToRgb(oldAnsi);
+                mPrefs.edit().putInt(KEY_ACCENT_RGB, mAccentRgb)
+                        .remove(KEY_ACCENT).apply();
+            }
+        }
 
         mThemeRows = findViewById(R.id.prompt_themes_container);
-        mColorGrid = findViewById(R.id.prompt_colors_grid);
+        mColorPickerContainer = findViewById(R.id.prompt_color_picker_container);
 
         buildThemeRows();
-        buildColorGrid();
+        buildColorPicker();
         buildDisplayRows();
 
         Button resetButton = findViewById(R.id.prompt_reset_button);
@@ -196,8 +238,27 @@ public class PromptStyleActivity extends AppCompatActivity {
         return true;
     }
 
-    private int effectiveAccent() {
-        return mAccent != 0 ? mAccent : THEME_DEFAULT_ACCENTS[mThemeId - 1];
+    /** The accent in 0xRRGGBB: the picked colour, or the theme default. */
+    private int effectiveAccentRgb() {
+        return mAccentRgb != 0 ? mAccentRgb : THEME_DEFAULT_ACCENTS_RGB[mThemeId - 1];
+    }
+
+    /** True when the user picked a colour (directly, or via migration). */
+    private boolean accentIsCustom() {
+        return mAccentRgb != 0;
+    }
+
+    /** 0xRRGGBB -> "R;G;B" for the asset placeholder. */
+    private static String rgbTriplet(int rgb) {
+        return ((rgb >> 16) & 0xFF) + ";" + ((rgb >> 8) & 0xFF) + ";" + (rgb & 0xFF);
+    }
+
+    /** Legacy ANSI code -> 0xRRGGBB via the old palette, or 0 if unknown. */
+    private static int ansiToRgb(int ansiCode) {
+        for (int i = 0; i < PALETTE_CODES.length; i++) {
+            if (PALETTE_CODES[i] == ansiCode) return PALETTE_ARGB[i] & 0x00FFFFFF;
+        }
+        return 0;
     }
 
     // ---------- theme list ----------
@@ -211,7 +272,8 @@ public class PromptStyleActivity extends AppCompatActivity {
             TextView previewView = row.findViewById(R.id.prompt_theme_row_preview);
             TextView checkView = row.findViewById(R.id.prompt_theme_row_check);
             nameView.setText(THEME_NAME_RES[id - 1]);
-            previewView.setText(PromptPreview.render(this, id, effectiveAccent()));
+            previewView.setText(PromptPreview.render(this, id, effectiveAccentRgb(), accentIsCustom()));
+            mThemePreviews[id] = previewView;
             checkView.setVisibility(id == mThemeId ? View.VISIBLE : View.INVISIBLE);
             final int themeId = id;
             row.setOnClickListener(v -> selectTheme(themeId));
@@ -222,9 +284,9 @@ public class PromptStyleActivity extends AppCompatActivity {
     private void selectTheme(int themeId) {
         if (themeId == mThemeId) return;
         mThemeId = themeId;
-        mAccent = 0; // a new theme starts with its own default colour
+        mAccentRgb = 0; // a new theme starts with its own default colour
         mPrefs.edit().putInt(KEY_THEME_ID, mThemeId)
-            .putInt(KEY_ACCENT, mAccent).apply();
+            .putInt(KEY_ACCENT_RGB, mAccentRgb).apply();
         String content = writePromptThemeFile();
         if (content != null) {
             Toast.makeText(this,
@@ -233,51 +295,160 @@ public class PromptStyleActivity extends AppCompatActivity {
             syncThemeToDistrosAsync(content);
         }
         buildThemeRows();
-        buildColorGrid();
+        buildColorPicker();
     }
 
     // ---------- colour picker ----------
 
-    private void buildColorGrid() {
-        mColorGrid.removeAllViews();
-        int accent = effectiveAccent();
-        int sizePx = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 40,
-            getResources().getDisplayMetrics());
-        int marginPx = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 4,
-            getResources().getDisplayMetrics());
-        for (int i = 0; i < PALETTE_CODES.length; i++) {
-            final int code = PALETTE_CODES[i];
-            TextView swatch = new TextView(this);
-            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
-            params.width = sizePx;
-            params.height = sizePx;
-            params.setMargins(marginPx, marginPx, marginPx, marginPx);
-            swatch.setLayoutParams(params);
-            swatch.setBackgroundColor(PALETTE_ARGB[i]);
-            if (code == accent) {
-                swatch.setText("✓");
-                swatch.setTextSize(20);
-                // Light swatches need a dark check mark, dark ones a light one.
-                swatch.setTextColor(code == 37 || code == 93 || code == 96 || code == 97
-                    ? Color.BLACK : Color.WHITE);
-                swatch.setGravity(android.view.Gravity.CENTER);
+    /** Colour the picker and the theme previews currently show. */
+    private int pickerAccentRgb() {
+        return mLiveRgb != 0 ? mLiveRgb : effectiveAccentRgb();
+    }
+
+    /** True when the preview should show a picked colour (committed or mid-drag). */
+    private boolean pickerAccentIsCustom() {
+        return accentIsCustom() || mLiveRgb != 0;
+    }
+
+    private void buildColorPicker() {
+        mColorPickerContainer.removeAllViews();
+        mLiveRgb = 0;
+        Color.colorToHSV(effectiveAccentRgb(), mPickerHsv);
+        float density = getResources().getDisplayMetrics().density;
+        int marginPx = (int) (8 * density + 0.5f);
+
+        TextView hint = new TextView(this);
+        hint.setText(R.string.prompt_color_hint);
+        hint.setTextSize(13);
+        mColorPickerContainer.addView(hint);
+
+        // Current colour row: swatch + hex.
+        LinearLayout currentRow = new LinearLayout(this);
+        currentRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rowParams.topMargin = marginPx;
+        currentRow.setLayoutParams(rowParams);
+        mCurrentSwatch = new View(this);
+        int swatchPx = (int) (40 * density + 0.5f);
+        mCurrentSwatch.setLayoutParams(new LinearLayout.LayoutParams(swatchPx, swatchPx));
+        currentRow.addView(mCurrentSwatch);
+        mHexText = new TextView(this);
+        mHexText.setTextSize(16);
+        LinearLayout.LayoutParams hexParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        hexParams.leftMargin = marginPx;
+        hexParams.gravity = android.view.Gravity.CENTER_VERTICAL;
+        mHexText.setLayoutParams(hexParams);
+        currentRow.addView(mHexText);
+        mColorPickerContainer.addView(currentRow);
+
+        ColorPickerListener listener = new ColorPickerListener() {
+            @Override public void onHuePicking(float hue) {
+                mPickerHsv[0] = hue;
+                onPickerLive(Color.HSVToColor(mPickerHsv));
             }
-            swatch.setOnClickListener(v -> selectAccent(code));
-            mColorGrid.addView(swatch);
+            @Override public void onHuePicked(float hue) {
+                mPickerHsv[0] = hue;
+                selectAccent(Color.HSVToColor(mPickerHsv));
+            }
+            @Override public void onSvPicking(float saturation, float value) {
+                mPickerHsv[1] = saturation;
+                mPickerHsv[2] = value;
+                onPickerLive(Color.HSVToColor(mPickerHsv));
+            }
+            @Override public void onSvPicked(float saturation, float value) {
+                mPickerHsv[1] = saturation;
+                mPickerHsv[2] = value;
+                selectAccent(Color.HSVToColor(mPickerHsv));
+            }
+        };
+
+        mHueBar = new HueBarView(this, listener);
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (int) (28 * density + 0.5f));
+        barParams.topMargin = marginPx;
+        mHueBar.setLayoutParams(barParams);
+        mColorPickerContainer.addView(mHueBar);
+
+        mSvSquare = new SaturationValueView(this, listener);
+        LinearLayout.LayoutParams squareParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (int) (180 * density + 0.5f));
+        squareParams.topMargin = marginPx;
+        mSvSquare.setLayoutParams(squareParams);
+        mColorPickerContainer.addView(mSvSquare);
+
+        TextView presetsLabel = new TextView(this);
+        presetsLabel.setText(R.string.prompt_color_presets);
+        presetsLabel.setTextSize(13);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelParams.topMargin = marginPx;
+        presetsLabel.setLayoutParams(labelParams);
+        mColorPickerContainer.addView(presetsLabel);
+
+        HorizontalScrollView presetsScroll = new HorizontalScrollView(this);
+        presetsScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout.LayoutParams presetsScrollParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        presetsScrollParams.topMargin = (int) (4 * density + 0.5f);
+        presetsScroll.setLayoutParams(presetsScrollParams);
+        LinearLayout presetsRow = new LinearLayout(this);
+        presetsRow.setOrientation(LinearLayout.HORIZONTAL);
+        for (int preset : PRESET_RGBS) {
+            TextView swatch = new TextView(this);
+            LinearLayout.LayoutParams presetParams = new LinearLayout.LayoutParams(swatchPx, swatchPx);
+            presetParams.rightMargin = (int) (4 * density + 0.5f);
+            swatch.setLayoutParams(presetParams);
+            swatch.setBackgroundColor(0xFF000000 | preset);
+            final int rgb = preset;
+            swatch.setOnClickListener(v -> selectAccent(rgb));
+            presetsRow.addView(swatch);
+        }
+        presetsScroll.addView(presetsRow);
+        mColorPickerContainer.addView(presetsScroll);
+
+        updatePickerViews();
+    }
+
+    /** Refresh the swatch, hex text and picker markers from the current colour. */
+    private void updatePickerViews() {
+        int rgb = pickerAccentRgb();
+        if (mCurrentSwatch != null) mCurrentSwatch.setBackgroundColor(0xFF000000 | rgb);
+        if (mHexText != null) mHexText.setText(String.format("#%06X", rgb));
+        if (mHueBar != null) mHueBar.setHue(mPickerHsv[0]);
+        if (mSvSquare != null) mSvSquare.setHsv(mPickerHsv[0], mPickerHsv[1], mPickerHsv[2]);
+    }
+
+    /** Live drag update: refresh the picker and the selected theme's preview. */
+    private void onPickerLive(int rgb) {
+        mLiveRgb = rgb & 0x00FFFFFF;
+        Color.colorToHSV(mLiveRgb, mPickerHsv);
+        updatePickerViews();
+        updateSelectedThemePreview();
+    }
+
+    private void updateSelectedThemePreview() {
+        TextView preview = mThemePreviews[mThemeId];
+        if (preview != null) {
+            preview.setText(PromptPreview.render(this, mThemeId,
+                    pickerAccentRgb(), pickerAccentIsCustom()));
         }
     }
 
-    private void selectAccent(int code) {
-        if (code == effectiveAccent()) return;
-        mAccent = code;
-        mPrefs.edit().putInt(KEY_ACCENT, mAccent).apply();
+    private void selectAccent(int rgb) {
+        rgb = rgb & 0x00FFFFFF;
+        if (rgb == effectiveAccentRgb()) return;
+        mLiveRgb = 0;
+        mAccentRgb = rgb;
+        mPrefs.edit().putInt(KEY_ACCENT_RGB, mAccentRgb).apply();
         String content = writePromptThemeFile();
         if (content != null) {
             Toast.makeText(this, R.string.prompt_applied, Toast.LENGTH_SHORT).show();
             syncThemeToDistrosAsync(content);
         }
         buildThemeRows();
-        buildColorGrid();
+        buildColorPicker();
     }
 
     /** Sync the new theme to all installed distros on a background thread. */
@@ -290,6 +461,146 @@ public class PromptStyleActivity extends AppCompatActivity {
                     Toast.LENGTH_SHORT).show());
             }
         }).start();
+    }
+
+    /** Picker callbacks: picking = live drag update, picked = commit. */
+    interface ColorPickerListener {
+        void onHuePicking(float hue);
+        void onHuePicked(float hue);
+        void onSvPicking(float saturation, float value);
+        void onSvPicked(float saturation, float value);
+    }
+
+    /** Horizontal rainbow bar: touch to pick the hue (0-360). */
+    static class HueBarView extends View {
+        private static final int[] HUE_COLORS = {
+            0xFFFF0000, 0xFFFFFF00, 0xFF00FF00, 0xFF00FFFF,
+            0xFF0000FF, 0xFFFF00FF, 0xFFFF0000
+        };
+        private final Paint mPaint = new Paint();
+        private final Paint mMarkerPaint = new Paint();
+        private final Paint mMarkerOutlinePaint = new Paint();
+        private final ColorPickerListener mListener;
+        private float mHue;
+
+        HueBarView(Context context, ColorPickerListener listener) {
+            super(context);
+            mListener = listener;
+            mMarkerPaint.setStyle(Paint.Style.STROKE);
+            mMarkerPaint.setStrokeWidth(4);
+            mMarkerPaint.setColor(Color.WHITE);
+            mMarkerOutlinePaint.setStyle(Paint.Style.STROKE);
+            mMarkerOutlinePaint.setStrokeWidth(2);
+            mMarkerOutlinePaint.setColor(Color.BLACK);
+        }
+
+        void setHue(float hue) {
+            mHue = hue;
+            invalidate();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            mPaint.setShader(new LinearGradient(0, 0, w, 0,
+                    HUE_COLORS, null, Shader.TileMode.CLAMP));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            canvas.drawRect(0, 0, getWidth(), getHeight(), mPaint);
+            float x = mHue / 360f * getWidth();
+            float r = getHeight() / 2f - 2;
+            canvas.drawCircle(x, getHeight() / 2f, r + 2, mMarkerOutlinePaint);
+            canvas.drawCircle(x, getHeight() / 2f, r, mMarkerPaint);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            float hue = Math.max(0, Math.min(1, event.getX() / getWidth())) * 360f;
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_MOVE:
+                    mListener.onHuePicking(hue);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    mListener.onHuePicked(hue);
+                    return true;
+                default:
+                    return super.onTouchEvent(event);
+            }
+        }
+    }
+
+    /** Saturation/value square for the current hue: x = saturation, y = value. */
+    static class SaturationValueView extends View {
+        private final Paint mHuePaint = new Paint();
+        private final Paint mWhitePaint = new Paint();
+        private final Paint mBlackPaint = new Paint();
+        private final Paint mMarkerPaint = new Paint();
+        private final Paint mMarkerOutlinePaint = new Paint();
+        private final ColorPickerListener mListener;
+        private float mHue;
+        private float mSaturation;
+        private float mValue;
+
+        SaturationValueView(Context context, ColorPickerListener listener) {
+            super(context);
+            mListener = listener;
+            mMarkerPaint.setStyle(Paint.Style.STROKE);
+            mMarkerPaint.setStrokeWidth(4);
+            mMarkerPaint.setColor(Color.WHITE);
+            mMarkerOutlinePaint.setStyle(Paint.Style.STROKE);
+            mMarkerOutlinePaint.setStrokeWidth(2);
+            mMarkerOutlinePaint.setColor(Color.BLACK);
+        }
+
+        void setHsv(float hue, float saturation, float value) {
+            mHue = hue;
+            mSaturation = saturation;
+            mValue = value;
+            invalidate();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            mWhitePaint.setShader(new LinearGradient(0, 0, w, 0,
+                    0xFFFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+            mBlackPaint.setShader(new LinearGradient(0, 0, 0, h,
+                    0x00000000, 0xFF000000, Shader.TileMode.CLAMP));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            mHuePaint.setColor(Color.HSVToColor(new float[]{mHue, 1, 1}));
+            canvas.drawRect(0, 0, getWidth(), getHeight(), mHuePaint);
+            canvas.drawRect(0, 0, getWidth(), getHeight(), mWhitePaint);
+            canvas.drawRect(0, 0, getWidth(), getHeight(), mBlackPaint);
+            float x = mSaturation * getWidth();
+            float y = (1 - mValue) * getHeight();
+            canvas.drawCircle(x, y, 14, mMarkerOutlinePaint);
+            canvas.drawCircle(x, y, 12, mMarkerPaint);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            float s = Math.max(0, Math.min(1, event.getX() / getWidth()));
+            float v = 1 - Math.max(0, Math.min(1, event.getY() / getHeight()));
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_MOVE:
+                    mListener.onSvPicking(s, v);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    mListener.onSvPicked(s, v);
+                    return true;
+                default:
+                    return super.onTouchEvent(event);
+            }
+        }
     }
 
     // ---------- terminal display options ----------
@@ -479,9 +790,10 @@ public class PromptStyleActivity extends AppCompatActivity {
 
     private void resetAll() {
         mThemeId = DEFAULT_THEME_ID;
-        mAccent = 0;
+        mAccentRgb = 0;
         mPrefs.edit().putInt(KEY_THEME_ID, mThemeId)
-            .putInt(KEY_ACCENT, mAccent).apply();
+            .putInt(KEY_ACCENT_RGB, mAccentRgb)
+            .remove(KEY_ACCENT).apply();
         removePromptTheme();
         // Also remove the theme from every installed distro (background thread).
         new Thread(() -> PromptThemeSync.removeThemeFromAllDistros()).start();
@@ -494,7 +806,7 @@ public class PromptStyleActivity extends AppCompatActivity {
         mDisplayChanged = true;
         sendReloadBroadcast();
         buildThemeRows();
-        buildColorGrid();
+        buildColorPicker();
         buildDisplayRows();
         Toast.makeText(this, R.string.prompt_reset_done, Toast.LENGTH_SHORT).show();
     }
@@ -524,7 +836,8 @@ public class PromptStyleActivity extends AppCompatActivity {
         String asset = readAssetText();
         if (asset == null) return null;
         return asset.replace("__THEME_ID__", String.valueOf(mThemeId))
-            .replace("__ACCENT__", String.valueOf(effectiveAccent()));
+            .replace("__ACCENT_RGB__", rgbTriplet(effectiveAccentRgb()))
+            .replace("__ACCENT_IS_CUSTOM__", accentIsCustom() ? "1" : "0");
     }
 
     /**
@@ -658,12 +971,18 @@ public class PromptStyleActivity extends AppCompatActivity {
 
         private static final int[] RAINBOW_CODES = {31, 33, 32, 36, 34, 35};
 
-        static CharSequence render(PromptStyleActivity activity, int themeId, int accent) {
-            if (themeId == 22) return rainbowPreview(accent);
+        static CharSequence render(PromptStyleActivity activity, int themeId, int accentRgb,
+                boolean accentIsCustom) {
+            if (themeId == 22) return rainbowPreview(accentRgb);
             String template = loadTemplate(activity, themeId);
             if (template == null) return "";
-            template = template.replace("${_PROMPT_ACCENT}", String.valueOf(accent));
-            template = template.replace("${_PROMPT_ACCENT_BG}", String.valueOf(accent + 10));
+            String triplet = ((accentRgb >> 16) & 0xFF) + ";" + ((accentRgb >> 8) & 0xFF)
+                    + ";" + (accentRgb & 0xFF);
+            template = template.replace("${_PROMPT_ACCENT_RGB}", triplet);
+            // Theme 24 ("Root Turns Red"): the accent when the user picked
+            // one, green otherwise (the preview runs in the app, non-root).
+            template = template.replace("${_PROMPT_USER_COLOR_RGB}",
+                    accentIsCustom ? triplet : "0;205;0");
             template = template.replace("${_PROMPT_USER}", "bai");
             template = template.replace("${_PROMPT_HOST}", "phone");
             template = template.replace("${_PROMPT_STATUS_COLOR}", "32");
@@ -674,11 +993,10 @@ public class PromptStyleActivity extends AppCompatActivity {
             template = template.replace("${_PROMPT_DURATION_TXT}", "[0.3s] ");
             template = template.replace("${_PROMPT_DATE_STR}", "2026-11-21 01:20");
             template = template.replace("${_PROMPT_LAST2}", "workspace/termux-zh");
-            template = template.replace("${_PROMPT_USER_COLOR}", "32");
             return interpret(template);
         }
 
-        private static CharSequence rainbowPreview(int accent) {
+        private static CharSequence rainbowPreview(int accentRgb) {
             SpannableStringBuilder out = new SpannableStringBuilder();
             String name = "bai";
             for (int i = 0; i < name.length(); i++) {
@@ -695,7 +1013,7 @@ public class PromptStyleActivity extends AppCompatActivity {
             out.append(" ");
             start = out.length();
             out.append("$");
-            out.setSpan(new ForegroundColorSpan(ansiToArgb(accent)),
+            out.setSpan(new ForegroundColorSpan(0xFF000000 | accentRgb),
                 start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             return out;
         }
@@ -763,14 +1081,16 @@ public class PromptStyleActivity extends AppCompatActivity {
         }
 
         /** Apply colours to [runStart, length) when the run is non-empty. */
+        /** Apply colours to [runStart, length) when the run is non-empty.
+         * fg/bg are ARGB ints (-1 = default). */
         private static void flushRun(SpannableStringBuilder out, int runStart, int fg, int bg) {
             if (out.length() > runStart) {
                 if (fg != -1) {
-                    out.setSpan(new ForegroundColorSpan(ansiToArgb(fg)),
+                    out.setSpan(new ForegroundColorSpan(fg),
                         runStart, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
                 if (bg != -1) {
-                    out.setSpan(new BackgroundColorSpan(ansiToArgb(bg)),
+                    out.setSpan(new BackgroundColorSpan(bg),
                         runStart, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
             }
@@ -780,16 +1100,25 @@ public class PromptStyleActivity extends AppCompatActivity {
          * Parse the inside of a \[...\] region. Returns {fg, bg} (-1 = default),
          * or null when the region holds no colour escape.
          */
+        /**
+         * Parse the inside of a \[...\] region. Returns {fgArgb, bgArgb}
+         * (-1 = default), or null when the region holds no colour escape.
+         * Handles truecolor 38;2;R;G;B / 48;2;R;G;B (consuming the following
+         * parts), plain ANSI codes via ansiToArgb, and 7 (reverse video:
+         * the current foreground becomes the background). Parts are
+         * processed in order, last wins — matching the terminal.
+         */
         private static int[] parseEscape(String inside) {
             Matcher matcher = Pattern.compile("\\\\e\\[([0-9;]*)m").matcher(inside);
             if (!matcher.find()) return null;
             int fg = -1;
             int bg = -1;
-            for (String part : matcher.group(1).split(";")) {
-                if (part.isEmpty()) continue;
+            String[] parts = matcher.group(1).split(";");
+            for (int i = 0; i < parts.length; i++) {
+                if (parts[i].isEmpty()) continue;
                 int code;
                 try {
-                    code = Integer.parseInt(part);
+                    code = Integer.parseInt(parts[i]);
                 } catch (NumberFormatException e) {
                     continue;
                 }
@@ -797,12 +1126,30 @@ public class PromptStyleActivity extends AppCompatActivity {
                     fg = -1;
                     bg = -1;
                 } else if (code == 7) {
-                    fg = 97; // reverse video: bright text on a dark block
-                    bg = 40;
+                    if (fg != -1) {
+                        bg = fg;
+                        fg = -1;
+                    } else {
+                        fg = ansiToArgb(97);
+                        bg = ansiToArgb(40);
+                    }
+                } else if ((code == 38 || code == 48) && i + 4 < parts.length
+                        && "2".equals(parts[i + 1])) {
+                    int r, g, b;
+                    try {
+                        r = Integer.parseInt(parts[i + 2]);
+                        g = Integer.parseInt(parts[i + 3]);
+                        b = Integer.parseInt(parts[i + 4]);
+                    } catch (NumberFormatException e) {
+                        continue;
+                    }
+                    int argb = 0xFF000000 | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+                    if (code == 38) fg = argb; else bg = argb;
+                    i += 4;
                 } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
-                    fg = code;
+                    fg = ansiToArgb(code);
                 } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
-                    bg = code;
+                    bg = ansiToArgb(code);
                 }
             }
             return new int[]{fg, bg};

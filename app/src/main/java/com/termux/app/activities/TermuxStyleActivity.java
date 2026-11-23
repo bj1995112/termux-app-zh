@@ -32,12 +32,27 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class TermuxStyleActivity extends Activity {
 
     private static final String DEFAULT_FILENAME = "Default";
+
+    /** Bytes written for the Default colour choice (see copyFile). */
+    private static final byte[] DEFAULT_COLORS_BYTES =
+            "# Using default color theme.".getBytes(StandardCharsets.UTF_8);
+
+    /**
+     * Index of the list entry that is currently in use, per list.
+     * -2 = not computed yet, -1 = no entry matches the live file,
+     * >= 0 = the matching entry. Content is the truth: the index is found
+     * by comparing the live file's bytes against the assets (see
+     * findCurrentIndex), never from a recorded choice.
+     */
+    private int mCurrentColorIndex = -2;
+    private int mCurrentFontIndex = -2;
 
     // Chinese display names for color schemes and fonts: file names are
     // English, so the chooser shows "中文 (English)" when a mapping exists
@@ -189,14 +204,21 @@ public class TermuxStyleActivity extends Activity {
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item);
 
         colorSpinner.setOnClickListener(v -> {
+            int checked = mCurrentColorIndex >= 0 ? mCurrentColorIndex : -1;
             AlertDialog dialog = new AlertDialog.Builder(TermuxStyleActivity.this)
-                    .setAdapter(colorAdapter, (d, which) -> copyFile(colorAdapter.getItem(which), true))
+                    .setSingleChoiceItems(colorAdapter, checked, (d, which) -> {
+                        if (copyFile(colorAdapter.getItem(which), true)) {
+                            mCurrentColorIndex = which;
+                        }
+                        d.dismiss();
+                    })
                     .create();
             dialog.setOnShowListener(d -> {
                 dialog.getListView().setOnItemLongClickListener((parent, view, position, id) -> {
                     showLicense(colorAdapter.getItem(position), true);
                     return true;
                 });
+                refreshCheckedIndexAsync(dialog, colorAdapter, true);
             });
             dialog.show();
         });
@@ -205,14 +227,21 @@ public class TermuxStyleActivity extends Activity {
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item);
 
         fontSpinner.setOnClickListener(v -> {
+            int checked = mCurrentFontIndex >= 0 ? mCurrentFontIndex : -1;
             AlertDialog dialog = new AlertDialog.Builder(TermuxStyleActivity.this)
-                    .setAdapter(fontAdapter, (d, which) -> copyFile(fontAdapter.getItem(which), false))
+                    .setSingleChoiceItems(fontAdapter, checked, (d, which) -> {
+                        if (copyFile(fontAdapter.getItem(which), false)) {
+                            mCurrentFontIndex = which;
+                        }
+                        d.dismiss();
+                    })
                     .create();
             dialog.setOnShowListener(d -> {
                 dialog.getListView().setOnItemLongClickListener((parent, view, position, id) -> {
                     showLicense(fontAdapter.getItem(position), false);
                     return true;
                 });
+                refreshCheckedIndexAsync(dialog, fontAdapter, false);
             });
             dialog.show();
         });
@@ -242,6 +271,93 @@ public class TermuxStyleActivity extends Activity {
 
         colorAdapter.addAll(colorList);
         fontAdapter.addAll(fontList);
+
+        // Precompute which scheme/font is current, off the UI thread, so the
+        // dialogs can show the marker immediately when first opened.
+        new Thread(() -> {
+            mCurrentColorIndex = computeCurrentIndex(colorAdapter, true);
+            mCurrentFontIndex = computeCurrentIndex(fontAdapter, false);
+        }).start();
+    }
+
+    /** Reads one asset's bytes by file name (colours or fonts folder). */
+    interface AssetBytesReader {
+        byte[] read(String fileName);
+    }
+
+    /** Read an asset's bytes, or null on failure. */
+    private byte[] readAssetBytes(String assetPath) {
+        try (java.io.InputStream in = getAssets().open(assetPath)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Bytes of the live file, or null when it is missing / unreadable. */
+    private static byte[] readLiveFileBytes(File file) {
+        if (file == null || !file.isFile()) return null;
+        try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Index of the list entry whose content matches the live file, or -1
+     * when nothing matches. Items are in list order (Default first, index
+     * 0); the first byte-identical asset wins. Default matches when the
+     * live file is missing (the built-in default is in use) or holds
+     * exactly the Default marker: the comment for colours, an empty file
+     * for fonts. A hand-edited live file matches nothing, so no marker is
+     * shown rather than a wrong one.
+     */
+    static int findCurrentIndex(byte[] liveBytes, ArrayList<Selectable> items,
+            boolean colors, AssetBytesReader reader) {
+        if (liveBytes == null) return 0;
+        if (colors && Arrays.equals(liveBytes, DEFAULT_COLORS_BYTES)) return 0;
+        if (!colors && liveBytes.length == 0) return 0;
+        for (int i = 1; i < items.size(); i++) {
+            byte[] assetBytes = reader.read(items.get(i).fileName);
+            if (assetBytes != null && Arrays.equals(liveBytes, assetBytes)) return i;
+        }
+        return -1;
+    }
+
+    /** Synchronous current-index computation (call off the UI thread). */
+    private int computeCurrentIndex(ArrayAdapter<Selectable> adapter, boolean colors) {
+        ArrayList<Selectable> items = new ArrayList<>();
+        for (int i = 0; i < adapter.getCount(); i++) items.add(adapter.getItem(i));
+        File liveFile = colors ? TermuxConstants.TERMUX_COLOR_PROPERTIES_FILE
+                : TermuxConstants.TERMUX_FONT_FILE;
+        byte[] liveBytes = readLiveFileBytes(liveFile);
+        String folder = colors ? "colors" : "fonts";
+        return findCurrentIndex(liveBytes, items, colors,
+                fileName -> readAssetBytes(folder + "/" + fileName));
+    }
+
+    /** Compute the current index off the UI thread and check it in the
+     * dialog's list when done (if the dialog is still showing). */
+    private void refreshCheckedIndexAsync(final AlertDialog dialog,
+            final ArrayAdapter<Selectable> adapter, final boolean colors) {
+        new Thread(() -> {
+            int index = computeCurrentIndex(adapter, colors);
+            if (colors) mCurrentColorIndex = index; else mCurrentFontIndex = index;
+            runOnUiThread(() -> {
+                if (dialog.isShowing() && index >= 0) {
+                    dialog.getListView().setItemChecked(index, true);
+                }
+            });
+        }).start();
     }
 
     private void showLicense(Selectable currentSelectable, boolean colors) {
@@ -271,7 +387,8 @@ public class TermuxStyleActivity extends Activity {
         }
     }
 
-    private void copyFile(Selectable currentSelectable, boolean colors) {
+    /** Copy the chosen asset to the live file; returns true on success. */
+    private boolean copyFile(Selectable currentSelectable, boolean colors) {
         String outputFile = colors ? "colors.properties" : "font.ttf";
         try {
             // Same destination files the external plugin wrote to, now referenced
@@ -320,10 +437,12 @@ public class TermuxStyleActivity extends Activity {
             reloadIntent.putExtra(TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY.EXTRA_RELOAD_STYLE,
                     colors ? "colors" : "font");
             sendBroadcast(reloadIntent);
+            return true;
         } catch (Exception e) {
             Log.w("termux", "Failed to write " + outputFile, e);
             String message = getResources().getString(R.string.writing_failed) + e.getMessage();
             Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            return false;
         }
     }
 }
