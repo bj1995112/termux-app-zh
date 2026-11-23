@@ -415,12 +415,34 @@ public final class MirrorSettings {
                 target = resolved.toFile();
             }
             File parent = target.getParentFile();
-            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) return false;
+            if (parent != null) {
+                // Remember which ancestors mkdirs is about to create: with
+                // the app's umask they come out 0700, and apt's _apt user
+                // could not traverse them. Only the created ones are fixed
+                // up; pre-existing directories are left alone.
+                List<File> created = new ArrayList<>();
+                for (File d = parent; d != null && !d.isDirectory(); d = d.getParentFile()) {
+                    created.add(d);
+                }
+                if (!(parent.isDirectory() || parent.mkdirs())) return false;
+                for (File d : created) {
+                    d.setReadable(true, false);
+                    d.setExecutable(true, false);
+                }
+            }
             byte[] pem = downloadCaBundle();
             if (pem == null) return false;
             try (FileOutputStream out = new FileOutputStream(target)) {
                 out.write(pem);
             }
+            // The bundle must be world-readable (0644, like the real
+            // ca-certificates package installs it). The app's umask makes
+            // the fresh file 0600, and apt's sandboxed downloader runs as
+            // the _apt user, which then cannot read it — apt fails
+            // certificate verification even though the bundle is there.
+            target.setReadable(true, false);
+            target.setWritable(true, true);
+            target.setExecutable(false, false);
             return containerHasCaCerts(rootfs);
         } catch (IOException | RuntimeException e) {
             Log.w(TAG, "certificate bootstrap failed for " + distroId, e);
