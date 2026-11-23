@@ -881,6 +881,31 @@ public class AiAgentsActivity extends AppCompatActivity {
             Toast.makeText(this, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
             return;
         }
+        // Step 0 (certificate bootstrap): always run the bootstrap on a
+        // background thread before the session starts. It is a cheap file
+        // check when the container already has certificates, and it covers
+        // containers whose mirror was applied before this fix. There is no
+        // gate on containerHasCaCerts here: that check counts a dangling
+        // symlink as present, which would skip the bootstrap and leave the
+        // install failing the same way. The download never runs on the UI
+        // thread; the session starts when it finishes.
+        new Thread() {
+            @Override
+            public void run() {
+                MirrorSettings.ensureContainerCaCerts(rootfs, mDistroId);
+                runOnUiThread(() -> launchAgentSession(agents, update, pinnedVersions, rootfs));
+            }
+        }.start();
+        return;
+    }
+
+    /** Write the install/update script into the container's /tmp and run it
+     *  in a new visible terminal session. Split out of
+     *  startAgentSession so the certificate bootstrap can run first on
+     *  a background thread. Deliberately does not finish(): Back from
+     *  the session returns here and onResume re-detects. */
+    private void launchAgentSession(List<AiAgentUtils.AgentDef> agents, boolean update,
+            Map<String, String> pinnedVersions, File rootfs) {
         String scriptName = "termux-aiagents-" + mContainer + (update ? "-update" : "") + ".sh";
         File scriptFile = new File(rootfs, "tmp/" + scriptName);
         try {

@@ -309,4 +309,26 @@ public final class DistroUtils {
             return new String(buffer, 0, read, StandardCharsets.UTF_8);
         }
     }
+
+    /** Primary CA bundle path inside a container's rootfs, relative to
+     *  the rootfs: the file the distro's TLS clients read by default.
+     *  Fedora/openSUSE/Arch point at a symlink the bootstrap resolves
+     *  before writing; the others are regular files. Unknown distros
+     *  fall back to the Debian-style path. */
+    public static String caBundleRelPath(String distroId) {
+        if (distroId == null) return "etc/ssl/certs/ca-certificates.crt";
+        switch (distroId) {
+            case "fedora":
+                return "etc/pki/tls/certs/ca-bundle.crt";
+            case "opensuse":
+                return "etc/ssl/ca-bundle.pem";
+            case "ubuntu":
+            case "debian":
+            case "arch":
+            case "alpine":
+            case "void":
+            default:
+                return "etc/ssl/certs/ca-certificates.crt";
+        }
+    }
 }
