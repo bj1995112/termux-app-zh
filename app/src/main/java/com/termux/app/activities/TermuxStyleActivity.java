@@ -54,6 +54,12 @@ public class TermuxStyleActivity extends Activity {
     private int mCurrentColorIndex = -2;
     private int mCurrentFontIndex = -2;
 
+    /** Bumped on every successful copy; a background computation started
+     * before the copy must not overwrite the fresh cache (0.09 bug: the
+     * onShow refresh read the pre-tap file and clobbered the new index
+     * with -1, so a just-picked scheme showed no marker on reopen). */
+    private int mCurrentIndexGeneration;
+
     // Chinese display names for color schemes and fonts: file names are
     // English, so the chooser shows "中文 (English)" when a mapping exists
     // and plain English otherwise (well-known brand names have no mapping).
@@ -201,7 +207,7 @@ public class TermuxStyleActivity extends Activity {
         final Button fontSpinner = findViewById(R.id.font_spinner);
 
         final ArrayAdapter<Selectable> colorAdapter =
-                new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item);
+                new ArrayAdapter<>(this, android.R.layout.select_dialog_singlechoice);
 
         colorSpinner.setOnClickListener(v -> {
             int checked = mCurrentColorIndex >= 0 ? mCurrentColorIndex : -1;
@@ -209,6 +215,7 @@ public class TermuxStyleActivity extends Activity {
                     .setSingleChoiceItems(colorAdapter, checked, (d, which) -> {
                         if (copyFile(colorAdapter.getItem(which), true)) {
                             mCurrentColorIndex = which;
+                            mCurrentIndexGeneration++;
                         }
                         d.dismiss();
                     })
@@ -224,7 +231,7 @@ public class TermuxStyleActivity extends Activity {
         });
 
         final ArrayAdapter<Selectable> fontAdapter =
-                new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item);
+                new ArrayAdapter<>(this, android.R.layout.select_dialog_singlechoice);
 
         fontSpinner.setOnClickListener(v -> {
             int checked = mCurrentFontIndex >= 0 ? mCurrentFontIndex : -1;
@@ -232,6 +239,7 @@ public class TermuxStyleActivity extends Activity {
                     .setSingleChoiceItems(fontAdapter, checked, (d, which) -> {
                         if (copyFile(fontAdapter.getItem(which), false)) {
                             mCurrentFontIndex = which;
+                            mCurrentIndexGeneration++;
                         }
                         d.dismiss();
                     })
@@ -275,8 +283,13 @@ public class TermuxStyleActivity extends Activity {
         // Precompute which scheme/font is current, off the UI thread, so the
         // dialogs can show the marker immediately when first opened.
         new Thread(() -> {
-            mCurrentColorIndex = computeCurrentIndex(colorAdapter, true);
-            mCurrentFontIndex = computeCurrentIndex(fontAdapter, false);
+            int gen = mCurrentIndexGeneration;
+            int color = computeCurrentIndex(colorAdapter, true);
+            int font = computeCurrentIndex(fontAdapter, false);
+            if (gen == mCurrentIndexGeneration) {
+                mCurrentColorIndex = color;
+                mCurrentFontIndex = font;
+            }
         }).start();
     }
 
@@ -349,9 +362,12 @@ public class TermuxStyleActivity extends Activity {
      * dialog's list when done (if the dialog is still showing). */
     private void refreshCheckedIndexAsync(final AlertDialog dialog,
             final ArrayAdapter<Selectable> adapter, final boolean colors) {
+        final int gen = mCurrentIndexGeneration;
         new Thread(() -> {
             int index = computeCurrentIndex(adapter, colors);
-            if (colors) mCurrentColorIndex = index; else mCurrentFontIndex = index;
+            if (gen == mCurrentIndexGeneration) {
+                if (colors) mCurrentColorIndex = index; else mCurrentFontIndex = index;
+            }
             runOnUiThread(() -> {
                 if (dialog.isShowing() && index >= 0) {
                     dialog.getListView().setItemChecked(index, true);
