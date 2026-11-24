@@ -290,7 +290,7 @@
     <string name="aiagents_installed">Installed %1$s</string>
     <string name="aiagents_installed_unknown">Installed</string>
     <string name="aiagents_unsupported">Not supported on this distro yet</string>
-    <string name="aiagents_unsupported_hermes_alpine">Not supported yet: needs libheif 1.23.4 or newer; Alpine 3.22 ships 1.19.8</string>
+    <string name="aiagents_hermes_alpine_note">Note: Hermes needs libheif 1.23.4 or newer; Alpine 3.22 ships 1.19.8 and may fail to install, while Alpine 3.24 and newer ship 1.23.7.</string>
     <string name="aiagents_status_checking">Checking installed agents…</string>
     <string name="aiagents_status_summary">%1$d of %2$d agents installed</string>
     <string name="aiagents_install_selected">Install selected</string>

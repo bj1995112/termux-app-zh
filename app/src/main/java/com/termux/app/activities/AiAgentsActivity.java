@@ -277,9 +277,12 @@ public class AiAgentsActivity extends AppCompatActivity {
     private String subtitleFor(AgentRow row) {
         String desc = getString(row.def.descriptionRes);
         if (!row.supported) {
-            return desc + "\n" + unsupportedReason(row.def);
+            return desc + "\n" + getString(R.string.aiagents_unsupported);
         }
-        return desc + "\n" + statusLineFor(row);
+        String subtitle = desc + "\n" + statusLineFor(row);
+        String note = hermesAlpineNote(row.def);
+        if (note != null) subtitle += "\n" + note;
+        return subtitle;
     }
 
     /** Second line of a row: installed version + latest version, e.g.
@@ -380,19 +383,18 @@ public class AiAgentsActivity extends AppCompatActivity {
     private boolean isSupported(AiAgentUtils.AgentDef def) {
         if (def.needsNode && !NODE_VERIFIED.contains(mDistroId)) return false;
         if ("agy".equals(def.id) && "alpine".equals(mDistroId)) return false;
-        // Hermes builds pillow-heif from source, which needs libheif >= 1.23.4;
-        // Alpine 3.22 ships 1.19.8, so it cannot install there (see design.md).
-        if ("hermes".equals(def.id) && "alpine".equals(mDistroId)) return false;
         return true;
     }
 
-    /** Why this agent is unsupported on the current distro, or the generic
-     * line when the reason is not specific (see isSupported). */
-    private String unsupportedReason(AiAgentUtils.AgentDef def) {
+    /** Informational note for Hermes on Alpine: pillow-heif needs libheif
+     * >= 1.23.4, and Alpine 3.22 ships 1.19.8 (the build may fail) while
+     * 3.24+ ships 1.23.7. Shown only; Hermes stays installable on Alpine
+     * and is not blocked by version. Null when not applicable. */
+    private String hermesAlpineNote(AiAgentUtils.AgentDef def) {
         if ("hermes".equals(def.id) && "alpine".equals(mDistroId)) {
-            return getString(R.string.aiagents_unsupported_hermes_alpine);
+            return getString(R.string.aiagents_hermes_alpine_note);
         }
-        return getString(R.string.aiagents_unsupported);
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -662,7 +664,11 @@ public class AiAgentsActivity extends AppCompatActivity {
         container.setVisibility(View.VISIBLE);
         if (!row.supported) {
             addExpandedLine(container,
-                unsupportedReason(row.def), 13, secondaryColor);
+                getString(R.string.aiagents_unsupported), 13, secondaryColor);
+        }
+        String note = hermesAlpineNote(row.def);
+        if (note != null) {
+            addExpandedLine(container, note, 13, secondaryColor);
         }
         if (row.historyLoading) {
             addExpandedLine(container,
@@ -708,7 +714,7 @@ public class AiAgentsActivity extends AppCompatActivity {
                 if (!canInstall) {
                     if (!row.supported) {
                         Toast.makeText(AiAgentsActivity.this,
-                            unsupportedReason(row.def), Toast.LENGTH_SHORT).show();
+                            R.string.aiagents_unsupported, Toast.LENGTH_SHORT).show();
                     } else {
                         Toast.makeText(AiAgentsActivity.this,
                             getString(R.string.aiagents_version_not_supported,
@@ -1052,8 +1058,7 @@ public class AiAgentsActivity extends AppCompatActivity {
                 // pillow-heif 1.8.1 builds from source and needs the libheif
                 // headers plus a toolchain; install them first or `uv sync`
                 // fails with "headers or library files could not be found
-                // for libheif". Alpine is excluded by isSupported (its
-                // libheif is too old), so no Alpine list here.
+                // for libheif".
                 String buildDeps = hermesBuildDepsCommand(mDistroId);
                 if (!buildDeps.isEmpty()) {
                     s.append("  ").append(buildDeps)
@@ -1254,8 +1259,10 @@ public class AiAgentsActivity extends AppCompatActivity {
      * from source and needs the libheif headers plus a C toolchain and the
      * Python headers. Versions verified 2026-11-24 against the live mirror
      * indexes (see design.md): every distro here ships libheif >= 1.23.4,
-     * the minimum pillow-heif 1.8.0 requires. Alpine is excluded by
-     * isSupported (3.22 ships libheif 1.19.8), so it returns "" here. */
+     * the minimum pillow-heif 1.8.0 requires, except Alpine, whose libheif
+     * depends on the release (3.22 ships 1.19.8, 3.24 ships 1.23.7).
+     * Alpine is not blocked — it only gets a warning note — so it
+     * installs the same deps here. */
     private static String hermesBuildDepsCommand(String distroId) {
         switch (distroId) {
             case "ubuntu":
@@ -1269,6 +1276,8 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "zypper install -y gcc make pkgconf libheif-devel python314-devel";
             case "void":
                 return "xbps-install -Sy base-devel pkg-config libheif-devel python3-devel";
+            case "alpine":
+                return "apk add build-base pkgconf libheif-dev python3-dev";
             default:
                 return "";
         }
