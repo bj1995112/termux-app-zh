@@ -554,8 +554,8 @@ public final class AiAgentUtils {
      * <li>distro-packaged Node and NodeSource (prefix /usr):
      * usr/lib/node_modules/&lt;pkg&gt;/package.json — npm's prefix
      * defaults to where node is installed, so every distro package
-     * (Arch pacman, Alpine apk, Fedora dnf, openSUSE zypper, Void
-     * xbps) lands here;</li>
+     * (Arch pacman, Alpine apk, Fedora dnf, openSUSE zypper)
+     * lands here;</li>
      * <li>tarball-redirected prefix (prefix /usr/local):
      * usr/local/lib/node_modules/&lt;pkg&gt;/package.json — what
      * nodeTarballInstallCommand sets for new installs;</li>

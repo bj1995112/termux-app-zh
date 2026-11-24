@@ -442,7 +442,6 @@
     <string name="mirror_probe_distro">Distro mirror</string>
     <string name="mirror_restore_confirm">Restore official sources in installed distros and switch back to Official?</string>
     <string name="mirror_restored">Official sources restored</string>
-    <string name="mirror_void_note">Void Linux is only mirrored on TUNA; other presets keep its official source</string>
     <string name="mirror_free_proxy_note">DaoCloud / dockerproxy are free proxies with no SLA; switch back to Official if downloads fail</string>
     <string name="mirror_github_proxy_warning">Third-party proxies can see and modify downloads; only use one you trust</string>
     <string name="mirror_invalid_url">Invalid URL (must start with https://)</string>

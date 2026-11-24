@@ -108,7 +108,6 @@ public final class MirrorSettings {
     private static final String OFFICIAL_ALPINE = "dl-cdn.alpinelinux.org";
     private static final String OFFICIAL_FEDORA = "download.fedoraproject.org";
     private static final String OFFICIAL_OPENSUSE = "download.opensuse.org";
-    private static final String OFFICIAL_VOID = "repo-default.voidlinux.org";
 
     /** Hosts a package-source file may legitimately contain; all of them are
      *  rewritten to the target host when a mirror is applied. */
@@ -118,7 +117,6 @@ public final class MirrorSettings {
             "dl-cdn.alpinelinux.org",
             "download.fedoraproject.org",
             "download.opensuse.org",
-            "repo-default.voidlinux.org",
             "mirrors.tuna.tsinghua.edu.cn",
             "mirrors.ustc.edu.cn",
             "mirrors.aliyun.com",
@@ -325,7 +323,6 @@ public final class MirrorSettings {
         if ("alpine".equals(distroId)) return OFFICIAL_ALPINE;
         if ("fedora".equals(distroId)) return OFFICIAL_FEDORA;
         if ("opensuse".equals(distroId)) return OFFICIAL_OPENSUSE;
-        if ("void".equals(distroId)) return OFFICIAL_VOID;
         return OFFICIAL_UBUNTU;
     }
 
@@ -467,9 +464,7 @@ public final class MirrorSettings {
     // ------------------------------------------------------------------
 
     /** Apply the preset's distro package mirror to one installed container.
-     *  Returns APPLY_OK / APPLY_NO_CHANGE / APPLY_SKIPPED / APPLY_FAILED.
-     *  Void is only mirrored for TUNA or a custom preset (other presets keep
-     *  its official source and return APPLY_SKIPPED). */
+     *  Returns APPLY_OK / APPLY_NO_CHANGE / APPLY_SKIPPED / APPLY_FAILED. */
     public static int applyToContainer(File rootfs, String distroId, MirrorPreset preset) {
         if (rootfs == null || !rootfs.isDirectory() || distroId == null) return APPLY_FAILED;
         if (preset == null) preset = presetForId(PRESET_OFFICIAL);
@@ -495,13 +490,6 @@ public final class MirrorSettings {
             if ("opensuse".equals(distroId)) {
                 return applyOpenSuse(rootfs, target);
             }
-            if ("void".equals(distroId)) {
-                if (!target.isEmpty() && !PRESET_TUNA.equals(preset.id)
-                        && !PRESET_CUSTOM.equals(preset.id)) {
-                    return APPLY_SKIPPED;
-                }
-                return applyVoid(rootfs, target);
-            }
             return APPLY_SKIPPED;
         } catch (IOException e) {
             Log.e(TAG, "applyToContainer failed for " + distroId, e);
@@ -523,7 +511,6 @@ public final class MirrorSettings {
             if ("alpine".equals(distroId)) return restoreGeneric(rootfs, "etc/apk/repositories", OFFICIAL_ALPINE);
             if ("fedora".equals(distroId)) return restoreFedora(rootfs);
             if ("opensuse".equals(distroId)) return restoreOpenSuse(rootfs);
-            if ("void".equals(distroId)) return restoreVoid(rootfs);
             return APPLY_SKIPPED;
         } catch (IOException e) {
             Log.e(TAG, "restoreOfficialInContainer failed for " + distroId, e);
@@ -577,7 +564,10 @@ public final class MirrorSettings {
             writeFile(mirrorlist, stripped);
             return APPLY_OK;
         }
-        String line = "Server = https://" + target + "/archlinux/$repo/os/$arch " + MARKER + "\n";
+        // Arch Linux ARM layout (aarch64 container): /archlinuxarm/aarch64/$repo.
+        // NOT the x86_64 layout /archlinux/$repo/os/$arch — that path has no
+        // aarch64 directory, so pacman 404s on every mirror.
+        String line = "Server = https://" + target + "/archlinuxarm/aarch64/$repo " + MARKER + "\n";
         // Compare against the full file: the line may already be first
         // (re-apply), in which case writing it again changes nothing.
         if ((line + stripped).equals(content)) return APPLY_NO_CHANGE;
@@ -714,109 +704,6 @@ public final class MirrorSettings {
             } else {
                 changed |= rewriteFileHosts(rootfs, "etc/zypp/repos.d/" + repo.getName(),
                         OFFICIAL_OPENSUSE);
-            }
-        }
-        return changed ? APPLY_OK : APPLY_NO_CHANGE;
-    }
-
-    // --- Void: /etc/xbps.d overrides /usr/share/xbps.d, so mirror there ---
-
-    private static int applyVoid(File rootfs, String target) throws IOException {
-        File shareDir = new File(rootfs, "usr/share/xbps.d");
-        File etcDir = new File(rootfs, "etc/xbps.d");
-        File[] shareFiles = shareDir.listFiles();
-        if (shareFiles == null || shareFiles.length == 0) return APPLY_SKIPPED;
-        String host = target; // "" = official; rewriteVoidConf handles the path prefix
-        boolean changed = false;
-        for (File shareFile : shareFiles) {
-            if (!shareFile.getName().endsWith(".conf")) continue;
-            File etcFile = new File(etcDir, shareFile.getName());
-            boolean preExisted = etcFile.exists();
-            if (!preExisted) {
-                if (!etcDir.exists() && !etcDir.mkdirs()) return APPLY_FAILED;
-                copyFile(shareFile, etcFile);
-                markCreated(rootfs, "etc/xbps.d/" + shareFile.getName());
-                changed = true;
-            }
-            // A copy we just created needs no backup: the /usr/share
-            // original IS the pristine content, and restore deletes the
-            // copy again (see the .created marker). Only a pre-existing
-            // override gets backed up (backupFile skips marked files).
-            // Void URLs need a host + path rewrite (see rewriteVoidConf),
-            // not the plain host swap the other distros use.
-            File file = new File(rootfs, "etc/xbps.d/" + shareFile.getName());
-            String content = readFile(file);
-            String rewritten = rewriteVoidConf(content, host);
-            if (!rewritten.equals(content)) {
-                backupFile(rootfs, "etc/xbps.d/" + shareFile.getName());
-                writeFile(file, rewritten);
-                changed = true;
-            }
-        }
-        return changed ? APPLY_OK : APPLY_NO_CHANGE;
-    }
-
-    /** Void repository URLs: the official host serves /current directly,
-     *  but mirrors serve it under /voidlinux (TUNA help page:
-     *  sed 's|https://repo-default.voidlinux.org|https://mirrors.tuna.tsinghua.edu.cn/voidlinux|g').
-     *  A plain host swap would produce the 404
-     *  https://mirrors.tuna.tsinghua.edu.cn/current, so rewrite the
-     *  repository= lines as host + path: mirror form is
-     *  <host>/voidlinux/<path>, official form is repo-default.voidlinux.org/<path>.
-     *  The /etc/xbps.d files handled here are copies of the stock
-     *  /usr/share ones (or the user's backed-up override), so every
-     *  repository= line in them is ours to rewrite. */
-    private static String rewriteVoidConf(String content, String targetHost) {
-        StringBuilder out = new StringBuilder();
-        for (String line : content.split("\n", -1)) {
-            String trimmed = line.trim();
-            if (trimmed.startsWith("repository=")) {
-                out.append(rewriteVoidRepositoryLine(trimmed, targetHost)).append("\n");
-            } else {
-                out.append(line).append("\n");
-            }
-        }
-        String result = out.toString();
-        if (result.endsWith("\n")) result = result.substring(0, result.length() - 1);
-        return result;
-    }
-
-    private static String rewriteVoidRepositoryLine(String line, String targetHost) {
-        int eq = line.indexOf('=');
-        if (eq < 0) return line;
-        String url = line.substring(eq + 1).trim();
-        int schemeEnd = url.indexOf("://");
-        if (schemeEnd < 0) return line;
-        String scheme = url.substring(0, schemeEnd);
-        String rest = url.substring(schemeEnd + 3);
-        int slash = rest.indexOf('/');
-        String path = slash < 0 ? "" : rest.substring(slash);
-        // Normalize: drop a /voidlinux prefix if the line already has one.
-        if (path.startsWith("/voidlinux")) path = path.substring("/voidlinux".length());
-        if (targetHost.isEmpty()) {
-            return line.substring(0, eq + 1) + scheme + "://" + OFFICIAL_VOID + path;
-        }
-        return line.substring(0, eq + 1) + scheme + "://" + targetHost + "/voidlinux" + path;
-    }
-
-    private static int restoreVoid(File rootfs) throws IOException {
-        File etcDir = new File(rootfs, "etc/xbps.d");
-        File[] etcFiles = etcDir.listFiles();
-        if (etcFiles == null || etcFiles.length == 0) return APPLY_SKIPPED;
-        boolean changed = false;
-        for (File etcFile : etcFiles) {
-            if (!etcFile.getName().endsWith(".conf")) continue;
-            String relPath = "etc/xbps.d/" + etcFile.getName();
-            if (clearCreated(rootfs, relPath)) {
-                // This copy only exists because we created it.
-                if (etcFile.delete()) changed = true;
-            } else if (restoreFile(rootfs, relPath)) {
-                changed = true;
-            } else {
-                // No backup and no marker (e.g. written by an older
-                // build): delete the copy if the stock original exists.
-                File shareFile = new File(rootfs, "usr/share/xbps.d/" + etcFile.getName());
-                if (shareFile.exists() && etcFile.delete()) changed = true;
             }
         }
         return changed ? APPLY_OK : APPLY_NO_CHANGE;

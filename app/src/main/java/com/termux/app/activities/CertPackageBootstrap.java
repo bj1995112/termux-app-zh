@@ -102,7 +102,7 @@ public final class CertPackageBootstrap {
                 return empty; // Already has certificates: nothing to do.
             }
             String release = containerRelease(rootfs, distroId);
-            if (release == null) return empty; // Unsupported distro (Void) or unreadable.
+            if (release == null) return empty; // Unsupported distro or unreadable.
             for (String host : mirrorHosts) {
                 if (host == null || host.isEmpty()) continue;
                 List<String> staged = tryHost(rootfs, distroId, host, release);

@@ -1218,8 +1218,6 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "apk update && apk add curl ca-certificates";
             case "opensuse":
                 return "zypper refresh && zypper install -y curl ca-certificates";
-            case "void":
-                return "xbps-install -Sy curl ca-certificates";
             default:
                 return "# unknown distro, curl install skipped";
         }
@@ -1248,8 +1246,6 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "apk add nodejs npm";
             case "opensuse":
                 return "zypper install -y nodejs24 npm24";
-            case "void":
-                return "xbps-install -Sy nodejs";
             default:
                 return "# unknown distro, Node install skipped";
         }
@@ -1274,8 +1270,6 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "dnf install -y gcc make pkgconf libheif-devel python3-devel";
             case "opensuse":
                 return "zypper install -y gcc make pkgconf libheif-devel python314-devel";
-            case "void":
-                return "xbps-install -Sy base-devel pkg-config libheif-devel python3-devel";
             case "alpine":
                 return "apk add build-base pkgconf libheif-dev python3-dev";
             default:
@@ -1297,8 +1291,6 @@ public class AiAgentsActivity extends AppCompatActivity {
                 return "apk add " + pkg;
             case "opensuse":
                 return "zypper install -y " + pkg;
-            case "void":
-                return "xbps-install -Sy " + pkg;
             default:
                 return "true";
         }

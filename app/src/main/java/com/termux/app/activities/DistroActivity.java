@@ -186,7 +186,7 @@ public class DistroActivity extends AppCompatActivity {
         DEBIAN_CODENAME_VERSIONS.put("bullseye", "11");
     }
 
-    // The 7 supported distros. Only the Docker Hub image names are fixed here;
+    // The 6 supported distros. Only the Docker Hub image names are fixed here;
     // version numbers are fetched from the Docker Hub tags API at runtime.
     private static final List<DistroDef> DISTROS = Arrays.asList(
         new DistroDef("ubuntu", "Ubuntu", "可选最新版或长期支持版", "ubuntu",
@@ -201,9 +201,7 @@ public class DistroActivity extends AppCompatActivity {
             new TagSource("fedora", TagFilter.INTEGER_VERSION, "")),
         new DistroDef("opensuse", "openSUSE", "Leap 稳定版 / Tumbleweed 滚动版", "opensuse",
             new TagSource("opensuse/leap", TagFilter.DOTTED_VERSION, "Leap "),
-            new TagSource("opensuse/tumbleweed", TagFilter.ROLLING, "Tumbleweed ")),
-        new DistroDef("void", "Void Linux", "滚动更新（镜像较旧，装完请立即升级）", "voidlinux",
-            new TagSource("voidlinux/voidlinux", TagFilter.ROLLING, ""))
+            new TagSource("opensuse/tumbleweed", TagFilter.ROLLING, "Tumbleweed "))
     );
 
     /** Common tools the user can tick after installing a distro. */
@@ -738,9 +736,6 @@ public class DistroActivity extends AppCompatActivity {
                 options.add(new VersionOption("Tumbleweed " + mLatestLabel,
                     "opensuse/tumbleweed:latest", "2026-11-20"));
                 break;
-            case "void":
-                options.add(new VersionOption(mLatestLabel, "voidlinux/voidlinux:latest", "2021-07-25"));
-                break;
             default:
                 for (TagSource source : distro.sources) {
                     options.add(new VersionOption(source.displayPrefix + mLatestLabel,
@@ -991,8 +986,6 @@ public class DistroActivity extends AppCompatActivity {
                 return "dnf install -y " + packages;
             case "opensuse":
                 return "zypper refresh && zypper install -y " + packages;
-            case "void":
-                return "xbps-install -Sy " + packages;
             default:
                 return null;
         }

@@ -77,7 +77,6 @@ public final class DistroUtils {
         DISTRO_DISPLAY_NAMES.put("alpine", "Alpine Linux");
         DISTRO_DISPLAY_NAMES.put("fedora", "Fedora");
         DISTRO_DISPLAY_NAMES.put("opensuse", "openSUSE");
-        DISTRO_DISPLAY_NAMES.put("void", "Void Linux");
     }
 
     /** Container-name prefix -> distro id. Longest prefix wins, so the
@@ -91,7 +90,6 @@ public final class DistroUtils {
         {"archlinux", "arch"},
         {"alpine", "alpine"},
         {"fedora", "fedora"},
-        {"voidlinux", "void"},
     };
 
     /** Container-name prefix -> display-name prefix, for names derived without a cache. */
@@ -104,7 +102,6 @@ public final class DistroUtils {
         {"archlinux", "Arch Linux"},
         {"alpine", "Alpine Linux"},
         {"fedora", "Fedora"},
-        {"voidlinux", "Void Linux"},
     };
 
     /**
@@ -326,7 +323,6 @@ public final class DistroUtils {
             case "debian":
             case "arch":
             case "alpine":
-            case "void":
             default:
                 return "etc/ssl/certs/ca-certificates.crt";
         }

@@ -156,14 +156,6 @@
                 android:textSize="13sp" />
 
             <TextView
-                android:id="@+id/mirror_void_note"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/mirror_void_note"
-                android:textSize="13sp" />
-
-            <TextView
                 android:id="@+id/mirror_github_proxy_warning"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

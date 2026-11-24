@@ -60,7 +60,6 @@ public class MirrorSettingsActivity extends AppCompatActivity {
     private LinearLayout mCustomContainer;
     private TextView mCustomHeader;
     private TextView mStatusText;
-    private TextView mVoidNote;
     private TextView mGithubProxyWarning;
     private Button mDetectButton;
     private Button mDetectApplyButton;
@@ -90,7 +89,6 @@ public class MirrorSettingsActivity extends AppCompatActivity {
         mCustomContainer = findViewById(R.id.mirror_custom_container);
         mCustomHeader = findViewById(R.id.mirror_custom_header);
         mStatusText = findViewById(R.id.mirror_status);
-        mVoidNote = findViewById(R.id.mirror_void_note);
         mGithubProxyWarning = findViewById(R.id.mirror_github_proxy_warning);
         mDetectResults = findViewById(R.id.mirror_detect_results);
         mDetectPresetsContainer = findViewById(R.id.mirror_detect_presets_container);
@@ -126,10 +124,6 @@ public class MirrorSettingsActivity extends AppCompatActivity {
         boolean isCustom = MirrorSettings.PRESET_CUSTOM.equals(mPreset.id);
         mCustomHeader.setVisibility(isCustom ? View.VISIBLE : View.GONE);
         mCustomContainer.setVisibility(isCustom ? View.VISIBLE : View.GONE);
-        // Void is only mirrored on TUNA (or a custom host); other presets
-        // keep its official source.
-        boolean voidMirrored = MirrorSettings.PRESET_TUNA.equals(mPreset.id) || isCustom;
-        mVoidNote.setVisibility(voidMirrored ? View.GONE : View.VISIBLE);
         mGithubProxyWarning.setVisibility(isCustom ? View.VISIBLE : View.GONE);
     }
 
