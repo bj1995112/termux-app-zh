@@ -193,8 +193,8 @@ public class DistroActivity extends AppCompatActivity {
             new TagSource("ubuntu", TagFilter.DOTTED_VERSION, "")),
         new DistroDef("debian", "Debian", "可选代号版本", "debian",
             new TagSource("debian", TagFilter.DEBIAN_CODENAME, "")),
-        new DistroDef("arch", "Arch Linux", "滚动更新", "archlinux",
-            new TagSource("archlinux", TagFilter.ROLLING, "")),
+        new DistroDef("arch", "Arch Linux", "滚动更新", "menci-archlinuxarm",
+            new TagSource("menci/archlinuxarm", TagFilter.ROLLING, "")),
         new DistroDef("alpine", "Alpine Linux", "轻量小巧", "alpine",
             new TagSource("alpine", TagFilter.DOTTED_VERSION, "")),
         new DistroDef("fedora", "Fedora", "可选数字版本", "fedora",
@@ -717,7 +717,7 @@ public class DistroActivity extends AppCompatActivity {
                 options.add(new VersionOption("bookworm (12)", "debian:bookworm", "2026-11-05"));
                 break;
             case "arch":
-                options.add(new VersionOption(mLatestLabel, "archlinux:latest", "2026-11-10"));
+                options.add(new VersionOption(mLatestLabel, "menci/archlinuxarm:latest", "2026-11-23"));
                 break;
             case "alpine":
                 options.add(new VersionOption("3.24", "alpine:3.24", "2026-11-08"));

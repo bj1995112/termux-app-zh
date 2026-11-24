@@ -88,6 +88,7 @@ public final class DistroUtils {
         {"ubuntu", "ubuntu"},
         {"debian", "debian"},
         {"archlinux", "arch"},
+        {"menci-archlinuxarm", "arch"},
         {"alpine", "alpine"},
         {"fedora", "fedora"},
     };
@@ -100,6 +101,7 @@ public final class DistroUtils {
         {"ubuntu", "Ubuntu"},
         {"debian", "Debian"},
         {"archlinux", "Arch Linux"},
+        {"menci-archlinuxarm", "Arch Linux"},
         {"alpine", "Alpine Linux"},
         {"fedora", "Fedora"},
     };
