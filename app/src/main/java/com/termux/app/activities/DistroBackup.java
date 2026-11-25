@@ -29,6 +29,7 @@ import android.util.Log;
 import com.termux.shared.termux.TermuxConstants;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -141,11 +142,11 @@ public final class DistroBackup {
             try {
                 out.write(manifest.toString(2).getBytes(StandardCharsets.UTF_8));
                 atomicFile.finishWrite(out);
-            } catch (IOException e) {
+            } catch (IOException | JSONException e) {
                 atomicFile.failWrite(out);
                 throw e;
             }
-        } catch (IOException e) {
+        } catch (IOException | JSONException e) {
             Log.w(LOG_TAG, "Failed to write manifest", e);
             throw new IllegalStateException("Failed to write manifest: " + e.getMessage(), e);
         }
