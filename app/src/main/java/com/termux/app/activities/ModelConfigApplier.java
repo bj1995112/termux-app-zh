@@ -368,6 +368,60 @@ public final class ModelConfigApplier {
         }
     }
 
+    /** Remove ONE agent's model-config footprint from one container
+     * (agent uninstall, design §1): drop the agent from every entry's
+     * applied-agent list for this container — an entry with no agents
+     * left on this container loses its record entirely — then rebuild
+     * model-env.sh from the remaining records so other agents' entries
+     * survive. The agent's config files themselves are NOT touched
+     * here: AiAgentUtils.uninstallAgent already deleted them whole
+     * (!keepData) or kept them whole (keepData), and stripping provider
+     * blocks out of a kept config would defeat keeping it. When no
+     * entry remains applied to this container, the .bashrc / .profile
+     * source marker is removed too (same rule as
+     * removeEntryFromContainer). Call on a background thread. */
+    public static void removeAgentModelConfig(Context context, File rootfs,
+                                              String container, String agentId) {
+        if (container == null || agentId == null || agentId.isEmpty()) return;
+        // Update the records BEFORE rebuilding: the rebuild re-reads
+        // them, so the agent's vars must already be out. There is no
+        // per-agent record API in ModelConfigStore (removeAppliedRecord
+        // drops a whole entry for a container), so a list that still
+        // has other agents is rewritten with recordApplied; an
+        // emptied list drops the record. Each call reloads the file,
+        // so earlier updates in this loop survive.
+        Map<String, Map<String, List<String>>> records =
+            ModelConfigStore.loadApplyRecords();
+        for (Map.Entry<String, Map<String, List<String>>> e : records.entrySet()) {
+            List<String> agents = e.getValue().get(container);
+            if (agents == null || !agents.contains(agentId)) continue;
+            List<String> remaining = new ArrayList<>(agents);
+            remaining.remove(agentId);
+            if (remaining.isEmpty()) {
+                ModelConfigStore.removeAppliedRecord(e.getKey(), container);
+            } else {
+                ModelConfigStore.recordApplied(e.getKey(), container, remaining);
+            }
+        }
+        if (rootfs == null) return;
+        rebuildModelEnvFile(context, rootfs, container);
+        if (!anyEntryAppliedToContainer(container)) {
+            removeBashrcMarker(rootfs);
+            removeProfileMarker(rootfs);
+        }
+    }
+
+    /** True when any entry still has agents applied to this container. */
+    private static boolean anyEntryAppliedToContainer(String container) {
+        Map<String, Map<String, List<String>>> records =
+            ModelConfigStore.loadApplyRecords();
+        for (Map<String, List<String>> perContainer : records.values()) {
+            List<String> agents = perContainer.get(container);
+            if (agents != null && !agents.isEmpty()) return true;
+        }
+        return false;
+    }
+
     /** Remove every applied config from every container named in the
      * apply records — not just the distros still installed, so records
      * for removed containers are cleaned too — and strip the top-level

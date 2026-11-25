@@ -523,6 +523,322 @@ public final class AiAgentUtils {
         return findBinPath(rootfs, def) != null;
     }
 
+    // ------------------------------------------------------------------
+    // Agent uninstall (host-side file deletion, no session)
+    // ------------------------------------------------------------------
+
+    /** Suffix of the one-time backup ModelConfigApplier writes next to a
+     * config file before editing it (ModelConfigApplier.BACKUP_SUFFIX).
+     * Duplicated here so this class does not depend on the applier. */
+    private static final String CONFIG_BACKUP_SUFFIX = ".termux-bak";
+
+    /** Program paths (rootfs-relative) that an uninstall always deletes.
+     * Every entry of def.binPaths is included, plus the program dirs
+     * from the uninstall research (uninstall-research.md §1): npm
+     * packages in all four prefixes, Codex standalone dirs, the uv /
+     * pipx Aider dirs, the Claude versions dir, the Hermes checkout.
+     * Entries may contain one "*" segment ("node-v*"): the Node-tarball
+     * dirs only exist under their real versioned names, so uninstallAgent
+     * expands them against the rootfs before deleting. Shared packages
+     * (curl, Node, git, build deps, ca-certificates) are never listed
+     * here — they belong to no single agent. */
+    public static List<String> programPaths(AgentDef def) {
+        List<String> paths = new ArrayList<>();
+        if (def == null) return paths;
+        switch (def.id) {
+            case "codex":
+                paths.addAll(Arrays.asList(def.binPaths));
+                // Standalone install: the "current" symlink farm and
+                // every pinned release dir (binPaths only names the
+                // current binary).
+                paths.add("root/.codex/packages/standalone/current");
+                paths.add("root/.codex/packages/standalone/releases");
+                break;
+            case "pi":
+            case "dsh":
+            case "opencode":
+                paths.addAll(npmProgramPaths(def));
+                break;
+            case "agy":
+                paths.addAll(Arrays.asList(def.binPaths));
+                break;
+            case "aider":
+                paths.addAll(Arrays.asList(def.binPaths));
+                paths.add("root/.local/share/uv/tools/aider-chat");
+                paths.add("root/.local/share/pipx/venvs/aider-chat");
+                break;
+            case "claude":
+                paths.addAll(npmProgramPaths(def));
+                paths.add("root/.local/share/claude/versions");
+                break;
+            case "hermes":
+                paths.addAll(Arrays.asList(def.binPaths));
+                // The whole checkout (repo + venv + bundled Python):
+                // the second binPath lives inside it.
+                paths.add("root/.hermes/hermes-agent");
+                break;
+            default:
+                paths.addAll(Arrays.asList(def.binPaths));
+                break;
+        }
+        return paths;
+    }
+
+    /** npm global package in all four prefixes the app can produce
+     * (see probeNpmPackageJson) + all binPaths + the Node-tarball bin
+     * pattern. The tarball entries use the "node-v*" wildcard, expanded
+     * by uninstallAgent. */
+    private static List<String> npmProgramPaths(AgentDef def) {
+        List<String> paths = new ArrayList<>();
+        paths.add("usr/lib/node_modules/" + def.npmPackage);
+        paths.add("usr/local/lib/node_modules/" + def.npmPackage);
+        paths.add("root/.npm-global/lib/node_modules/" + def.npmPackage);
+        paths.add("usr/local/lib/nodejs/node-v*/lib/node_modules/" + def.npmPackage);
+        paths.addAll(Arrays.asList(def.binPaths));
+        paths.add("usr/local/lib/nodejs/node-v*/bin/" + def.command);
+        return paths;
+    }
+
+    /** Data paths (rootfs-relative) an uninstall deletes only when the
+     * user does NOT keep data: config files holding API keys / model
+     * settings, plus auth and session history where the task names them.
+     * Empty when the app names no data for the agent (dsh, OpenCode,
+     * Hermes): uninstalling those never touches user data. Note the
+     * Codex and Pi rules are wider than this list — see uninstallAgent:
+     * Codex runtime data under root/.codex/ (except packages/) and the
+     * whole root/.pi/agent/ dir go with !keepData too, because the app
+     * code names no other paths for the data Codex / Pi create at
+     * runtime. */
+    public static List<String> dataPaths(AgentDef def) {
+        List<String> paths = new ArrayList<>();
+        if (def == null) return paths;
+        switch (def.id) {
+            case "codex":
+                // The named data file only; runtime auth.json / session
+                // dirs under root/.codex/ are handled by
+                // deleteCodexRuntimeData in uninstallAgent.
+                paths.add("root/.codex/config.toml");
+                break;
+            case "pi":
+                paths.add("root/.pi/agent/models.json");
+                paths.add("root/.pi/agent/settings.json");
+                break;
+            case "agy":
+                paths.add("root/.gemini/antigravity-cli/settings.json");
+                break;
+            case "aider":
+                paths.add("root/.aider.conf.yml");
+                break;
+            case "claude":
+                paths.add("root/.claude/settings.json");
+                // Auth + session history: created by Claude at runtime,
+                // never touched by the app, but they are this agent's
+                // data, so they go with !keepData (design §1).
+                paths.add("root/.claude.json");
+                paths.add("root/.claude/projects");
+                break;
+            default:
+                break;
+        }
+        return paths;
+    }
+
+    /** Uninstall one agent from one container by deleting its files from
+     * the host side (no session, no package manager). Deletes every
+     * programPaths entry (files, dirs and symlinks — a symlink itself
+     * is deleted, never followed, so an absolute link into the
+     * container cannot escape onto the phone's own filesystem), the
+     * app-written version record
+     * root/.termux-aiagents/versions/&lt;agentId&gt;, the OpenCode web
+     * password file, and the web temp files
+     * tmp/termux-web-&lt;agent&gt;-&lt;container&gt;.log/.url. With
+     * keepData=false also deletes every dataPaths entry plus its
+     * ".termux-bak" sibling, the Codex runtime data (see
+     * deleteCodexRuntimeData) and the whole root/.pi/agent/ dir.
+     * Shared packages (curl, Node, git, build deps, ca-certificates)
+     * are never deleted. Returns true iff findBinPath is null
+     * afterwards — i.e. the agent no longer shows as installed.
+     * Call on a background thread. */
+    public static boolean uninstallAgent(File rootfs, AgentDef def, boolean keepData) {
+        if (rootfs == null || def == null) return false;
+        for (String rel : programPaths(def)) {
+            deletePath(rootfs, rel);
+        }
+        // App-written records (not program, not data): the per-agent
+        // version record and, for OpenCode, the retired web password
+        // file (OpenCode never reads it, but a stale copy must not
+        // survive an uninstall).
+        deletePath(rootfs, "root/.termux-aiagents/versions/" + def.id);
+        if ("opencode".equals(def.id)) {
+            deletePath(rootfs, "root/.termux-aiagents/opencode-web-password");
+        }
+        deleteWebTempFiles(rootfs, def.id);
+        if (!keepData) {
+            for (String rel : dataPaths(def)) {
+                deletePath(rootfs, rel);
+                deletePath(rootfs, rel + CONFIG_BACKUP_SUFFIX);
+            }
+            if ("codex".equals(def.id)) deleteCodexRuntimeData(rootfs);
+            // The whole dir, not just the two named files: Pi's
+            // session data lives under root/.pi/agent/ too.
+            if ("pi".equals(def.id)) {
+                deletePath(rootfs, "root/.pi/agent");
+                deleteIfEmpty(new File(rootfs, "root/.pi"));
+            }
+        }
+        return findBinPath(rootfs, def) == null;
+    }
+
+    /** True when any dataPaths entry still exists in the rootfs (file,
+     * dir or symlink). Used for the "已卸载（保留数据）" row state after
+     * an uninstall that kept data. */
+    public static boolean hasRetainedData(File rootfs, AgentDef def) {
+        if (rootfs == null || def == null) return false;
+        for (String rel : dataPaths(def)) {
+            File file = new File(rootfs, rel);
+            if (Files.isSymbolicLink(file.toPath()) || file.exists()) return true;
+        }
+        return false;
+    }
+
+    /** Codex !keepData rule (the app code names only config.toml, but
+     * Codex itself creates auth.json and session history under
+     * root/.codex/ at runtime): delete everything under root/.codex/
+     * EXCEPT root/.codex/packages/, which is program and was already
+     * deleted by programPaths. The packages/ dir itself and root/.codex/
+     * are removed when nothing is left in them. */
+    private static void deleteCodexRuntimeData(File rootfs) {
+        File codexDir = new File(rootfs, "root/.codex");
+        if (!codexDir.isDirectory()) return;
+        File[] children = codexDir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if ("packages".equals(child.getName())) continue;
+                deleteRecursively(child);
+            }
+        }
+        deleteIfEmpty(new File(codexDir, "packages/standalone"));
+        deleteIfEmpty(new File(codexDir, "packages"));
+        deleteIfEmpty(codexDir);
+    }
+
+    /** Delete the web temp files tmp/termux-web-&lt;agent&gt;-&lt;container&gt;
+     * .log/.url. The container name is derived from the rootfs path
+     * (v5 .../containers/&lt;name&gt;/rootfs, legacy
+     * .../installed-rootfs/&lt;name&gt;); when it cannot be derived,
+     * every tmp/termux-web-&lt;agent&gt;-* file is deleted instead. */
+    private static void deleteWebTempFiles(File rootfs, String agentId) {
+        String container = containerNameForRootfs(rootfs);
+        if (container != null && !container.isEmpty()) {
+            deletePath(rootfs, "tmp/" + webLogFileName(agentId, container));
+            deletePath(rootfs, "tmp/" + webUrlFileName(agentId, container));
+            return;
+        }
+        File tmpDir = new File(rootfs, "tmp");
+        File[] children = tmpDir.listFiles();
+        if (children == null) return;
+        String prefix = "termux-web-" + agentId + "-";
+        for (File child : children) {
+            String name = child.getName();
+            if (name.startsWith(prefix)
+                && (name.endsWith(".log") || name.endsWith(".url"))) {
+                deleteRecursively(child);
+            }
+        }
+    }
+
+    /** Container name from a rootfs path, or null when it cannot be
+     * derived (an unexpected layout — the caller falls back to a
+     * prefix scan). */
+    private static String containerNameForRootfs(File rootfs) {
+        if (rootfs == null) return null;
+        // v5: .../containers/<name>/rootfs — the parent dir is the container.
+        if ("rootfs".equals(rootfs.getName())) {
+            File parent = rootfs.getParentFile();
+            return parent == null ? null : parent.getName();
+        }
+        // Legacy: .../installed-rootfs/<name> — the dir itself is the container.
+        return rootfs.getName();
+    }
+
+    /** Delete one rootfs-relative path, expanding any "*" segment
+     * against the real rootfs first (see expandWildcardPath). */
+    private static void deletePath(File rootfs, String relPath) {
+        for (String expanded : expandWildcardPath(rootfs, relPath)) {
+            deleteRecursively(new File(rootfs, expanded));
+        }
+    }
+
+    /** Expand a path containing a "*" segment (today only the
+     * Node-tarball "node-v*" dirs) against the real rootfs. A path
+     * without "*" returns itself; a segment with no match expands to
+     * nothing. Only one wildcard level is used today, but every
+     * segment is handled the same way. */
+    private static List<String> expandWildcardPath(File rootfs, String relPath) {
+        List<String> current = new ArrayList<>();
+        current.add("");
+        for (String segment : relPath.split("/")) {
+            List<String> next = new ArrayList<>();
+            if (segment.contains("*")) {
+                String regex = segment.replace(".", "\\.").replace("*", ".*");
+                for (String prefix : current) {
+                    File dir = prefix.isEmpty() ? rootfs : new File(rootfs, prefix);
+                    File[] children = dir.listFiles();
+                    if (children == null) continue;
+                    for (File child : children) {
+                        if (child.getName().matches(regex)) {
+                            next.add(prefix.isEmpty()
+                                ? child.getName() : prefix + "/" + child.getName());
+                        }
+                    }
+                }
+            } else {
+                for (String prefix : current) {
+                    next.add(prefix.isEmpty() ? segment : prefix + "/" + segment);
+                }
+            }
+            current = next;
+            if (current.isEmpty()) break;
+        }
+        return current;
+    }
+
+    /** Delete a file, dir or symlink under the rootfs. A symlink is
+     * deleted itself, never followed: an absolute link into the
+     * container (Codex ~/.local/bin/codex -> /root/.codex/...) points
+     * at the phone's own /root from the host side, so following it
+     * would delete host files. Best effort: a missing path and a
+     * failed delete of an already-gone file are silent; a failed
+     * delete of an existing file is logged. */
+    private static void deleteRecursively(File file) {
+        if (file == null) return;
+        try {
+            if (Files.isSymbolicLink(file.toPath())) {
+                Files.deleteIfExists(file.toPath());
+                return;
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to delete symlink " + file.getAbsolutePath(), e);
+            return;
+        }
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) deleteRecursively(child);
+            }
+        }
+        if (!file.delete() && file.exists()) {
+            Log.w(LOG_TAG, "Failed to delete " + file.getAbsolutePath());
+        }
+    }
+
+    /** Delete a dir only when it is empty (missing counts as done). */
+    private static void deleteIfEmpty(File dir) {
+        if (dir == null || !dir.isDirectory()) return;
+        File[] children = dir.listFiles();
+        if (children != null && children.length == 0) dir.delete();
+    }
+
     public static String probeVersion(File rootfs, AgentDef def) {
         try {
             switch (def.versionKind) {

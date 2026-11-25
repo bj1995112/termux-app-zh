@@ -34,6 +34,7 @@ package com.termux.app.activities;
 import android.app.AlertDialog;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
@@ -86,6 +87,11 @@ public class AiAgentsActivity extends AppCompatActivity {
     private static final int NODE_MIN_MAJOR = 24;
     private static final int NODE_MIN_MINOR = 9;
 
+    /** Tag of the uninstall button created in code in getView (the row
+     * layout has no uninstall view): findViewWithTag finds the button
+     * added to a recycled row, so it is created exactly once per row. */
+    private static final String UNINSTALL_BUTTON_TAG = "aiagents_uninstall_button";
+
     // Agent definitions, detection and version probing live in AiAgentUtils
     // (shared with the drawer quick-entry section and the `ai` command).
 
@@ -98,6 +104,10 @@ public class AiAgentsActivity extends AppCompatActivity {
         String binPath; // rootfs-relative binary path found, "" when not installed
         boolean selected;
         boolean supported;
+        /** True when the agent is not installed but its config data is
+         * still in the container (uninstalled with "keep data"): the
+         * row shows "已卸载（保留数据）" instead of "未安装". */
+        boolean retainedData;
         /** Inline expansion state (v2): at most one row is expanded (see
          * toggleExpand); the expanded row keeps its history, the version
          * the user tapped ("" = latest, the first entry), a fetch error
@@ -235,6 +245,35 @@ public class AiAgentsActivity extends AppCompatActivity {
                         webButton.setVisibility(View.GONE);
                         webButton.setOnClickListener(null);
                     }
+                    // Uninstall button: only for installed agents. The
+                    // row layout has no uninstall view, so the button is
+                    // created in code and added to the header once per
+                    // inflated row, then found again by tag on recycle —
+                    // a recycled view never gains a second button.
+                    Button uninstallButton =
+                        (Button) view.findViewWithTag(UNINSTALL_BUTTON_TAG);
+                    if (uninstallButton == null) {
+                        uninstallButton = new Button(AiAgentsActivity.this);
+                        uninstallButton.setTag(UNINSTALL_BUTTON_TAG);
+                        uninstallButton.setText(R.string.aiagents_uninstall_button);
+                        uninstallButton.setTextSize(13);
+                        uninstallButton.setFocusable(false);
+                        LinearLayout.LayoutParams uninstallParams =
+                            new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT);
+                        uninstallParams.gravity = Gravity.CENTER_VERTICAL;
+                        ((ViewGroup) webButton.getParent())
+                            .addView(uninstallButton, uninstallParams);
+                    }
+                    if (row.installed) {
+                        uninstallButton.setVisibility(View.VISIBLE);
+                        uninstallButton.setOnClickListener(
+                            v -> showUninstallConfirm(row));
+                    } else {
+                        uninstallButton.setVisibility(View.GONE);
+                        uninstallButton.setOnClickListener(null);
+                    }
                     buildExpandedArea(row, expanded,
                         title.getCurrentTextColor(), subtitle.getCurrentTextColor());
                 }
@@ -306,6 +345,14 @@ public class AiAgentsActivity extends AppCompatActivity {
             return getString(R.string.aiagents_installed_unknown) + " · "
                 + getString(R.string.aiagents_version_unknown);
         }
+        if (row.retainedData) {
+            String retained = getString(R.string.aiagents_uninstalled_retained_data);
+            if (row.latestVersion != null && !row.latestVersion.isEmpty()) {
+                return retained + " · " + getString(R.string.aiagents_version_latest)
+                    + " " + row.latestVersion;
+            }
+            return retained;
+        }
         if (row.latestVersion != null && !row.latestVersion.isEmpty()) {
             return getString(R.string.aiagents_not_installed_with_latest, row.latestVersion);
         }
@@ -334,6 +381,7 @@ public class AiAgentsActivity extends AppCompatActivity {
                     row.supported = isSupported(def);
                     if (rootfs != null) {
                         row.installed = AiAgentUtils.isInstalled(rootfs, def);
+                        row.retainedData = AiAgentUtils.hasRetainedData(rootfs, def);
                         if (row.installed) {
                             row.version = AiAgentUtils.probeVersion(rootfs, def);
                             String found = AiAgentUtils.findBinPath(rootfs, def);
@@ -519,6 +567,93 @@ public class AiAgentsActivity extends AppCompatActivity {
             return;
         }
         startAgentSession(selected, false);
+    }
+
+    // ------------------------------------------------------------------
+    // Agent uninstall (host-side file deletion, confirm dialog)
+    // ------------------------------------------------------------------
+
+    /** Confirm dialog for uninstalling one installed agent. Lists the
+     * program paths that will always be deleted and the config-data
+     * paths, with a "keep configuration data" checkbox (default
+     * CHECKED) when the agent has named data. Agents with no named
+     * data (dsh, OpenCode, Hermes) show no checkbox — there is nothing
+     * to keep. The dialog shows the full defined path lists (see
+     * AiAgentUtils.programPaths / dataPaths), including paths that do
+     * not exist in this container — they are simply skipped. */
+    private void showUninstallConfirm(final AgentRow row) {
+        List<String> program = AiAgentUtils.programPaths(row.def);
+        List<String> data = AiAgentUtils.dataPaths(row.def);
+        StringBuilder message = new StringBuilder();
+        message.append(getString(R.string.aiagents_uninstall_delete_program)).append("\n");
+        for (String rel : program) message.append("/").append(rel).append("\n");
+        if (data.isEmpty()) {
+            message.append("\n").append(getString(R.string.aiagents_uninstall_no_data));
+        } else {
+            message.append("\n").append(getString(R.string.aiagents_uninstall_data_list))
+                .append("\n");
+            for (String rel : data) message.append("/").append(rel).append("\n");
+            message.append(getString(R.string.aiagents_uninstall_data_delete_note));
+        }
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int padding = (int) (16 * getResources().getDisplayMetrics().density);
+        layout.setPadding(padding, padding / 2, padding, 0);
+        TextView text = new TextView(this);
+        text.setText(message.toString());
+        text.setTextSize(14);
+        layout.addView(text);
+        final CheckBox keepDataCheck = new CheckBox(this);
+        keepDataCheck.setText(R.string.aiagents_uninstall_keep_data);
+        keepDataCheck.setChecked(true);
+        if (!data.isEmpty()) layout.addView(keepDataCheck);
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.aiagents_uninstall_title, row.def.displayName))
+            .setView(layout)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.aiagents_uninstall_button,
+                (dialog, which) -> uninstallAgent(row, keepDataCheck.isChecked()))
+            .show();
+    }
+
+    /** Run the uninstall on a background thread (rootfs file deletion
+     * + model-config cleanup), then re-detect and report. The
+     * post-delete findBinPath check decides success: a binary left
+     * behind means the uninstall failed, even if no exception was
+     * thrown. Re-detection refreshes the row, including the
+     * "已卸载（保留数据）" state when data was kept. */
+    private void uninstallAgent(final AgentRow row, final boolean keepData) {
+        final File rootfs = DistroUtils.containerRootfs(mContainer);
+        if (rootfs == null) {
+            Toast.makeText(this, R.string.aiagents_no_rootfs, Toast.LENGTH_LONG).show();
+            return;
+        }
+        updateStatus(getString(R.string.aiagents_uninstalling, row.def.displayName));
+        new Thread() {
+            @Override
+            public void run() {
+                AiAgentUtils.uninstallAgent(rootfs, row.def, keepData);
+                ModelConfigApplier.removeAgentModelConfig(AiAgentsActivity.this,
+                    rootfs, mContainer, row.def.id);
+                final boolean stillInstalled =
+                    AiAgentUtils.findBinPath(rootfs, row.def) != null;
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    detectAgentsInBackground();
+                    if (stillInstalled) {
+                        Toast.makeText(AiAgentsActivity.this,
+                            getString(R.string.aiagents_uninstall_failed,
+                                row.def.displayName),
+                            Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(AiAgentsActivity.this,
+                            getString(R.string.aiagents_uninstall_done,
+                                row.def.displayName),
+                            Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        }.start();
     }
 
 

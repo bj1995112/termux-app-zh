@@ -956,6 +956,17 @@ public final class MirrorSettings {
         prefs.edit().putStringSet(KEY_PENDING_INSTALLS, entries).apply();
     }
 
+    /** Drop one container's pending-install entry (after the container
+     * was uninstalled, so the mirror is never applied to a container
+     * that no longer exists). No-op when there is no entry for it. */
+    public static void clearPendingInstall(Context context, String container) {
+        if (container == null || container.isEmpty()) return;
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(context, PREFS_NAME);
+        Set<String> entries = new LinkedHashSet<>(prefs.getStringSet(KEY_PENDING_INSTALLS, new LinkedHashSet<String>()));
+        boolean changed = entries.removeIf(e -> e.startsWith(container + "|"));
+        if (changed) prefs.edit().putStringSet(KEY_PENDING_INSTALLS, entries).apply();
+    }
+
     /** Apply the current preset to pending installs whose container now
      *  exists; drop entries older than 7 days. Call on a background thread,
      *  e.g. from DistroActivity.onCreate/onResume. */

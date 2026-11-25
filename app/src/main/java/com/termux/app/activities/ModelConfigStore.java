@@ -663,6 +663,55 @@ public final class ModelConfigStore {
         }
     }
 
+    /** Drop every entry's apply record for one container (after the
+     * container was uninstalled, so a later reinstall does not offer to
+     * re-apply configs that belonged to the deleted container). No-op
+     * when nothing was recorded for it. The save block duplicates
+     * recordApplied / removeAppliedRecord on purpose (no refactor of
+     * this file's record I/O). */
+    public static void clearContainerRecords(String container) {
+        if (container == null || container.isEmpty()) return;
+        try {
+            Map<String, Map<String, List<String>>> records = loadApplyRecords();
+            boolean changed = false;
+            List<String> emptied = new ArrayList<>();
+            for (Map.Entry<String, Map<String, List<String>>> e : records.entrySet()) {
+                if (e.getValue().remove(container) != null) {
+                    changed = true;
+                    if (e.getValue().isEmpty()) emptied.add(e.getKey());
+                }
+            }
+            if (!changed) return;
+            for (String entryId : emptied) records.remove(entryId);
+            JSONObject root = new JSONObject();
+            JSONObject applied = new JSONObject();
+            for (Map.Entry<String, Map<String, List<String>>> e : records.entrySet()) {
+                JSONObject containers = new JSONObject();
+                for (Map.Entry<String, List<String>> c : e.getValue().entrySet()) {
+                    JSONObject record = new JSONObject();
+                    record.put("agents", new JSONArray(c.getValue()));
+                    record.put("at", System.currentTimeMillis());
+                    containers.put(c.getKey(), record);
+                }
+                applied.put(e.getKey(), containers);
+            }
+            root.put("applied", applied);
+            File recordFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR,
+                APPLY_RECORD_FILE_NAME);
+            AtomicFile atomicFile = new AtomicFile(recordFile);
+            FileOutputStream out = atomicFile.startWrite();
+            try {
+                out.write(root.toString().getBytes(StandardCharsets.UTF_8));
+                atomicFile.finishWrite(out);
+            } catch (IOException e) {
+                atomicFile.failWrite(out);
+                throw e;
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to clear apply records for " + container, e);
+        }
+    }
+
     /** Containers an entry was ever applied to (for the delete +
      * clear-applied flow). */
     public static List<String> appliedContainers(String entryId) {

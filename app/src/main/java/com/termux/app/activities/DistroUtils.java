@@ -13,6 +13,7 @@ package com.termux.app.activities;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.util.AtomicFile;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -27,12 +28,14 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -203,6 +206,245 @@ public final class DistroUtils {
             Log.w(LOG_TAG, "Failed to read distro list cache", e);
         }
         return names;
+    }
+
+    /** Remove one container's entries from the display-name cache
+     * (~/.termux/distro-list.json), e.g. after the container was
+     * uninstalled. Every version entry whose image ref maps to this
+     * container is dropped; other entries are kept. Returns true when
+     * anything was removed. No-op (false) when the cache is missing or
+     * corrupt — a stale cache entry is harmless, the list is built from
+     * the container scan, not the cache. */
+    public static boolean removeContainerFromCache(String container) {
+        if (container == null || container.isEmpty()) return false;
+        File cacheFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR, CACHE_FILE_NAME);
+        if (!cacheFile.isFile()) return false;
+        try {
+            JSONObject root = new JSONObject(readFile(cacheFile));
+            JSONObject versions = root.optJSONObject("versions");
+            if (versions == null) return false;
+            boolean changed = false;
+            Iterator<String> distroIds = versions.keys();
+            while (distroIds.hasNext()) {
+                String distroId = distroIds.next();
+                JSONArray array = versions.optJSONArray(distroId);
+                if (array == null) continue;
+                JSONArray kept = new JSONArray();
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject option = array.optJSONObject(i);
+                    if (option == null) continue;
+                    String imageRef = option.optString("r", null);
+                    if (imageRef != null && container.equals(containerNameForImageRef(imageRef))) {
+                        changed = true; // drop this entry
+                    } else {
+                        kept.put(option);
+                    }
+                }
+                versions.put(distroId, kept);
+            }
+            if (!changed) return false;
+            root.put("versions", versions);
+            AtomicFile atomicFile = new AtomicFile(cacheFile);
+            FileOutputStream out = atomicFile.startWrite();
+            try {
+                out.write(root.toString().getBytes(StandardCharsets.UTF_8));
+                atomicFile.finishWrite(out);
+            } catch (IOException e) {
+                atomicFile.failWrite(out);
+                throw e;
+            }
+            return true;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to remove " + container + " from distro list cache", e);
+            return false;
+        }
+    }
+
+    /** Recursive size of a file or directory, in bytes (0 when missing).
+     * Symlinks are never followed: a symlinked file/dir counts as the
+     * link itself, so shared targets are never double-counted and a
+     * symlink cycle cannot recurse forever. Hard links are counted once
+     * per link (sizes are estimates for the backup dialog, not exact
+     * disk usage). Runs off the UI thread for large trees. */
+    public static long dirSize(File dir) {
+        if (dir == null || !dir.exists()) return 0;
+        try {
+            File parent = dir.getAbsoluteFile().getParentFile();
+            File canonicalParent = parent == null ? null : parent.getCanonicalFile();
+            return dirSizeRecursive(dir, canonicalParent);
+        } catch (IOException e) {
+            return 0;
+        }
+    }
+
+    private static long dirSizeRecursive(File dir, File canonicalParent) {
+        // Symlink (last path component): count the link, do not follow it.
+        // The parent's canonical path is passed down so only one
+        // getCanonicalFile() call per entry is needed.
+        try {
+            if (canonicalParent != null
+                && !new File(canonicalParent, dir.getName()).equals(dir.getCanonicalFile())) {
+                return dir.length();
+            }
+        } catch (IOException e) {
+            return 0;
+        }
+        if (dir.isFile()) return dir.length();
+        if (!dir.isDirectory()) return 0;
+        long total = 0;
+        File[] children = dir.listFiles();
+        if (children == null) return 0;
+        File canonicalDir;
+        try {
+            canonicalDir = dir.getCanonicalFile();
+        } catch (IOException e) {
+            return total;
+        }
+        for (File child : children) {
+            total += dirSizeRecursive(child, canonicalDir);
+        }
+        return total;
+    }
+
+    /** Size of one agent's program+data paths inside a rootfs (bytes).
+     * Only paths that exist count; a path covered by a kept ancestor is
+     * counted once. Used for the per-item sizes in the uninstall backup
+     * checklist. */
+    public static long agentPathsSize(File rootfs, AiAgentUtils.AgentDef def) {
+        if (rootfs == null || def == null) return 0;
+        List<String> paths = new ArrayList<>();
+        paths.addAll(AiAgentUtils.programPaths(def));
+        paths.addAll(AiAgentUtils.dataPaths(def));
+        return pathsSize(rootfs, expandWildcardPaths(rootfs, paths));
+    }
+
+    /** Size of /root inside a rootfs excluding every agent's program+data
+     * paths that live under /root (bytes) — the "user files" item size in
+     * the uninstall backup checklist. Matches what home.tar.gz will hold:
+     * the same programPaths/dataPaths tables the script excludes. */
+    public static long homeBackupSize(File rootfs) {
+        if (rootfs == null) return 0;
+        File home = new File(rootfs, "root");
+        if (!home.isDirectory()) return 0;
+        List<String> excluded = new ArrayList<>();
+        for (AiAgentUtils.AgentDef def : AiAgentUtils.AGENTS) {
+            for (String path : AiAgentUtils.programPaths(def)) {
+                if (isUnderRoot(path)) excluded.add(path);
+            }
+            for (String path : AiAgentUtils.dataPaths(def)) {
+                if (isUnderRoot(path)) excluded.add(path);
+            }
+        }
+        return Math.max(0, dirSize(home) - pathsSize(rootfs,
+            expandWildcardPaths(rootfs, excluded)));
+    }
+
+    /** Expand one "*" segment in rootfs-relative paths against the real
+     * rootfs (AiAgentUtils.programPaths uses "node-v*" for the
+     * Node-tarball prefix, which only exists under its real versioned
+     * name, e.g. node-v24.12.0). Paths without "*" pass through
+     * unchanged; a wildcard that matches nothing is dropped. "*" matches
+     * any single path segment (never "/"). Callers that need existence
+     * (sizes, staging) rely on this; the backup script's [ -e ] checks
+     * are the second line of defence. */
+    public static List<String> expandWildcardPaths(File rootfs, List<String> relPaths) {
+        List<String> out = new ArrayList<>();
+        if (relPaths == null) return out;
+        boolean canExpand = rootfs != null && rootfs.isDirectory();
+        for (String raw : relPaths) {
+            if (raw == null) continue;
+            String p = raw.trim();
+            while (p.startsWith("/")) p = p.substring(1);
+            if (p.isEmpty()) continue;
+            if (p.indexOf('*') < 0 || !canExpand) {
+                // No wildcard (or nothing to expand against): pass through;
+                // callers filter by existence (sizes return 0, staging
+                // checks [ -e ]).
+                if (p.indexOf('*') < 0) out.add(p);
+                continue;
+            }
+            expandWildcardRecursive(rootfs, p.split("/"), 0, "", out);
+        }
+        return out;
+    }
+
+    private static void expandWildcardRecursive(File base, String[] segments, int index,
+                                                String prefix, List<String> out) {
+        if (index == segments.length) {
+            out.add(prefix);
+            return;
+        }
+        String segment = segments[index];
+        if (segment.indexOf('*') < 0) {
+            String nextPrefix = prefix.isEmpty() ? segment : prefix + "/" + segment;
+            expandWildcardRecursive(new File(base, segment), segments, index + 1,
+                nextPrefix, out);
+            return;
+        }
+        File[] children = base.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (!wildcardMatch(segment, child.getName())) continue;
+            String nextPrefix = prefix.isEmpty() ? child.getName() : prefix + "/" + child.getName();
+            expandWildcardRecursive(child, segments, index + 1, nextPrefix, out);
+        }
+    }
+
+    /** "*" matches any run of characters; everything else is literal. */
+    private static boolean wildcardMatch(String pattern, String name) {
+        StringBuilder regex = new StringBuilder();
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            if (c == '*') {
+                regex.append(".*");
+            } else {
+                regex.append(java.util.regex.Pattern.quote(String.valueOf(c)));
+            }
+        }
+        return name.matches(regex.toString());
+    }
+
+    private static boolean isUnderRoot(String relPath) {
+        if (relPath == null) return false;
+        String p = relPath.trim();
+        while (p.startsWith("/")) p = p.substring(1);
+        return p.equals("root") || p.startsWith("root/");
+    }
+
+    /** Sum of dirSize() over rootfs-relative paths, with ancestor dedup
+     * (a path covered by a kept ancestor is counted once). */
+    private static long pathsSize(File rootfs, List<String> relPaths) {
+        List<String> cleaned = new ArrayList<>();
+        if (relPaths != null) {
+            for (String raw : relPaths) {
+                if (raw == null) continue;
+                String p = raw.trim();
+                while (p.startsWith("/")) p = p.substring(1);
+                if (!p.isEmpty() && !cleaned.contains(p)) cleaned.add(p);
+            }
+        }
+        Collections.sort(cleaned, (a, b) -> {
+            int depthA = a.split("/").length;
+            int depthB = b.split("/").length;
+            if (depthA != depthB) return Integer.compare(depthA, depthB);
+            return Integer.compare(a.length(), b.length());
+        });
+        List<String> kept = new ArrayList<>();
+        for (String p : cleaned) {
+            boolean covered = false;
+            for (String k : kept) {
+                if (p.equals(k) || p.startsWith(k + "/")) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) kept.add(p);
+        }
+        long total = 0;
+        for (String p : kept) {
+            total += dirSize(new File(rootfs, p));
+        }
+        return total;
     }
 
     /** Distro id for a container name ("ubuntu-26.04" -> "ubuntu"), or null if unknown. */
