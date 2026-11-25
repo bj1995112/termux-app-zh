@@ -46,6 +46,7 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -321,7 +322,7 @@ public final class ExternalBackupStore {
                 return false;
             }
             return true;
-        } catch (SecurityException | IllegalArgumentException e) {
+        } catch (FileNotFoundException | SecurityException | IllegalArgumentException e) {
             Log.w(LOG_TAG, "Could not copy backup to external folder: " + internalBackupDir, e);
             if (newDirUri != null) deleteExternalDirQuietly(resolver, newDirUri);
             return false;
@@ -399,7 +400,7 @@ public final class ExternalBackupStore {
             // For a directory document this deletes recursively.
             return DocumentsContract.deleteDocument(
                     context.getContentResolver(), backupDirUri);
-        } catch (SecurityException | IllegalArgumentException e) {
+        } catch (FileNotFoundException | SecurityException | IllegalArgumentException e) {
             Log.w(LOG_TAG, "Could not delete external backup: " + backupDirUri, e);
             return false;
         }
@@ -601,7 +602,7 @@ public final class ExternalBackupStore {
     private static void deleteExternalDirQuietly(ContentResolver resolver, Uri dirUri) {
         try {
             DocumentsContract.deleteDocument(resolver, dirUri);
-        } catch (SecurityException | IllegalArgumentException e) {
+        } catch (FileNotFoundException | SecurityException | IllegalArgumentException e) {
             Log.w(LOG_TAG, "Could not clean up partial external dir: " + dirUri, e);
         }
     }
