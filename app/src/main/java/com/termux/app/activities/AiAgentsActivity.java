@@ -77,10 +77,15 @@ public class AiAgentsActivity extends AppCompatActivity {
     public static final String EXTRA_AUTO_UPDATE_AGENT_ID =
         "com.termux.aiagents.auto_update_agent_id";
 
-    /** Distros whose Node 24 path is verified on-device (v1). Other distros
-     * show Node-dependent agents as unsupported until verified; adding a
-     * distro here is the whole change needed to enable it. */
-    private static final Set<String> NODE_VERIFIED = new HashSet<>(Arrays.asList("ubuntu", "debian"));
+    /** Distros whose Node 24 install path is enabled. ubuntu/debian were
+     * verified on-device in v1; arch, fedora, alpine and opensuse were
+     * enabled in the 0.11 small-optimisation round — their
+     * nodeInstallCommand() branches already existed, but no on-device
+     * Node install has been run on them yet. After this release, verify
+     * each one by installing a Node agent (e.g. Pi) on it before
+     * treating it as fully verified. */
+    private static final Set<String> NODE_VERIFIED = new HashSet<>(Arrays.asList(
+        "ubuntu", "debian", "arch", "fedora", "alpine", "opensuse"));
 
     /** Minimum Node version: dsh declares engines node >= 24.9.0
      * (Pi needs >= 22.19.0, OpenCode has no hard requirement). */
@@ -1358,8 +1363,8 @@ public class AiAgentsActivity extends AppCompatActivity {
         }
     }
 
-    /** Install Node 24. All 7 distros can provide Node >= 24.9 (see design.md §2);
-     * only ubuntu/debian are offered in v1 (NODE_VERIFIED). On Ubuntu/Debian
+    /** Install Node 24. All 6 distros can provide Node >= 24.9 (see design.md §2);
+     * all six are enabled via NODE_VERIFIED. On Ubuntu/Debian
      * with a non-official mirror preset, NodeSource has no Chinese mirror,
      * so install Node 24 from the npmmirror binary tarball instead. */
     private static String nodeInstallCommand(String distroId, MirrorSettings.MirrorPreset preset) {

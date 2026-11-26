@@ -51,6 +51,11 @@ public final class CertPackageBootstrap {
     private static final int CONNECT_TIMEOUT_MS = 10000;
     private static final int READ_TIMEOUT_MS = 30000;
 
+    /** Download/decompress buffer (64KB): package files and repo
+     * indexes are megabytes, so the old 8KB buffer only wasted
+     * syscalls. */
+    private static final int IO_BUFFER_SIZE = 65536;
+
     /** Dependency closure bounds: at most this many packages, this deep. */
     private static final int MAX_PACKAGES = 10;
     private static final int MAX_DEP_DEPTH = 3;
@@ -638,7 +643,7 @@ public final class CertPackageBootstrap {
             if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return null;
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             try (InputStream in = connection.getInputStream()) {
-                byte[] buf = new byte[8192];
+                byte[] buf = new byte[IO_BUFFER_SIZE];
                 int n;
                 while ((n = in.read(buf)) >= 0) bytes.write(buf, 0, n);
             }
@@ -667,7 +672,7 @@ public final class CertPackageBootstrap {
             if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return false;
             try (InputStream in = connection.getInputStream();
                  FileOutputStream fileOut = new FileOutputStream(out)) {
-                byte[] buf = new byte[8192];
+                byte[] buf = new byte[IO_BUFFER_SIZE];
                 int n;
                 while ((n = in.read(buf)) >= 0) {
                     digest.update(buf, 0, n);
@@ -711,7 +716,7 @@ public final class CertPackageBootstrap {
         if (gz == null) return null;
         try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz));
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[IO_BUFFER_SIZE];
             int n;
             while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
             return out.toByteArray();

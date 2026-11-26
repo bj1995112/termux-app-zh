@@ -812,6 +812,12 @@ public final class MirrorSettings {
         return new File(new File(rootfs, BACKUP_DIR_NAME), relPath.replace('/', '_') + ".created");
     }
 
+    /** Copy/download buffer (64KB): mirror-file restores and speed-test
+     * downloads move megabytes, so the old 8KB buffer only wasted
+     * syscalls. JSON reads (getJson) stay at 4KB — small text, not a
+     * hot path. */
+    private static final int IO_BUFFER_SIZE = 65536;
+
     /** Restore one file from its backup and delete the backup. True if restored. */
     private static boolean restoreFile(File rootfs, String relPath) throws IOException {
         File backup = backupFileFor(rootfs, relPath);
@@ -830,7 +836,7 @@ public final class MirrorSettings {
         try {
             in = new FileInputStream(from);
             out = new FileOutputStream(to);
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[IO_BUFFER_SIZE];
             int n;
             while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
         } finally {
@@ -1262,7 +1268,7 @@ public final class MirrorSettings {
             if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return -1;
             in = connection.getInputStream();
             fileOut = new FileOutputStream(out);
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[IO_BUFFER_SIZE];
             long bytes = 0;
             int n;
             while ((n = in.read(buf)) >= 0) {

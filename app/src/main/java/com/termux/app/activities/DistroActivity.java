@@ -1825,6 +1825,13 @@ public class DistroActivity extends AppCompatActivity {
                 || archive.contains("\\") || archive.contains("..")) return false;
             File archiveFile = new File(backupDir, archive);
             if (!archiveFile.isFile() || archiveFile.length() == 0) return false;
+            // Cheap size gate (stat only): a truncated archive is
+            // incomplete. The SHA-256 check is deliberately NOT done
+            // here — this runs on the watcher poll every few seconds,
+            // and hashing hundreds of MB each poll would stall it.
+            // SHA is verified once, at copy/restore time.
+            long size = item.optLong("size", 0);
+            if (size > 0 && archiveFile.length() != size) return false;
         }
         return true;
     }

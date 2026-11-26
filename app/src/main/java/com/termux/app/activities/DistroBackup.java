@@ -35,10 +35,14 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -175,6 +179,118 @@ public final class DistroBackup {
         }
     }
 
+    /** SHA-256 + byte count of one archive stream. */
+    public static final class StreamDigest {
+        /** Bytes read. */
+        public final long size;
+        /** Lowercase hex SHA-256. */
+        public final String sha256;
+
+        public StreamDigest(long size, String sha256) {
+            this.size = size;
+            this.sha256 = sha256;
+        }
+    }
+
+    /** SHA-256 (lowercase hex) of one stream, with its byte count, or
+     * null on any read/hash failure. Does NOT close the stream; the
+     * caller owns it. The 64KB buffer matches the copy/download
+     * buffer: hashing a hundreds-of-MB archive at 8KB a read would
+     * waste syscalls on exactly the files this check exists to
+     * protect. Hex style matches CertPackageBootstrap.toHex. */
+    public static StreamDigest digestStream(InputStream in) {
+        if (in == null) return null;
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            Log.w(LOG_TAG, "SHA-256 not available", e);
+            return null;
+        }
+        byte[] buffer = new byte[65536];
+        long total = 0;
+        try {
+            int n;
+            while ((n = in.read(buffer)) >= 0) {
+                digest.update(buffer, 0, n);
+                total += n;
+            }
+        } catch (IOException e) {
+            Log.w(LOG_TAG, "Failed to hash stream", e);
+            return null;
+        }
+        return new StreamDigest(total, toHex(digest.digest()));
+    }
+
+    /** SHA-256 (lowercase hex) of one local file, or null on failure. */
+    public static String sha256Hex(File file) {
+        if (file == null || !file.isFile()) return null;
+        try (InputStream in = new FileInputStream(file)) {
+            StreamDigest digest = digestStream(in);
+            return digest == null ? null : digest.sha256;
+        } catch (IOException e) {
+            Log.w(LOG_TAG, "Failed to hash file: " + file.getAbsolutePath(), e);
+            return null;
+        }
+    }
+
+    /** Lowercase hex, same style as CertPackageBootstrap.toHex. */
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format(Locale.US, "%02x", b & 0xff));
+        return sb.toString();
+    }
+
+    /** Verifies every archive in a backup dir against its manifest:
+     * the file must exist, be non-empty and match the manifest size,
+     * and when the manifest records a sha256 the recomputed SHA-256
+     * must match it. Returns the item ids that failed (empty when the
+     * whole backup is intact), or null when the manifest itself is
+     * missing/unparseable or has no items array. Old backups without
+     * sha256 are checked by size only and never fail for the missing
+     * hash. Pass null itemIds to check every manifest item, or a list
+     * to check only those. Call on a background thread: hashing reads
+     * every archive in full. Single source of truth for archive
+     * verification — restore, external-copy staging and the
+     * pre-remove gate all delegate here instead of reimplementing
+     * the check. */
+    public static List<String> verifyBackupArchives(File backupDir, List<String> itemIds) {
+        JSONObject manifest = readManifest(backupDir);
+        if (manifest == null) return null;
+        JSONArray array = manifest.optJSONArray("items");
+        if (array == null) return null;
+        List<String> failed = new ArrayList<>();
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) continue;
+            String id = item.optString("id", "");
+            if (id.isEmpty()) continue;
+            if (itemIds != null && !itemIds.contains(id)) continue;
+            String archive = item.optString("archive", "");
+            long size = item.optLong("size", 0);
+            String sha = item.optString("sha256", "");
+            File archiveFile = new File(backupDir, archive);
+            if (archive.isEmpty() || !archiveFile.isFile() || archiveFile.length() == 0) {
+                failed.add(id);
+                continue;
+            }
+            if (size > 0 && archiveFile.length() != size) {
+                Log.w(LOG_TAG, "Archive size mismatch for " + id + ": manifest " + size
+                    + ", actual " + archiveFile.length());
+                failed.add(id);
+                continue;
+            }
+            if (sha != null && !sha.isEmpty()) {
+                String actual = sha256Hex(archiveFile);
+                if (actual == null || !actual.equalsIgnoreCase(sha.trim())) {
+                    Log.w(LOG_TAG, "Archive SHA-256 mismatch for " + id);
+                    failed.add(id);
+                }
+            }
+        }
+        return failed;
+    }
+
     /** One backup dir, as listed by the backup manager / restore picker. */
     public static final class BackupInfo {
         public final File dir;
@@ -207,12 +323,17 @@ public final class DistroBackup {
             public final String archive;
             /** Archive size in bytes (from the manifest). */
             public final long size;
+            /** SHA-256 hex of the archive (from the manifest), or null
+             * for backups written before it was recorded: those are
+             * verified by size only, never failed for a missing hash. */
+            public final String sha256;
 
-            public Item(String id, String label, String archive, long size) {
+            public Item(String id, String label, String archive, long size, String sha256) {
                 this.id = id;
                 this.label = label;
                 this.archive = archive;
                 this.size = size;
+                this.sha256 = sha256;
             }
         }
     }
@@ -242,7 +363,8 @@ public final class DistroBackup {
                     String archive = item.optString("archive", "");
                     long size = item.optLong("size", 0);
                     if (id.isEmpty() || archive.isEmpty()) continue;
-                    items.add(new BackupInfo.Item(id, label, archive, size));
+                    items.add(new BackupInfo.Item(id, label, archive, size,
+                        item.optString("sha256", null)));
                     totalSize += size;
                 }
             }
@@ -655,6 +777,17 @@ public final class DistroBackup {
         }
         boolean sameDistro = isSameDistro(manifest, targetDistroId);
         java.util.Map<String, String> archives = manifestItemArchives(manifest);
+        // Archive integrity first: a corrupt/truncated archive fails
+        // the item even if files it once held are still on disk.
+        // Old manifests without sha256 fall back to the size check.
+        // (Cross-distro system items are skipped below, as before,
+        // so a bad system archive never fails a cross-distro restore
+        // that does not restore it.)
+        List<String> badArchives = verifyBackupArchives(backupDir, selectedItemIds);
+        if (badArchives == null) {
+            failed.addAll(selectedItemIds);
+            return failed;
+        }
         for (String itemId : selectedItemIds) {
             if (itemId == null) {
                 failed.add(itemId);
@@ -664,6 +797,10 @@ public final class DistroBackup {
                 if (!sameDistro) {
                     // Cross-distro: skipped at restore time, so there is
                     // nothing to verify — never a failure.
+                    continue;
+                }
+                if (badArchives.contains(itemId)) {
+                    failed.add(itemId);
                     continue;
                 }
                 String archiveName = archives.containsKey(SYSTEM_ITEM_ID)
@@ -686,6 +823,10 @@ public final class DistroBackup {
                 }
                 if (!ok) failed.add(itemId);
             } else if (HOME_ITEM_ID.equals(itemId)) {
+                if (badArchives.contains(itemId)) {
+                    failed.add(itemId);
+                    continue;
+                }
                 String archiveName = archives.containsKey(HOME_ITEM_ID)
                     ? archives.get(HOME_ITEM_ID) : HOME_ARCHIVE;
                 File archive = new File(backupDir, archiveName);
@@ -709,6 +850,10 @@ public final class DistroBackup {
                 String agentId = itemId.substring(AGENT_ITEM_ID_PREFIX.length());
                 AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agentId);
                 if (def == null) {
+                    failed.add(itemId);
+                    continue;
+                }
+                if (badArchives.contains(itemId)) {
                     failed.add(itemId);
                     continue;
                 }
@@ -755,7 +900,8 @@ public final class DistroBackup {
      * var/log, tmp, var/tmp) -> pack home.tar.gz (rootfs /root,
      * excluding every agent's program+data paths) -> pack one
      * agent-&lt;id&gt;.tar.gz per selected agent (data/ + program/ split,
-     * only paths that exist) -> write manifest.json (sizes from stat)
+     * only paths that exist) -> write manifest.json (sizes from stat,
+     * sha256 from sha256sum)
      * -> verify (manifest non-empty and mentions every archive; every
      * archive exists, is non-empty and holds at least one file) ->
      * `proot-distro remove &lt;container&gt;`. Any failure aborts BEFORE
@@ -765,7 +911,9 @@ public final class DistroBackup {
      * paths so the user can see the result (same as the install script).
      *
      * <p>Manifest keys (exact): version, container, distroId,
-     * distroDisplay, createdAt, items[] with id, label, archive, size.
+     * distroDisplay, createdAt, items[] with id, label, archive, size,
+     * sha256 (lowercase hex; absent in backups written before this
+     * round, which the Java side verifies by size only).
      * Item ids are "system", "home" or "agent:&lt;AgentDef id&gt;";
      * archives are "system.tar.gz", "home.tar.gz" or
      * "agent-&lt;AgentDef id&gt;.tar.gz". Agent archive layout:
@@ -777,7 +925,11 @@ public final class DistroBackup {
      * guaranteed on the host (no python/jq/node), so the script verifies
      * the manifest structurally (non-empty, contains "version": 1 and
      * every archive name) plus per-archive existence / non-empty /
-     * holds-a-file checks. The manifest is generated from a fixed
+     * holds-a-file checks and a recomputed SHA-256 compared with the
+     * value recorded when the archive was packed. The manifest's
+     * stored sha256 is re-checked by the Java side
+     * (DistroBackup.verifyBackupArchives) at copy/restore time, since
+     * the script cannot parse JSON. The manifest is generated from a fixed
      * template whose string values are app constants or validated
      * inputs (no embedded " or \), so it is well-formed by
      * construction; the restore side re-parses it with org.json and
@@ -860,17 +1012,18 @@ public final class DistroBackup {
             DistroUtils.expandWildcardPaths(rootfs, allAgentPaths));
         // Manifest items, in order: system first, then home, then agents
         // in AGENTS order.
-        // Each entry: {item id, label, archive, shell var holding its size}.
+        // Each entry: {item id, label, archive, shell var holding its size,
+        // shell var holding its sha256}.
         List<String[]> manifestItems = new ArrayList<>();
         if (backupSystem) {
-            manifestItems.add(new String[]{SYSTEM_ITEM_ID, SYSTEM_ITEM_LABEL, SYSTEM_ARCHIVE, "SYSTEM_SIZE"});
+            manifestItems.add(new String[]{SYSTEM_ITEM_ID, SYSTEM_ITEM_LABEL, SYSTEM_ARCHIVE, "SYSTEM_SIZE", "SYSTEM_SHA"});
         }
         if (backupHome) {
-            manifestItems.add(new String[]{HOME_ITEM_ID, HOME_ITEM_LABEL, HOME_ARCHIVE, "HOME_SIZE"});
+            manifestItems.add(new String[]{HOME_ITEM_ID, HOME_ITEM_LABEL, HOME_ARCHIVE, "HOME_SIZE", "HOME_SHA"});
         }
         for (AiAgentUtils.AgentDef def : selectedAgents) {
             manifestItems.add(new String[]{agentItemId(def.id), def.displayName,
-                agentArchiveName(def.id), sizeVarFor(def.id)});
+                agentArchiveName(def.id), sizeVarFor(def.id), shaVarFor(def.id)});
         }
         String createdAt = isoNow();
         // Step labels: [1/4]..[4/4] when the container is removed after
@@ -979,13 +1132,17 @@ public final class DistroBackup {
         s.append("echo \"").append(stepManifest).append(" 正在写备份清单 ...\"\n");
         if (backupSystem) {
             s.append("SYSTEM_SIZE=$(stat -c %s \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\")\n");
+            s.append("SYSTEM_SHA=$(sha256sum \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\" | cut -d' ' -f1)\n");
         }
         if (backupHome) {
             s.append("HOME_SIZE=$(stat -c %s \"$BACKUP_DIR/").append(HOME_ARCHIVE).append("\")\n");
+            s.append("HOME_SHA=$(sha256sum \"$BACKUP_DIR/").append(HOME_ARCHIVE).append("\" | cut -d' ' -f1)\n");
         }
         for (AiAgentUtils.AgentDef def : selectedAgents) {
             s.append(sizeVarFor(def.id)).append("=$(stat -c %s \"$BACKUP_DIR/")
                 .append(agentArchiveName(def.id)).append("\")\n");
+            s.append(shaVarFor(def.id)).append("=$(sha256sum \"$BACKUP_DIR/")
+                .append(agentArchiveName(def.id)).append("\" | cut -d' ' -f1)\n");
         }
         s.append("{\n");
         s.append("  printf '%s\\n' '{'\n");
@@ -1001,11 +1158,12 @@ public final class DistroBackup {
             for (int i = 0; i < manifestItems.size(); i++) {
                 String[] item = manifestItems.get(i);
                 String comma = i + 1 < manifestItems.size() ? "," : "";
-                s.append("  printf '    {\"id\": \"%s\", \"label\": \"%s\", \"archive\": \"%s\", \"size\": %s}%s\\n' ")
+                s.append("  printf '    {\"id\": \"%s\", \"label\": \"%s\", \"archive\": \"%s\", \"size\": %s, \"sha256\": \"%s\"}%s\\n' ")
                     .append(shellQuote(item[0])).append(" ")
                     .append(shellQuote(item[1])).append(" ")
                     .append(shellQuote(item[2])).append(" ")
                     .append("\"$").append(item[3]).append("\" ")
+                    .append("\"$").append(item[4]).append("\" ")
                     .append(shellQuote(comma)).append("\n");
             }
             s.append("  printf '  ]\\n'\n");
@@ -1030,6 +1188,19 @@ public final class DistroBackup {
             s.append("tar tzf \"$BACKUP_DIR/").append(archive)
                 .append("\" | grep -qv '/$' || fail \"").append(archive)
                 .append(" 里没有文件\"\n");
+            // Recompute the checksum and compare it with the value
+            // recorded when the archive was packed: a file truncated
+            // or corrupted between packing and this check fails here,
+            // before any remove step runs. (The manifest's stored
+            // sha256 is re-checked by the Java side at copy/restore
+            // time; the script compares against the in-memory value
+            // because it cannot parse JSON.)
+            s.append("[ -n \"$").append(item[4]).append("\" ] || fail \"").append(archive)
+                .append(" 校验和缺失\"\n");
+            s.append("ACTUAL_SHA=$(sha256sum \"$BACKUP_DIR/").append(archive)
+                .append("\" | cut -d' ' -f1)\n");
+            s.append("[ \"$ACTUAL_SHA\" = \"$").append(item[4]).append("\" ] || fail \"")
+                .append(archive).append(" 校验和不符（可能已损坏）\"\n");
         }
         if (removeAfter) {
             s.append("echo \"").append(stepRemove).append(" 正在删除 ").append(shellQuote(distroDisplay == null ? "" : distroDisplay)).append(" ...\"\n");
@@ -1061,6 +1232,11 @@ public final class DistroBackup {
     /** Shell var holding one agent archive's size, e.g. SIZE_CODEX. */
     private static String sizeVarFor(String agentId) {
         return "SIZE_" + agentId.toUpperCase(Locale.US).replaceAll("[^A-Z0-9_]", "_");
+    }
+
+    /** Shell var holding one agent archive's SHA-256, e.g. SHA_CODEX. */
+    private static String shaVarFor(String agentId) {
+        return "SHA_" + agentId.toUpperCase(Locale.US).replaceAll("[^A-Z0-9_]", "_");
     }
 
     /** Now as ISO-8601 with a colon in the offset, e.g.

@@ -7,9 +7,10 @@
 // *.tar.gz, exactly the layout DistroBackup writes internally) can be
 // copied there, listed from there, copied back, or deleted.
 //
-// This class is deliberately decoupled: it knows nothing about
-// DistroBackup or any other new class, and it never packs or unpacks
-// tarballs itself. Per the design, external writes always go via a local
+// This class is deliberately decoupled: it never packs or unpacks
+// tarballs itself, and it only depends on DistroBackup for the shared
+// archive-checksum helper (digestStream) and manifest reader used to
+// verify a copy. Per the design, external writes always go via a local
 // temp copy first (pack internally, then copy here); the copy methods
 // below implement exactly that transfer step.
 //
@@ -55,7 +56,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class ExternalBackupStore {
 
@@ -75,7 +78,9 @@ public final class ExternalBackupStore {
     /** File every backup dir must contain; also the manifest read by listExternalBackups. */
     private static final String MANIFEST_FILE_NAME = "manifest.json";
 
-    private static final int BUFFER_SIZE = 8192;
+    /** Copy buffer (64KB): backups are hundreds of MB, so the old 8KB
+     * buffer only wasted syscalls. */
+    private static final int BUFFER_SIZE = 65536;
 
     private ExternalBackupStore() {
     }
@@ -353,8 +358,9 @@ public final class ExternalBackupStore {
     public static final int COPY_CREATE_FAILED = 3;
     /** A backup file could not be copied over (read/write failure). */
     public static final int COPY_FAILED = 4;
-    /** The files landed but the copied dir has no manifest.json, so
-     * the copy is not a usable backup. */
+    /** The copied files failed verification against the manifest
+     * (a file is missing, truncated, or its SHA-256 does not match),
+     * so the copy is not a usable backup. */
     public static final int COPY_VERIFY_FAILED = 5;
 
     /** Copies a whole internal backup dir (manifest.json + *.tar.gz) into
@@ -404,6 +410,8 @@ public final class ExternalBackupStore {
                 deleteExternalDirQuietly(resolver, newDirUri);
                 return COPY_FAILED;
             }
+            // File name -> SAF Uri of the copy, for the post-copy verify below.
+            Map<String, Uri> copiedUris = new LinkedHashMap<>();
             for (File file : files) {
                 if (!file.isFile()) continue; // backup dirs are flat; skip subdirs
                 Uri fileUri = DocumentsContract.createDocument(
@@ -417,10 +425,16 @@ public final class ExternalBackupStore {
                     deleteExternalDirQuietly(resolver, newDirUri);
                     return COPY_FAILED;
                 }
+                copiedUris.put(file.getName(), fileUri);
             }
-            // The manifest must have landed, or the copy is not a backup.
-            if (findChildUri(resolver, folderUri,
-                    DocumentsContract.getDocumentId(newDirUri), MANIFEST_FILE_NAME) == null) {
+            // Verify every copied file against the internal manifest:
+            // size must match, and SHA-256 must match when the manifest
+            // records one (backups written before this round have no
+            // sha256 and fall back to the size check). The old check
+            // only looked for manifest.json, so a truncated archive
+            // could pass here and only fail at restore time.
+            JSONObject manifest = DistroBackup.readManifest(internalBackupDir);
+            if (manifest == null || !verifyCopiedBackup(resolver, manifest, copiedUris)) {
                 deleteExternalDirQuietly(resolver, newDirUri);
                 return COPY_VERIFY_FAILED;
             }
@@ -430,6 +444,54 @@ public final class ExternalBackupStore {
             if (newDirUri != null) deleteExternalDirQuietly(resolver, newDirUri);
             return COPY_FAILED;
         }
+    }
+
+    /** Checks every manifest item landed intact in the external dir:
+     * the copied file must exist and its byte count must equal the
+     * manifest size; when the manifest records a sha256, the streamed
+     * SHA-256 must match too. Old manifests without sha256 pass on
+     * size alone. Returns false on any mismatch or read failure. */
+    private static boolean verifyCopiedBackup(ContentResolver resolver,
+            JSONObject manifest, Map<String, Uri> copiedUris) {
+        JSONArray items = manifest.optJSONArray("items");
+        if (items == null || items.length() == 0) return false;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) return false;
+            String archive = item.optString("archive", "");
+            long size = item.optLong("size", 0);
+            String sha = item.optString("sha256", "");
+            Uri fileUri = copiedUris.get(archive);
+            if (archive.isEmpty() || fileUri == null) return false;
+            InputStream in = null;
+            try {
+                in = resolver.openInputStream(fileUri);
+                if (in == null) return false;
+                DistroBackup.StreamDigest digest = DistroBackup.digestStream(in);
+                if (digest == null) return false;
+                if (size > 0 && digest.size != size) {
+                    Log.w(LOG_TAG, "Copied file size mismatch: " + archive);
+                    return false;
+                }
+                if (sha != null && !sha.isEmpty() && (digest.sha256 == null
+                        || !digest.sha256.equalsIgnoreCase(sha.trim()))) {
+                    Log.w(LOG_TAG, "Copied file SHA-256 mismatch: " + archive);
+                    return false;
+                }
+            } catch (IOException | SecurityException e) {
+                Log.w(LOG_TAG, "Could not verify copied file: " + archive, e);
+                return false;
+            } finally {
+                if (in != null) {
+                    try {
+                        in.close();
+                    } catch (IOException ignored) {
+                        // Best effort only.
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     /** Copies an external backup dir into destParentDir (a local
@@ -483,6 +545,17 @@ public final class ExternalBackupStore {
                     deleteRecursively(destDir);
                     return null;
                 }
+            }
+            // Verify the staged copy against its own manifest (size,
+            // and SHA-256 when the manifest has one) before the caller
+            // unpacks anything from it. Old backups without sha256
+            // fall back to the size check inside verifyBackupArchives.
+            List<String> failedArchives = DistroBackup.verifyBackupArchives(destDir, null);
+            if (failedArchives == null || !failedArchives.isEmpty()) {
+                Log.w(LOG_TAG, "Staged external backup failed archive verification: "
+                    + backupDirUri);
+                deleteRecursively(destDir);
+                return null;
             }
             return destDir;
         } catch (SecurityException | IllegalArgumentException e) {
