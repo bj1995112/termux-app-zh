@@ -30,6 +30,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.text.format.Formatter;
 import android.util.AtomicFile;
 import android.util.Log;
@@ -310,9 +311,13 @@ public class DistroActivity extends AppCompatActivity {
     /** The backup-manager dialog, while it is open (for refresh after a
      * folder pick or a delete). */
     private AlertDialog mBackupManagerDialog;
-    /** The backup detail dialog, if open: dismissed when a per-file
-     * delete completes so it never shows a stale item list. */
-    private AlertDialog mBackupDetailDialog;
+    /** Backup key of the manager row currently expanded in place
+     * ("" = none). Survives a manager refresh, so a per-file delete
+     * does not collapse the row. */
+    private String mExpandedBackupKey = "";
+    /** Per-backup restore selection in the expanded rows: backup key
+     * -> checked item ids. First access defaults to all checked. */
+    private final Map<String, Set<String>> mBackupRestoreSelection = new HashMap<>();
     /** The backup picker dialog currently open (uninstall confirm or
      * standalone backup), while it is open — its destination widgets
      * are refreshed from the SAF folder-picker result in
@@ -373,8 +378,8 @@ public class DistroActivity extends AppCompatActivity {
         // session gets its host metadata cleaned here (see
         // checkPendingUninstalls).
         new Thread(this::checkPendingUninstalls).start();
-        // A container installed just now gets offered a restore from any
-        // backup on this screen (see checkRestoreAutoPrompt).
+        // A container installed just now gets offered a restore from a
+        // backup of the same distro (see checkRestoreAutoPrompt).
         new Thread(this::checkRestoreAutoPrompt).start();
         String showContainer = getIntent().getStringExtra(EXTRA_CONTAINER_NAME);
         if (showContainer != null) showDistroDialogForContainer(showContainer);
@@ -1736,7 +1741,18 @@ public class DistroActivity extends AppCompatActivity {
                 // internally can now be copied to external storage when
                 // that was the chosen destination (see
                 // copyPendingExternalBackup for the exact sequencing).
-                copyPendingExternalBackup(container);
+                // Copy only once the packed dir is COMPLETE (see
+                // isBackupDirComplete): an incomplete dir means the
+                // session is still packing, or never finished, and
+                // copying it would fail with a misleading "missing
+                // manifest" error. Leave it pending instead — the
+                // watcher / next resume retries once it is complete
+                // (checkPendingExternalCopies already ran above and
+                // copies complete dirs).
+                File pendingBackupDir = pendingBackupDirForContainer(container);
+                if (pendingBackupDir != null && isBackupDirComplete(pendingBackupDir)) {
+                    copyPendingExternalBackup(container);
+                }
             }
         }
         if (remaining.size() != pending.size()) {
@@ -2225,9 +2241,9 @@ public class DistroActivity extends AppCompatActivity {
 
     /** Two-line list adapter for backups. In the restore picker damaged
      * rows are disabled (cannot be selected); in the manager they stay
-     * enabled so a damaged backup can be opened and deleted. Manager
-     * rows also carry direct Restore / Delete buttons (the picker
-     * keeps plain two-line selection rows, no buttons). */
+     * enabled so a damaged backup can be expanded and deleted. Manager
+     * rows expand in place on tap (see the manager branch of getView);
+     * the picker keeps plain two-line selection rows, no buttons. */
     private ArrayAdapter<UnifiedBackup> backupListAdapter(final List<UnifiedBackup> backups,
             final boolean forRestorePicker) {
         return new ArrayAdapter<UnifiedBackup>(this, android.R.layout.simple_list_item_2,
@@ -2251,11 +2267,18 @@ public class DistroActivity extends AppCompatActivity {
                     }
                     return view;
                 }
-                // Manager row: same two lines, plus direct Restore /
-                // Delete buttons. The buttons are not focusable, so
-                // tapping the row itself still opens the detail view.
+                // Manager row: the two lines plus a direct Delete
+                // button. Tapping the row expands it in place (tap
+                // again to collapse); the expanded section lists the
+                // backup's files with a checkbox (checked = restore)
+                // and a per-file delete button, plus "Restore selected"
+                // and "Delete the whole backup" buttons. The buttons
+                // and checkboxes are not focusable, so tapping the row
+                // header still toggles the expansion.
                 LinearLayout row = new LinearLayout(DistroActivity.this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setOrientation(LinearLayout.VERTICAL);
+                LinearLayout header = new LinearLayout(DistroActivity.this);
+                header.setOrientation(LinearLayout.HORIZONTAL);
                 LinearLayout texts = new LinearLayout(DistroActivity.this);
                 texts.setOrientation(LinearLayout.VERTICAL);
                 texts.setLayoutParams(new LinearLayout.LayoutParams(0,
@@ -2266,21 +2289,7 @@ public class DistroActivity extends AppCompatActivity {
                 TextView subtitleView = new TextView(DistroActivity.this);
                 subtitleView.setText(backup == null ? "" : backupSubtitleLine(backup));
                 texts.addView(subtitleView);
-                row.addView(texts);
-                android.widget.Button restoreButton =
-                    new android.widget.Button(DistroActivity.this);
-                restoreButton.setText(R.string.backup_row_restore);
-                restoreButton.setFocusable(false);
-                restoreButton.setOnClickListener(v -> {
-                    if (backup == null) return;
-                    if (backup.damaged) {
-                        Toast.makeText(DistroActivity.this,
-                            R.string.restore_damaged, Toast.LENGTH_LONG).show();
-                        return;
-                    }
-                    startRestoreForBackup(backup);
-                });
-                row.addView(restoreButton);
+                header.addView(texts);
                 android.widget.Button deleteButton =
                     new android.widget.Button(DistroActivity.this);
                 deleteButton.setText(R.string.backup_manager_delete);
@@ -2289,7 +2298,81 @@ public class DistroActivity extends AppCompatActivity {
                     if (backup == null) return;
                     confirmDeleteBackup(backup);
                 });
-                row.addView(deleteButton);
+                header.addView(deleteButton);
+                row.addView(header);
+                if (backup != null && backupKey(backup).equals(mExpandedBackupKey)) {
+                    LinearLayout expanded = new LinearLayout(DistroActivity.this);
+                    expanded.setOrientation(LinearLayout.VERTICAL);
+                    int indent = (int) (16 * DistroActivity.this.getResources()
+                        .getDisplayMetrics().density);
+                    expanded.setPadding(indent, 0, 0, 0);
+                    if (backup.damaged) {
+                        TextView damagedLine = new TextView(DistroActivity.this);
+                        damagedLine.setText(R.string.restore_damaged);
+                        expanded.addView(damagedLine);
+                    } else {
+                        for (UnifiedBackup.BackupItemRow item : backup.items) {
+                            LinearLayout fileRow = new LinearLayout(DistroActivity.this);
+                            fileRow.setOrientation(LinearLayout.HORIZONTAL);
+                            // Swallow taps on the file row itself so
+                            // tapping the label does not collapse the
+                            // section (the checkbox is what toggles).
+                            fileRow.setOnClickListener(v -> { });
+                            CheckBox checkBox = new CheckBox(DistroActivity.this);
+                            checkBox.setFocusable(false);
+                            checkBox.setChecked(restoreCheckedIds(backup).contains(item.id));
+                            checkBox.setOnCheckedChangeListener((button, isChecked) -> {
+                                if (isChecked) {
+                                    restoreCheckedIds(backup).add(item.id);
+                                } else {
+                                    restoreCheckedIds(backup).remove(item.id);
+                                }
+                            });
+                            fileRow.addView(checkBox);
+                            TextView labelView = new TextView(DistroActivity.this);
+                            labelView.setLayoutParams(new LinearLayout.LayoutParams(0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                            String text = item.label;
+                            String archive = item.archive == null ? "" : item.archive;
+                            if (!archive.isEmpty() && item.sizeKnown) {
+                                text += " (" + archive + ", "
+                                    + Formatter.formatShortFileSize(DistroActivity.this, item.size) + ")";
+                            } else if (!archive.isEmpty()) {
+                                text += " (" + archive + ")";
+                            } else if (item.sizeKnown) {
+                                text += " (" + Formatter.formatShortFileSize(DistroActivity.this, item.size) + ")";
+                            }
+                            labelView.setText(text);
+                            fileRow.addView(labelView);
+                            android.widget.Button deleteFileButton =
+                                new android.widget.Button(DistroActivity.this);
+                            deleteFileButton.setText(R.string.backup_manager_delete);
+                            deleteFileButton.setFocusable(false);
+                            deleteFileButton.setOnClickListener(v ->
+                                confirmDeleteBackupItem(backup, item));
+                            fileRow.addView(deleteFileButton);
+                            expanded.addView(fileRow);
+                        }
+                    }
+                    LinearLayout actions = new LinearLayout(DistroActivity.this);
+                    actions.setOrientation(LinearLayout.HORIZONTAL);
+                    if (!backup.damaged) {
+                        android.widget.Button restoreButton =
+                            new android.widget.Button(DistroActivity.this);
+                        restoreButton.setText(R.string.restore_selected);
+                        restoreButton.setFocusable(false);
+                        restoreButton.setOnClickListener(v -> restoreSelected(backup));
+                        actions.addView(restoreButton);
+                    }
+                    android.widget.Button deleteWholeButton =
+                        new android.widget.Button(DistroActivity.this);
+                    deleteWholeButton.setText(R.string.backup_delete_whole);
+                    deleteWholeButton.setFocusable(false);
+                    deleteWholeButton.setOnClickListener(v -> confirmDeleteBackup(backup));
+                    actions.addView(deleteWholeButton);
+                    expanded.addView(actions);
+                    row.addView(expanded);
+                }
                 return row;
             }
         };
@@ -2311,35 +2394,31 @@ public class DistroActivity extends AppCompatActivity {
         return false;
     }
 
-    /** "distroId equal" is the whole same/cross-distro test (design.md
+    /** "distroId equal" is the whole same-distro test (design.md
      * §4): only the distro family is compared, never the version
-     * number. A missing/empty backup distroId is cross-distro. */
+     * number. A missing/empty backup distroId never matches — restore
+     * is same-distro only. */
     private static boolean isSameDistroForRestore(UnifiedBackup backup, String targetDistroId) {
         return backup.distroId != null && !backup.distroId.isEmpty()
             && backup.distroId.equals(targetDistroId);
     }
 
-    private static DistroDef findDistroDef(String distroId) {
-        if (distroId == null) return null;
-        for (DistroDef distro : DISTROS) {
-            if (distro.id.equals(distroId)) return distro;
-        }
-        return null;
-    }
-
-    /** Open the AI-assistant installer for one container, reusing the
-     * same intent as the "安装 AI 助手" menu item. Used by the restore
-     * result's "重装这些助手" button (cross-distro restores only). */
-    private void openAiAgentsForContainer(String container, String display) {
-        DistroDef distro = findDistroDef(DistroUtils.distroIdForContainer(container));
-        if (distro == null) return;
-        openAiAgents(distro, container, display);
+    /** True when this backup may be restored into this container:
+     * same distro family (by manifest id), or the backup's own
+     * container — which covers backups whose distroId was never
+     * recorded. Damaged backups never match. Used by every restore
+     * entry point, so a cross-distro restore cannot be reached. */
+    private static boolean isSameDistroBackupForContainer(UnifiedBackup backup, String container) {
+        if (backup.damaged) return false;
+        if (!backup.container.isEmpty() && backup.container.equals(container)) return true;
+        return isSameDistroForRestore(backup, DistroUtils.distroIdForContainer(container));
     }
 
     // ---- Manual restore: "从备份恢复" in showDistroDialog ----
 
-    /** Manual restore entry: list all backups (both locations) on a
-     * background thread, then show the picker on the UI thread. */
+    /** Manual restore entry: list the backups of this container's
+     * distro (both locations) on a background thread, then show the
+     * picker on the UI thread. */
     private void startRestoreFlow(final String container, final String display) {
         final File rootfs = DistroUtils.containerRootfs(container);
         if (rootfs == null) {
@@ -2352,25 +2431,31 @@ public class DistroActivity extends AppCompatActivity {
         }).start();
     }
 
-    /** Backup picker: every backup from both locations, labelled with
-     * source distro + date + size + location. Damaged rows are shown
-     * but disabled; tapping one toasts instead of restoring. */
+    /** Backup picker: the same-distro backups from both locations,
+     * labelled with source distro + date + size + location. Backups of
+     * other distros are not listed at all (restore is same-distro
+     * only). Damaged rows are shown but disabled; tapping one toasts
+     * instead of restoring. */
     private void showBackupPicker(final String container, final String display,
             final File rootfs, final List<UnifiedBackup> backups) {
         if (isFinishing() || isDestroyed()) return;
-        if (backups.isEmpty()) {
+        final List<UnifiedBackup> sameDistro = new ArrayList<>();
+        for (UnifiedBackup backup : backups) {
+            if (isSameDistroBackupForContainer(backup, container)) sameDistro.add(backup);
+        }
+        if (sameDistro.isEmpty()) {
             Toast.makeText(this, R.string.restore_no_backups, Toast.LENGTH_LONG).show();
             return;
         }
         ListView listView = new ListView(this);
-        listView.setAdapter(backupListAdapter(backups, true));
+        listView.setAdapter(backupListAdapter(sameDistro, true));
         final AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle(R.string.restore_pick_backup_title)
             .setView(listView)
             .setNegativeButton(android.R.string.cancel, null)
             .create();
         listView.setOnItemClickListener((parent, view, position, id) -> {
-            UnifiedBackup backup = backups.get(position);
+            UnifiedBackup backup = sameDistro.get(position);
             if (backup.damaged) {
                 Toast.makeText(DistroActivity.this,
                     R.string.restore_damaged, Toast.LENGTH_LONG).show();
@@ -2383,9 +2468,10 @@ public class DistroActivity extends AppCompatActivity {
     }
 
     /** Item picker for one backup: checklist of its items (user files +
-     * agents) with sizes where known, DEFAULT ALL CHECKED. The header
-     * states whether this is a same-distro restore (whole items) or a
-     * cross-distro one (data only, programs need reinstalling). */
+     * agents, including the system item) with sizes where known,
+     * DEFAULT ALL CHECKED. Restore is same-distro only, so the header
+     * always states the source distro and every item can be restored
+     * as-is; there is no cross-distro prompt any more. */
     private void showItemPicker(final String container, final String display,
             final File rootfs, final UnifiedBackup backup) {
         if (isFinishing() || isDestroyed()) return;
@@ -2397,32 +2483,19 @@ public class DistroActivity extends AppCompatActivity {
         // Same-distro is likewise read from the manifest when available.
         JSONObject manifest = backup.dir != null
             ? DistroBackup.readManifest(backup.dir) : null;
-        boolean hasSystem = manifest != null
-            ? DistroBackup.manifestHasItem(manifest, DistroBackup.SYSTEM_ITEM_ID)
-            : hasBackupItemRow(backup, DistroBackup.SYSTEM_ITEM_ID);
-        boolean sameDistro = manifest != null
-            ? DistroBackup.isSameDistro(manifest, targetDistroId)
-            : isSameDistroForRestore(backup, targetDistroId);
+        boolean hasSystem = backupHasSystemItem(backup);
+        boolean sameDistro = backup.container.equals(container)
+            || (manifest != null
+                ? DistroBackup.isSameDistro(manifest, targetDistroId)
+                : isSameDistroForRestore(backup, targetDistroId));
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
         layout.setPadding(pad, pad / 2, pad, pad / 2);
         TextView distroLine = new TextView(this);
-        if (sameDistro) {
-            distroLine.setText(getString(R.string.restore_same_distro, backup.distroDisplay));
-        } else {
-            distroLine.setText(getString(R.string.restore_cross_distro_note,
-                backup.distroDisplay, display));
-        }
+        distroLine.setText(getString(R.string.restore_same_distro, backup.distroDisplay));
         layout.addView(distroLine);
-        if (hasSystem && !sameDistro) {
-            // Cross-distro: system files cannot be restored to a
-            // different distro — the system item is skipped below and
-            // never passed to restoreItems.
-            TextView skipNote = new TextView(this);
-            skipNote.setText(R.string.restore_system_skipped_cross_distro);
-            layout.addView(skipNote);
-        } else if (hasSystem && sameDistro && isTargetRootNonEmpty(rootfs)) {
+        if (hasSystem && sameDistro && isTargetRootNonEmpty(rootfs)) {
             // Same distro onto a non-empty target: restoring the system
             // files will overwrite the target distro's system files.
             // Warn prominently, but do not block — the existing
@@ -2434,9 +2507,6 @@ public class DistroActivity extends AppCompatActivity {
         }
         final Map<String, CheckBox> checks = new LinkedHashMap<>();
         for (UnifiedBackup.BackupItemRow item : backup.items) {
-            if (!sameDistro && DistroBackup.SYSTEM_ITEM_ID.equals(item.id)) {
-                continue; // system files cannot be restored cross-distro
-            }
             CheckBox checkBox = new CheckBox(this);
             String text = item.label;
             if (item.sizeKnown) {
@@ -2554,29 +2624,21 @@ public class DistroActivity extends AppCompatActivity {
             .create();
     }
 
-    /** Per-item restore result. When the restore was cross-distro and
-     * at least one agent item was restored (data-only), a "重装这些助手"
-     * button opens AiAgentsActivity for this container so the user can
-     * reinstall the programs (the restored config is picked up). */
+    /** Per-item restore result. Restore is same-distro only, so the
+     * result just lists each selected item as OK/failed — no
+     * cross-distro note and no "reinstall assistants" button any more. */
     private void showRestoreResult(String container, String display, UnifiedBackup backup,
             List<String> selectedItemIds, Map<String, Boolean> extracted,
             List<String> failedVerify) {
         if (isFinishing() || isDestroyed()) return;
-        String targetDistroId = DistroUtils.distroIdForContainer(container);
-        boolean sameDistro = isSameDistroForRestore(backup, targetDistroId);
         StringBuilder message = new StringBuilder();
         boolean allOk = true;
-        List<String> restoredAgentIds = new ArrayList<>();
         for (String itemId : selectedItemIds) {
             boolean okExtract = Boolean.TRUE.equals(extracted.get(itemId));
             boolean okVerify = !failedVerify.contains(itemId);
             String status;
             if (okExtract && okVerify) {
                 status = getString(R.string.restore_item_ok);
-                if (itemId.startsWith(DistroBackup.AGENT_ITEM_ID_PREFIX)) {
-                    restoredAgentIds.add(itemId.substring(
-                        DistroBackup.AGENT_ITEM_ID_PREFIX.length()));
-                }
             } else if (!okExtract) {
                 status = getString(R.string.restore_item_failed_extract);
                 allOk = false;
@@ -2587,27 +2649,19 @@ public class DistroActivity extends AppCompatActivity {
             message.append(labelForItem(backup, itemId)).append("：")
                 .append(status).append("\n");
         }
-        if (!sameDistro && !restoredAgentIds.isEmpty()) {
-            message.append("\n").append(getString(R.string.restore_cross_distro_note,
-                backup.distroDisplay, display));
-        }
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        new AlertDialog.Builder(this)
             .setTitle(allOk ? R.string.restore_done_title
                 : R.string.restore_done_some_failed_title)
             .setMessage(message.toString().trim())
-            .setPositiveButton(android.R.string.ok, null);
-        if (!sameDistro && !restoredAgentIds.isEmpty()
-            && findDistroDef(targetDistroId) != null) {
-            builder.setNeutralButton(R.string.restore_reinstall_agents,
-                (d, w) -> openAiAgentsForContainer(container, display));
-        }
-        builder.show();
+            .setPositiveButton(android.R.string.ok, null)
+            .show();
     }
 
     // ---- Auto-prompt after a distro install (design.md §4) ----
 
     /** Offer a restore when a container appears that this screen has
-     * never seen before. Installs run in a terminal session with no
+     * never seen before — only from backups of the same distro family.
+     * Installs run in a terminal session with no
      * callback, so like the mirror sync (syncPendingInstalls) and the
      * model-config re-apply prompt, this is detected on resume with a
      * fresh container scan — here against a persisted "known
@@ -2634,19 +2688,24 @@ public class DistroActivity extends AppCompatActivity {
             prefs.edit().putStringSet(KEY_RESTORE_KNOWN_CONTAINERS,
                 new LinkedHashSet<>(installed)).apply();
             if (newlyInstalled.isEmpty()) return;
-            List<UnifiedBackup> usable = new ArrayList<>();
-            for (UnifiedBackup backup : collectUnifiedBackups()) {
-                if (!backup.damaged) usable.add(backup);
-            }
-            if (usable.isEmpty()) return;
+            List<UnifiedBackup> allBackups = collectUnifiedBackups();
             Set<String> prompted = new LinkedHashSet<>(prefs.getStringSet(
                 KEY_RESTORE_PROMPTED_CONTAINERS, new LinkedHashSet<String>()));
             for (String container : newlyInstalled) {
                 if (prompted.contains(container)) continue;
+                // Same-distro only: only backups from this container's
+                // distro family are offered; a container with no
+                // same-distro backup is skipped.
+                final List<UnifiedBackup> choices = new ArrayList<>();
+                for (UnifiedBackup backup : allBackups) {
+                    if (isSameDistroBackupForContainer(backup, container)) {
+                        choices.add(backup);
+                    }
+                }
                 prompted.add(container);
                 prefs.edit().putStringSet(KEY_RESTORE_PROMPTED_CONTAINERS, prompted).apply();
+                if (choices.isEmpty()) continue;
                 final String display = displayNameForContainer(container);
-                final List<UnifiedBackup> choices = usable;
                 runOnUiThread(() ->
                     showRestoreAutoPromptDialog(container, display, choices));
                 return;
@@ -2767,8 +2826,12 @@ public class DistroActivity extends AppCompatActivity {
             .setView(layout)
             .setNegativeButton(android.R.string.cancel, null)
             .create();
-        listView.setOnItemClickListener((parent, view, position, id) ->
-            showBackupDetail(backups.get(position)));
+        listView.setOnItemClickListener((parent, view, position, id) -> {
+            UnifiedBackup tapped = backups.get(position);
+            String key = backupKey(tapped);
+            mExpandedBackupKey = key.equals(mExpandedBackupKey) ? "" : key;
+            ((android.widget.BaseAdapter) listView.getAdapter()).notifyDataSetChanged();
+        });
         listView.setOnItemLongClickListener((parent, view, position, id) -> {
             confirmDeleteBackup(backups.get(position));
             return true;
@@ -2780,106 +2843,7 @@ public class DistroActivity extends AppCompatActivity {
         dialog.show();
     }
 
-    /** Detail view for one backup: header lines (source distro, date,
-     * total size, location) plus one row per item — label, archive name
-     * and size where known — each with its own delete button. The
-     * dialog buttons are restore / delete whole backup / cancel. A
-     * damaged backup keeps the old behaviour: the damaged note only,
-     * no file list, no restore button, whole-delete + cancel only. */
-    private void showBackupDetail(final UnifiedBackup backup) {
-        if (isFinishing() || isDestroyed()) return;
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        layout.setPadding(pad, pad / 2, pad, pad / 2);
-
-        String source = !backup.distroDisplay.isEmpty()
-            ? backup.distroDisplay : backup.container;
-        TextView sourceLine = new TextView(this);
-        sourceLine.setText(source);
-        layout.addView(sourceLine);
-        String date = formatCreatedAt(backup.createdAt);
-        if (!date.isEmpty()) {
-            TextView dateLine = new TextView(this);
-            dateLine.setText(date);
-            layout.addView(dateLine);
-        }
-        TextView sizeLine = new TextView(this);
-        sizeLine.setText(Formatter.formatShortFileSize(this, backup.totalSize));
-        layout.addView(sizeLine);
-        TextView locationLine = new TextView(this);
-        if (backup.external) {
-            String location = getString(R.string.backup_external_location_label);
-            String folderPath = ExternalBackupStore.displayFolderPath(this);
-            if (folderPath != null && !folderPath.isEmpty()) {
-                location += ": " + folderPath;
-            }
-            locationLine.setText(location);
-        } else {
-            locationLine.setText(R.string.backup_external_location_internal);
-        }
-        layout.addView(locationLine);
-
-        if (backup.damaged) {
-            TextView damagedLine = new TextView(this);
-            damagedLine.setText(R.string.restore_damaged);
-            layout.addView(damagedLine);
-        } else {
-            for (UnifiedBackup.BackupItemRow item : backup.items) {
-                String text = item.label;
-                String archive = item.archive == null ? "" : item.archive;
-                if (!archive.isEmpty() && item.sizeKnown) {
-                    text += " (" + archive + ", "
-                        + Formatter.formatShortFileSize(this, item.size) + ")";
-                } else if (!archive.isEmpty()) {
-                    text += " (" + archive + ")";
-                } else if (item.sizeKnown) {
-                    text += " (" + Formatter.formatShortFileSize(this, item.size) + ")";
-                }
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                TextView labelView = new TextView(this);
-                labelView.setLayoutParams(new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                labelView.setText(text);
-                row.addView(labelView);
-                android.widget.Button deleteButton = new android.widget.Button(this);
-                deleteButton.setText(R.string.backup_manager_delete);
-                deleteButton.setOnClickListener(v -> confirmDeleteBackupItem(backup, item));
-                row.addView(deleteButton);
-                layout.addView(row);
-            }
-        }
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(layout);
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
-            .setTitle(backupTitleLine(backup))
-            .setView(scroll)
-            .setNeutralButton(R.string.backup_manager_delete,
-                (d, w) -> confirmDeleteBackup(backup))
-            .setNegativeButton(android.R.string.cancel, null);
-        if (!backup.damaged) {
-            builder.setPositiveButton(R.string.backup_detail_restore,
-                (d, w) -> startRestoreForBackup(backup));
-        }
-        final AlertDialog dialog = builder.create();
-        dialog.setOnDismissListener(d -> {
-            if (mBackupDetailDialog == dialog) mBackupDetailDialog = null;
-        });
-        mBackupDetailDialog = dialog;
-        dialog.show();
-    }
-
-    /** Dismiss the detail dialog, if open (called when a per-file
-     * delete completes, so the detail view never shows a stale list). */
-    private void dismissBackupDetail() {
-        if (mBackupDetailDialog != null && mBackupDetailDialog.isShowing()) {
-            mBackupDetailDialog.dismiss();
-        }
-        mBackupDetailDialog = null;
-    }
-
-    /** Per-file delete for one row of the detail view. Last-file rule:
+    /** Per-file delete for one row of the expanded backup row. Last-file rule:
      * when this is the backup's only item there is no per-file delete
      * — offer to delete the whole backup instead. Otherwise confirm
      * with the item label, then delete on a background thread (SAF /
@@ -2921,16 +2885,14 @@ public class DistroActivity extends AppCompatActivity {
      * refresh the manager list. EMPTY: the backup has no files left —
      * ask whether to delete the whole backup (positive) or just refresh
      * (negative). FAILED / NOT_FOUND / anything else: toast failure and
-     * refresh. The detail dialog is dismissed first in every branch so
-     * it never shows the pre-delete item list. */
+     * refresh. The manager list is refreshed afterwards, keeping the
+     * expanded row expanded. */
     private void onDeleteBackupItemResult(final UnifiedBackup backup, String label, int result) {
         if (result == DistroBackup.DELETE_ITEM_OK) {
             Toast.makeText(this,
                 getString(R.string.backup_detail_deleted, label), Toast.LENGTH_LONG).show();
-            dismissBackupDetail();
             refreshBackupManager();
         } else if (result == DistroBackup.DELETE_ITEM_EMPTY) {
-            dismissBackupDetail();
             new AlertDialog.Builder(this)
                 .setMessage(R.string.backup_detail_empty_prompt)
                 .setPositiveButton(R.string.backup_manager_delete,
@@ -2941,109 +2903,440 @@ public class DistroActivity extends AppCompatActivity {
         } else {
             Toast.makeText(this,
                 R.string.backup_detail_delete_failed, Toast.LENGTH_LONG).show();
-            dismissBackupDetail();
             refreshBackupManager();
         }
     }
 
-    /** Restore entry for one backup, from the manager row and the
-     * detail view: skip the container picker when the target is
-     * unambiguous, otherwise fall through to it.
-     * (a) The backup's own container is still installed: restore
-     * straight into it. (b) Otherwise, when exactly one installed
-     * container belongs to the backup's distro family, restore into
-     * it. (c) Otherwise (source distro not installed, or several
-     * containers of that family) show the picker and let the user
-     * choose — cross-distro restores go through here. The item
-     * picker and the restore rules after it are unchanged, and a
-     * damaged backup still only toasts and never restores. */
-    private void startRestoreForBackup(final UnifiedBackup backup) {
-        if (isFinishing() || isDestroyed()) return;
-        if (backup.damaged) {
-            Toast.makeText(this,
-                R.string.restore_damaged, Toast.LENGTH_LONG).show();
-            return;
+    /** Direct restore target for a backup, if it is unambiguous: (a)
+     * the backup's own container is installed, else (b) exactly one
+     * installed container belongs to the backup's distro family. Null
+     * when the source distro is not installed (or several same-family
+     * containers are) — the caller then restores the distro from the
+     * backup itself, or tells the user to check the system item. */
+    private String findDirectRestoreTarget(UnifiedBackup backup) {
+        Set<String> installed = DistroUtils.scanInstalledContainers();
+        if (!backup.container.isEmpty() && installed.contains(backup.container)) {
+            return backup.container;
         }
+        String sourceDistroId = !backup.distroId.isEmpty() ? backup.distroId
+            : DistroUtils.distroIdForContainer(backup.container);
+        if (sourceDistroId == null) return null;
+        String onlyMatch = null;
+        int matches = 0;
+        for (String container : installed) {
+            if (sourceDistroId.equals(DistroUtils.distroIdForContainer(container))) {
+                onlyMatch = container;
+                matches++;
+            }
+        }
+        return matches == 1 ? onlyMatch : null;
+    }
+
+    /** Dismiss the backup manager dialog, if open (restore flows open
+     * their own dialogs or sessions on top of it). */
+    private void dismissBackupManagerDialog() {
         if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
             mBackupManagerDialog.dismiss();
         }
-        if (mInstalledContainers.isEmpty()) {
-            Toast.makeText(this,
-                R.string.backup_detail_no_containers, Toast.LENGTH_LONG).show();
-            return;
-        }
-        // (a) Source container still installed: direct restore.
-        if (!backup.container.isEmpty()
-            && mInstalledContainers.contains(backup.container)) {
-            restoreToContainer(backup, backup.container);
-            return;
-        }
-        // (b) Exactly one installed container of the backup's distro
-        // family: direct restore. An empty backup distroId never
-        // matches (a missing distroId is cross-distro), and
-        // distroIdForContainer may return null for an unknown
-        // container — equals is called on the backup id, so null is
-        // simply not a match.
-        if (!backup.distroId.isEmpty()) {
-            String onlyMatch = null;
-            int matches = 0;
-            for (String container : mInstalledContainers) {
-                if (backup.distroId.equals(DistroUtils.distroIdForContainer(container))) {
-                    onlyMatch = container;
-                    matches++;
-                }
-            }
-            if (matches == 1) {
-                restoreToContainer(backup, onlyMatch);
-                return;
-            }
-        }
-        // (c) Ambiguous: show the picker.
-        showRestoreContainerPicker(backup);
+        mBackupManagerDialog = null;
     }
 
-    /** One restore target, already chosen: resolve its display name
-     * and rootfs, then open the item picker. Shared by the direct
-     * path and the container picker's tap handler. */
-    private void restoreToContainer(final UnifiedBackup backup, String container) {
+    /** "Restore selected" for the expanded backup row: restore exactly
+     * the checked files, nothing else.
+     * - Source distro installed (its own container, or the only
+     *   container of its family) → restore the checked items straight
+     *   into it.
+     * - Not installed, and the system item is checked → restore the
+     *   distro from the backup itself (see startRestoreDistroFromBackup).
+     * - Not installed, and the system item is not checked → toast and
+     *   do nothing: a backup without its system item cannot bring the
+     *   distro back, and a fresh distro is never installed behind the
+     *   user's back.
+     * Never a cross-distro restore; a damaged backup only toasts. */
+    private void restoreSelected(final UnifiedBackup backup) {
+        if (backup.damaged) {
+            Toast.makeText(this, R.string.restore_damaged, Toast.LENGTH_LONG).show();
+            return;
+        }
+        Set<String> checked = restoreCheckedIds(backup);
+        final List<String> selected = new ArrayList<>();
+        for (UnifiedBackup.BackupItemRow item : backup.items) {
+            if (checked.contains(item.id)) selected.add(item.id);
+        }
+        if (selected.isEmpty()) {
+            Toast.makeText(this, R.string.restore_no_items_selected, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String target = findDirectRestoreTarget(backup);
+        if (target != null) {
+            dismissBackupManagerDialog();
+            restoreCheckedToContainer(backup, target, selected);
+            return;
+        }
+        boolean wantSystem = selected.contains(DistroBackup.SYSTEM_ITEM_ID);
+        if (wantSystem && backupHasSystemItem(backup)) {
+            dismissBackupManagerDialog();
+            startRestoreDistroFromBackup(backup, selected);
+            return;
+        }
+        if (backupHasSystemItem(backup)) {
+            Toast.makeText(this, R.string.restore_distro_need_system, Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, R.string.restore_distro_no_system, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Restore the checked items into an already-installed container.
+     * The overwrite confirm is kept: restoring onto a non-empty target
+     * overwrites same-named files. */
+    private void restoreCheckedToContainer(final UnifiedBackup backup, String container,
+            final List<String> selected) {
         String display = displayNameForContainer(container);
         File rootfs = DistroUtils.containerRootfs(container);
         if (rootfs == null) {
-            Toast.makeText(this,
-                R.string.restore_target_missing, Toast.LENGTH_LONG).show();
+            Toast.makeText(this, R.string.restore_target_missing, Toast.LENGTH_LONG).show();
             return;
         }
-        showItemPicker(container, display, rootfs, backup);
+        if (isTargetRootNonEmpty(rootfs)) {
+            new AlertDialog.Builder(this)
+                .setTitle(R.string.restore_overwrite_title)
+                .setMessage(R.string.restore_target_not_empty)
+                .setPositiveButton(android.R.string.ok, (d, w) ->
+                    runRestore(container, display, rootfs, backup, selected))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+        } else {
+            runRestore(container, display, rootfs, backup, selected);
+        }
     }
 
-    /** Restore target picker (the ambiguous fallback of
-     * startRestoreForBackup): dismiss the detail dialog (the
-     * positive button already does) and the manager dialog, then list
-     * the installed containers by display name. Tapping one opens the
-     * existing item picker; the restore rules there are unchanged. */
-    private void showRestoreContainerPicker(final UnifiedBackup backup) {
-        if (isFinishing() || isDestroyed()) return;
-        if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
-            mBackupManagerDialog.dismiss();
+    /** True when the backup carries a distro-system item. The manifest
+     * is read when it is local; external backups have no local
+     * manifest, so the listed item ids are used instead (they come
+     * from the same manifest). */
+    private static boolean backupHasSystemItem(UnifiedBackup backup) {
+        JSONObject manifest = backup.dir != null
+            ? DistroBackup.readManifest(backup.dir) : null;
+        return manifest != null
+            ? DistroBackup.manifestHasItem(manifest, DistroBackup.SYSTEM_ITEM_ID)
+            : hasBackupItemRow(backup, DistroBackup.SYSTEM_ITEM_ID);
+    }
+
+    /** Archive file name for one item id: the manifest's name when the
+     * row carries one, otherwise the conventional name. */
+    private static String archiveNameForItem(UnifiedBackup backup, String itemId, String fallback) {
+        for (UnifiedBackup.BackupItemRow item : backup.items) {
+            if (item.id.equals(itemId) && item.archive != null && !item.archive.isEmpty()) {
+                return item.archive;
+            }
         }
-        if (mInstalledContainers.isEmpty()) {
+        return fallback;
+    }
+
+    /** One checked file to restore after the container is built: its
+     * item id ("home" or "agent:<id>"), the local archive path, and the
+     * label shown in the terminal session. */
+    private static final class RestoreStep {
+        final String itemId;
+        final String archivePath;
+        final String label;
+
+        RestoreStep(String itemId, String archivePath, String label) {
+            this.itemId = itemId;
+            this.archivePath = archivePath;
+            this.label = label;
+        }
+    }
+
+    /** One restore step for a checked home/agent item: null for an
+     * unknown item id or a missing archive (logged, skipped). */
+    private static RestoreStep makeRestoreStep(UnifiedBackup backup, File backupDir, String itemId) {
+        String archive;
+        if (DistroBackup.HOME_ITEM_ID.equals(itemId)) {
+            archive = archiveNameForItem(backup, itemId, DistroBackup.HOME_ARCHIVE);
+        } else if (itemId.startsWith(DistroBackup.AGENT_ITEM_ID_PREFIX)) {
+            String agentId = itemId.substring(DistroBackup.AGENT_ITEM_ID_PREFIX.length());
+            archive = archiveNameForItem(backup, itemId,
+                DistroBackup.agentArchiveName(agentId));
+        } else {
+            Log.w(LOG_TAG, "Unknown backup item id: " + itemId);
+            return null;
+        }
+        File archiveFile = new File(backupDir, archive);
+        if (!archiveFile.isFile()) {
+            Log.w(LOG_TAG, "Restore archive missing: " + archiveFile.getAbsolutePath());
+            return null;
+        }
+        return new RestoreStep(itemId, archiveFile.getAbsolutePath(),
+            labelForItem(backup, itemId));
+    }
+
+    /** A free container name for restoring a distro from a backup: the
+     * backup's own container name when it is not taken, otherwise
+     * "<name>-restored", "<name>-restored-2", ... The script re-checks
+     * (a container could appear between this check and the install)
+     * and tells the user the name it actually used. */
+    private static String freeContainerName(String wanted) {
+        Set<String> installed = DistroUtils.scanInstalledContainers();
+        if (!installed.contains(wanted)) return wanted;
+        for (int n = 1; n <= 100; n++) {
+            String candidate = n == 1 ? wanted + "-restored" : wanted + "-restored-" + n;
+            if (!installed.contains(candidate)) return candidate;
+        }
+        return wanted + "-restored-" + System.currentTimeMillis();
+    }
+
+    /** Restore a distro from the backup itself: the backup's system
+     * item (system.tar.gz) is a plain rootfs tarball, so
+     * `proot-distro install` builds the container from it — no
+     * download. The checked home/agent files are restored into the new
+     * container in the same terminal session, home first, then agents.
+     * External backups are staged locally first (proot-distro needs a
+     * local file path). */
+    private void startRestoreDistroFromBackup(final UnifiedBackup backup,
+            final List<String> selected) {
+        if (!DistroBackup.isValidContainerName(backup.container)) {
             Toast.makeText(this,
-                R.string.backup_detail_no_containers, Toast.LENGTH_LONG).show();
+                R.string.restore_source_distro_unknown, Toast.LENGTH_LONG).show();
             return;
         }
-        final List<String> containers = new ArrayList<>(mInstalledContainers);
-        Collections.sort(containers,
-            (a, b) -> displayNameForContainer(a).compareTo(displayNameForContainer(b)));
-        String[] labels = new String[containers.size()];
-        for (int i = 0; i < containers.size(); i++) {
-            labels[i] = displayNameForContainer(containers.get(i));
+        final String target = freeContainerName(backup.container);
+        if (backup.external) {
+            final AlertDialog progress = buildProgressDialog(R.string.restore_restoring);
+            progress.show();
+            new Thread(() -> {
+                File stageParent = new File(getCacheDir(), "restore-distro-stage");
+                File stagedDir = ExternalBackupStore.copyBackupFromExternal(
+                    DistroActivity.this, backup.externalUri, stageParent);
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    if (stagedDir == null) {
+                        Toast.makeText(DistroActivity.this,
+                            R.string.restore_stage_failed, Toast.LENGTH_LONG).show();
+                        deleteRecursively(stageParent);
+                        return;
+                    }
+                    startRestoreDistroSession(backup, stagedDir, target, selected, stagedDir);
+                });
+            }).start();
+        } else {
+            startRestoreDistroSession(backup, backup.dir, target, selected, null);
         }
-        new AlertDialog.Builder(this)
-            .setTitle(R.string.backup_detail_pick_container_title)
-            .setItems(labels, (dialog, which) ->
-                restoreToContainer(backup, containers.get(which)))
-            .setNegativeButton(android.R.string.cancel, null)
-            .show();
+    }
+
+    /** Write the restore-distro script and run it in a new visible
+     * terminal session, then finish (same pattern as the install
+     * session: the session has no callback). The new container is
+     * marked as already offered a restore, so the auto-prompt does not
+     * offer the same backup again when it appears, and as a pending
+     * install, so the mirror preset is applied to it on resume. */
+    private void startRestoreDistroSession(final UnifiedBackup backup, final File backupDir,
+            final String targetContainer, final List<String> selected, final File stagedDir) {
+        if (backupDir == null) {
+            Toast.makeText(this, R.string.restore_damaged, Toast.LENGTH_LONG).show();
+            return;
+        }
+        String systemArchive = archiveNameForItem(backup,
+            DistroBackup.SYSTEM_ITEM_ID, DistroBackup.SYSTEM_ARCHIVE);
+        File systemFile = new File(backupDir, systemArchive);
+        if (!systemFile.isFile()) {
+            Toast.makeText(this, R.string.restore_damaged, Toast.LENGTH_LONG).show();
+            return;
+        }
+        // Checked home/agent files, home first, then agents in backup
+        // order. The system item is the install itself, not an
+        // extraction, so it is not a step.
+        List<RestoreStep> steps = new ArrayList<>();
+        for (String itemId : selected) {
+            if (DistroBackup.HOME_ITEM_ID.equals(itemId)) {
+                RestoreStep step = makeRestoreStep(backup, backupDir, itemId);
+                if (step != null) steps.add(step);
+            }
+        }
+        for (String itemId : selected) {
+            if (itemId.startsWith(DistroBackup.AGENT_ITEM_ID_PREFIX)) {
+                RestoreStep step = makeRestoreStep(backup, backupDir, itemId);
+                if (step != null) steps.add(step);
+            }
+        }
+        String sourceDisplay = !backup.distroDisplay.isEmpty()
+            ? backup.distroDisplay : backup.container;
+        String script = buildRestoreDistroScript(sourceDisplay, targetContainer,
+            systemFile.getAbsolutePath(), steps, stagedDir);
+        File scriptFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR,
+            "distro-restore-" + targetContainer + ".sh");
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(script.getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setExecutable(true, true);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write restore script", e);
+            Toast.makeText(this, getString(R.string.distro_backup_script_failed, e.getMessage()),
+                Toast.LENGTH_LONG).show();
+            return;
+        }
+        markContainerRestorePrompted(targetContainer);
+        MirrorSettings.markPendingInstall(this, targetContainer);
+        String display = displayNameForNewContainer(targetContainer);
+        String sessionName = getString(R.string.distro_session_install, display);
+        DistroUtils.startSessionWithExecutable(this, scriptFile.getAbsolutePath(), null,
+            sessionName, sessionName);
+        Toast.makeText(this, getString(R.string.restore_distro_started, display),
+            Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    /** Terminal script that restores a distro from its backup: install
+     * the system tarball as a new container with proot-distro (plain
+     * rootfs tarball — no download, no manifest.json, so reset/run are
+     * unavailable and never used here; login works), then extract the
+     * checked home/agent archives into the new rootfs, home first.
+     * The container name is re-checked in the script: if the name was
+     * taken after Java picked it, a "-restored" suffix is used and the
+     * user is told the name actually used. */
+    private static String buildRestoreDistroScript(String sourceDisplay, String targetContainer,
+            String systemArchivePath, List<RestoreStep> steps, File stagedDir) {
+        String containersDir = TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH
+            + "/lib/proot-distro/containers";
+        String legacyDir = TermuxConstants.TERMUX_VAR_PREFIX_DIR_PATH
+            + "/lib/proot-distro/installed-rootfs";
+        StringBuilder script = new StringBuilder();
+        script.append("#!/data/data/com.termux/files/usr/bin/bash\n");
+        script.append("# Generated by Termux \"Linux 发行版\" (DistroActivity) - do not edit.\n");
+        if (stagedDir != null) {
+            // The external backup was staged locally for this script;
+            // drop the staging dir when the session ends, success or
+            // failure (trap EXIT runs on every exit path).
+            script.append("STAGE=").append(DistroBackup.shellQuote(stagedDir.getAbsolutePath()))
+                .append("\n");
+            script.append("trap 'rm -rf \"$STAGE\"' EXIT\n");
+        }
+        script.append("echo ").append(DistroBackup.shellQuote(
+            "正在从备份恢复 " + sourceDisplay + "（不用下载）...")).append("\n");
+        script.append("if ! command -v proot-distro >/dev/null 2>&1; then\n");
+        script.append("  echo \"正在安装 proot-distro ...\"\n");
+        script.append("  pkg install -y proot-distro\n");
+        script.append("  if ! command -v proot-distro >/dev/null 2>&1; then\n");
+        script.append("    echo \"安装 proot-distro 失败，请检查网络后重试。\"\n");
+        script.append("    read -r -p \"按回车关闭此会话\"\n");
+        script.append("    exit 1\n");
+        script.append("  fi\n");
+        script.append("fi\n");
+        script.append("BASE=").append(DistroBackup.shellQuote(targetContainer)).append("\n");
+        script.append("NAME=\"$BASE\"\n");
+        script.append("N=0\n");
+        script.append("while [ -d ").append(DistroBackup.shellQuote(containersDir))
+            .append("/\"$NAME\"/rootfs ] || [ -d ").append(DistroBackup.shellQuote(legacyDir))
+            .append("/\"$NAME\" ]; do\n");
+        script.append("  N=$((N+1))\n");
+        script.append("  if [ \"$N\" -eq 1 ]; then NAME=\"$BASE-restored\"; else NAME=\"$BASE-restored-$N\"; fi\n");
+        script.append("  if [ \"$N\" -gt 100 ]; then echo \"容器名都被占用，无法恢复。\"; read -r -p \"按回车关闭此会话\"; exit 1; fi\n");
+        script.append("done\n");
+        script.append("if [ \"$NAME\" != \"$BASE\" ]; then echo \"原容器名 $BASE 已被占用，已恢复为 $NAME。\"; fi\n");
+        script.append("echo \"正在用备份的发行版系统安装 $NAME ...\"\n");
+        script.append("proot-distro install ").append(DistroBackup.shellQuote(systemArchivePath))
+            .append(" --name \"$NAME\"\n");
+        script.append("status=$?\n");
+        script.append("if [ \"$status\" -ne 0 ]; then\n");
+        script.append("  echo \"从备份恢复发行版失败（退出码 $status）。\"\n");
+        script.append("  read -r -p \"按回车关闭此会话\"\n");
+        script.append("  exit 1\n");
+        script.append("fi\n");
+        script.append("ROOTFS=").append(DistroBackup.shellQuote(containersDir))
+            .append("/\"$NAME\"/rootfs\n");
+        script.append("if [ ! -d \"$ROOTFS\" ]; then\n");
+        script.append("  echo \"发行版装好了，但找不到它的文件目录 $ROOTFS。\"\n");
+        script.append("  read -r -p \"按回车关闭此会话\"\n");
+        script.append("  exit 1\n");
+        script.append("fi\n");
+        script.append("echo \"发行版 $NAME 已恢复，正在恢复勾选的文件...\"\n");
+        script.append("FAILED=0\n");
+        for (RestoreStep step : steps) {
+            if (DistroBackup.HOME_ITEM_ID.equals(step.itemId)) {
+                // Home: whole-archive extract, same as
+                // DistroBackup.restoreItems.
+                script.append("echo ").append(DistroBackup.shellQuote("正在恢复 用户文件 ..."))
+                    .append("\n");
+                script.append("if tar -xzf ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" -C \"$ROOTFS\"; then echo ").append(DistroBackup.shellQuote("用户文件：成功"))
+                    .append("; else echo ").append(DistroBackup.shellQuote("用户文件：失败"))
+                    .append("; FAILED=1; fi\n");
+            } else {
+                // Agent: data/ + program/ sections when present, with
+                // the prefix stripped — same sections rule as
+                // restoreItems (same distro: both sections).
+                script.append("echo ").append(DistroBackup.shellQuote("正在恢复 " + step.label + " ..."))
+                    .append("\n");
+                script.append("SECTIONS=\"\"\n");
+                script.append("if tar -tzf ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" 2>/dev/null | grep -q '^data/'; then SECTIONS=\"$SECTIONS data\"; fi\n");
+                script.append("if tar -tzf ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" 2>/dev/null | grep -q '^program/'; then SECTIONS=\"$SECTIONS program\"; fi\n");
+                script.append("if [ -z \"$SECTIONS\" ]; then echo ")
+                    .append(DistroBackup.shellQuote(step.label + "：备份里没有可恢复的内容"))
+                    .append("; FAILED=1;\n");
+                script.append("elif tar -xzf ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" -C \"$ROOTFS\" --strip-components=1 $SECTIONS; then echo ")
+                    .append(DistroBackup.shellQuote(step.label + "：成功"))
+                    .append("; else echo ").append(DistroBackup.shellQuote(step.label + "：失败"))
+                    .append("; FAILED=1; fi\n");
+            }
+        }
+        script.append("if [ \"$FAILED\" -eq 0 ]; then\n");
+        script.append("  echo \"恢复完成！回到“Linux 发行版”界面，点“进入”即可使用 $NAME。\"\n");
+        script.append("else\n");
+        script.append("  echo \"恢复完成，但有个别文件失败，见上面的提示。\"\n");
+        script.append("fi\n");
+        script.append("read -r -p \"按回车关闭此会话\"\n");
+        return script.toString();
+    }
+
+    /** Backup key for the expanded-row state and the restore selection:
+     * the internal backup dir, or the external backup Uri. */
+    private static String backupKey(UnifiedBackup backup) {
+        if (backup.external) {
+            return backup.externalUri == null ? "" : "external:" + backup.externalUri.toString();
+        }
+        return backup.dir == null ? "" : "internal:" + backup.dir.getAbsolutePath();
+    }
+
+    /** Checked item ids for one backup's expanded row, defaulting to
+     * all items checked on first access. Survives a manager refresh
+     * (the key is the backup dir/Uri, not the row object). */
+    private Set<String> restoreCheckedIds(UnifiedBackup backup) {
+        String key = backupKey(backup);
+        Set<String> checked = mBackupRestoreSelection.get(key);
+        if (checked == null) {
+            checked = new LinkedHashSet<>();
+            for (UnifiedBackup.BackupItemRow item : backup.items) checked.add(item.id);
+            mBackupRestoreSelection.put(key, checked);
+        }
+        return checked;
+    }
+
+    /** Mark a container as already offered a restore, so the
+     * auto-prompt does not offer the same backup again right after a
+     * restore-distro opened the new container. */
+    private void markContainerRestorePrompted(String container) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            this, RESTORE_PREFS_NAME);
+        Set<String> prompted = new LinkedHashSet<>(prefs.getStringSet(
+            KEY_RESTORE_PROMPTED_CONTAINERS, new LinkedHashSet<String>()));
+        if (prompted.add(container)) {
+            prefs.edit().putStringSet(KEY_RESTORE_PROMPTED_CONTAINERS, prompted).apply();
+        }
+    }
+
+    /** Display name for a container that may not be installed yet
+     * (restore-distro session name): the cached name when known,
+     * otherwise derived from the container name. */
+    private String displayNameForNewContainer(String container) {
+        return DistroUtils.displayNameForContainer(container, mContainerDisplayNames);
     }
 
     /** Delete one whole backup, with a confirm dialog. Internal: delete
@@ -3063,6 +3356,13 @@ public class DistroActivity extends AppCompatActivity {
                         deleted = backup.dir != null && deleteRecursively(backup.dir);
                     }
                     final boolean done = deleted;
+                    // The backup is gone: drop its pending external-copy
+                    // record too, so a later resume does not retry a
+                    // copy of a dir that no longer exists (see
+                    // removePendingExternalCopyForBackup). Only when
+                    // the delete actually succeeded — a failed delete
+                    // leaves the backup (and its pending copy) in place.
+                    if (done) removePendingExternalCopyForBackup(backup);
                     runOnUiThread(() -> {
                         Toast.makeText(DistroActivity.this,
                             done ? R.string.backup_manager_deleted
@@ -3130,6 +3430,75 @@ public class DistroActivity extends AppCompatActivity {
         if (changed) prefs.edit().putStringSet(KEY_PENDING_EXTERNAL_COPIES, pending).apply();
     }
 
+    /** Backup dir recorded in the pending external-copy entry for a
+     * container, or null when there is no such entry. Used by
+     * checkPendingUninstalls to check the dir is complete before
+     * attempting the copy (see isBackupDirComplete). */
+    private File pendingBackupDirForContainer(String container) {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            this, UNINSTALL_PREFS_NAME);
+        Set<String> pending = new LinkedHashSet<>(prefs.getStringSet(
+            KEY_PENDING_EXTERNAL_COPIES, new LinkedHashSet<String>()));
+        for (String entry : pending) {
+            String[] parts = entry.split("\\|", 2);
+            if (parts.length == 2 && parts[0].equals(container)) {
+                return new File(parts[1]);
+            }
+        }
+        return null;
+    }
+
+    /** Internal backup-dir path a pending external-copy entry would
+     * record for this backup, or null when it cannot be derived. An
+     * internal backup carries its dir; an external backup's dir name
+     * is the last segment of its document id, and the copy keeps the
+     * same dir name on both sides, so its internal path is the
+     * internal backup root + that name. Null means "match nothing":
+     * the caller must not clear any record it cannot identify. */
+    private String pendingBackupPathForBackup(final UnifiedBackup backup) {
+        if (!backup.external) {
+            return backup.dir == null ? null : backup.dir.getAbsolutePath();
+        }
+        if (backup.externalUri == null) return null;
+        String docId;
+        try {
+            docId = DocumentsContract.getDocumentId(backup.externalUri);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (docId == null) return null;
+        int slash = docId.lastIndexOf('/');
+        String dirName = slash >= 0 ? docId.substring(slash + 1) : docId;
+        if (dirName.isEmpty()) return null;
+        File root = DistroBackup.internalBackupRoot(this);
+        if (root == null) return null;
+        return new File(root, dirName).getAbsolutePath();
+    }
+
+    /** Drop the pending external-copy entry for a backup that has just
+     * been deleted, so a later resume does not retry a copy of a dir
+     * that no longer exists (and report a misleading "missing
+     * manifest" failure for it). Matches on the exact internal
+     * backup-dir path (see pendingBackupPathForBackup); when no path
+     * can be derived, or nothing matches, nothing is removed — other
+     * containers' pending copies are never touched. */
+    private void removePendingExternalCopyForBackup(final UnifiedBackup backup) {
+        final String path = pendingBackupPathForBackup(backup);
+        if (path == null) return;
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            this, UNINSTALL_PREFS_NAME);
+        Set<String> pending = new LinkedHashSet<>(prefs.getStringSet(
+            KEY_PENDING_EXTERNAL_COPIES, new LinkedHashSet<String>()));
+        boolean changed = pending.removeIf(e -> {
+            String[] parts = e.split("\\|", 2);
+            return parts.length == 2 && parts[1].equals(path);
+        });
+        if (changed) {
+            prefs.edit().putStringSet(KEY_PENDING_EXTERNAL_COPIES, pending).apply();
+            Log.i(LOG_TAG, "Dropped pending external copy for deleted backup: " + path);
+        }
+    }
+
     /** Watch for a backup the terminal session is still packing, and
      * copy it to external storage as soon as it is complete — without
      * waiting for the user to come back to this screen (the old
@@ -3191,14 +3560,25 @@ public class DistroActivity extends AppCompatActivity {
      *   <li>On failure the internal copy is KEPT and the pending entry
      *       is KEPT, so a later resume retries the copy; the user is
      *       told once per activity lifetime, with the reason.</li>
+     *   <li>A pending entry whose backup dir is GONE (the backup was
+     *       deleted) or NOT COMPLETE yet (the session never finished
+     *       packing) is NOT a copy failure: the gone one drops its
+     *       stale record silently, the incomplete one keeps its
+     *       record and is only logged, and neither reports "copy
+     *       failed". Only a complete dir that really fails to copy
+     *       reports a failure. A manifest that vanishes between the
+     *       completeness check and the copy counts as "not ready",
+     *       not as a failure, for the same reason.</li>
      * </ol>
      * Returns true when there is nothing left to copy: the copy
-     * succeeded, or no pending entry exists for this container (so
-     * the watcher can stop). Returns false when the copy failed, so
-     * the watcher keeps retrying until success or its timeout; a
-     * second call while a copy is already in flight also returns
-     * false at once (see mExternalCopyInProgress) and the watcher
-     * re-checks on its next round.
+     * succeeded, no pending entry exists for this container, or the
+     * pending entry's dir is gone (the stale record is dropped), so
+     * the watcher can stop. Returns false when the copy failed, or
+     * the dir is not complete yet (nothing was attempted, so nothing
+     * is reported), so the watcher keeps retrying until success or
+     * its timeout; a second call while a copy is already in flight
+     * also returns false at once (see mExternalCopyInProgress) and
+     * the watcher re-checks on its next round.
      * <p>
      * The copy runs on the APPLICATION context and its Toasts are
      * posted to the main looper (see postToastOnMainThread), never on
@@ -3230,6 +3610,31 @@ public class DistroActivity extends AppCompatActivity {
                 }
             }
             if (match == null) return true;
+            // The backup dir the pending record points at may be gone
+            // (the backup was deleted from the manager) or still
+            // incomplete (the session never finished packing). Neither
+            // is a copy failure, so neither reports one:
+            // - gone: drop the stale record silently and stop — there
+            //   is nothing left to copy, and retrying it on every
+            //   resume would only repeat a misleading error.
+            // - incomplete: keep the record and say nothing; the
+            //   watcher / next resume retries once packing finishes.
+            // Only a complete dir that really fails to copy reports
+            // "copy failed" (once per container per activity lifetime).
+            // Both checks run BEFORE the "copying" Toast below, so a
+            // dir that is never copied never claims to be copying.
+            if (backupDir == null || !backupDir.isDirectory()) {
+                pending.remove(match);
+                prefs.edit().putStringSet(KEY_PENDING_EXTERNAL_COPIES, pending).apply();
+                Log.i(LOG_TAG, "Dropping stale pending external copy for " + container
+                    + ": backup dir is gone (" + match + ")");
+                return true;
+            }
+            if (!isBackupDirComplete(backupDir)) {
+                Log.i(LOG_TAG, "Pending external copy for " + container
+                    + " not ready yet, keeping it pending: " + backupDir);
+                return false;
+            }
             // The watcher retries a failed copy every few seconds, so
             // the "copying" Toast fires only once per container per
             // activity lifetime (same pattern as the failure Toast).
@@ -3237,11 +3642,8 @@ public class DistroActivity extends AppCompatActivity {
                 postToastOnMainThread(appContext,
                     appContext.getString(R.string.backup_external_copying));
             }
-            int copyResult = ExternalBackupStore.COPY_NO_MANIFEST;
-            if (backupDir.isDirectory()) {
-                copyResult = ExternalBackupStore.copyBackupToExternalWithResult(
-                    appContext, backupDir);
-            }
+            int copyResult = ExternalBackupStore.copyBackupToExternalWithResult(
+                appContext, backupDir);
             if (copyResult == ExternalBackupStore.COPY_OK) {
                 deleteRecursively(backupDir);
                 pending.remove(match);
@@ -3252,6 +3654,16 @@ public class DistroActivity extends AppCompatActivity {
                     R.string.backup_external_copy_done,
                     folderPath == null ? "" : folderPath));
                 return true;
+            } else if (copyResult == ExternalBackupStore.COPY_NO_MANIFEST) {
+                // The manifest vanished between the completeness check
+                // above and the copy (the dir is being re-packed or was
+                // removed mid-copy): same as "not ready", not a copy
+                // failure — keep the record, say nothing, and let the
+                // watcher / next resume retry.
+                Log.i(LOG_TAG, "Pending external copy for " + container
+                    + " lost its manifest during the copy, keeping it pending: "
+                    + backupDir);
+                return false;
             } else {
                 final int failure = copyResult;
                 if (mExternalCopyFailedNoted.add(container)) {

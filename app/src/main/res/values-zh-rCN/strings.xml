@@ -584,7 +584,12 @@
 <string name="restore_damaged">这份备份已损坏，无法恢复</string>
 <string name="restore_pick_items_title">选择要恢复的内容</string>
 <string name="restore_same_distro">同发行版（%1$s），可以整项恢复</string>
-<string name="restore_cross_distro_note">备份来自 %1$s，当前是 %2$s，只恢复配置数据，程序需要重装</string>
+<string name="restore_selected">恢复所选</string>
+<string name="backup_delete_whole">删除整个备份</string>
+<string name="restore_distro_started">正在新终端会话中从备份恢复 %1$s…</string>
+<string name="restore_distro_need_system">要恢复发行版请勾选发行版系统</string>
+<string name="restore_distro_no_system">这份备份没有发行版系统，无法从备份恢复发行版。</string>
+<string name="restore_source_distro_unknown">这份备份没有记录来源发行版，无法恢复。</string>
 <string name="restore_overwrite_title">目标已有文件</string>
 <string name="restore_target_not_empty">目标容器已有文件，同名文件会被覆盖。</string>
 <string name="restore_no_items_selected">请至少选一项恢复</string>
@@ -596,14 +601,12 @@
 <string name="restore_item_failed_verify">失败（校验未通过）</string>
 <string name="restore_done_title">恢复完成</string>
 <string name="restore_done_some_failed_title">恢复完成（部分失败）</string>
-<string name="restore_reinstall_agents">重装这些助手</string>
 <string name="restore_auto_prompt_title">检测到备份</string>
 <string name="restore_auto_prompt_message">%1$s 刚装好，检测到备份，是否恢复？</string>
 <string name="backup_manager_title">备份管理</string>
 <string name="backup_manager_list_title">备份列表</string>
 <string name="backup_manager_empty">暂无备份</string>
 <string name="backup_manager_delete">删除</string>
-<string name="backup_row_restore">恢复</string>
 <string name="backup_manager_delete_confirm">确定要删除这份备份吗？删除后无法恢复</string>
 <string name="backup_manager_delete_failed">删除备份失败</string>
 <string name="backup_manager_deleted">备份已删除</string>
@@ -640,16 +643,12 @@
     <string name="distro_backup_started">正在新终端会话中备份…</string>
     <string name="distro_backup_script_failed">写备份脚本失败：%1$s</string>
     <string name="distro_backup_none_selected">请至少选一项备份。</string>
-    <string name="restore_system_skipped_cross_distro">系统文件无法恢复到不同的发行版，系统项将被跳过。</string>
     <string name="restore_system_overwrite_warning">恢复系统文件会覆盖目标发行版的系统文件。建议恢复到刚装好的同种发行版上。</string>
 
     <!-- 备份详情：按文件删除（backup-file-delete 轮） -->
-    <string name="backup_detail_restore">恢复</string>
     <string name="backup_detail_delete_file_confirm">删除 %1$s？这个备份里就不再有这一项，恢复时也不会恢复它。</string>
     <string name="backup_detail_last_file_confirm">这是备份里的最后一个文件。删除后备份将为空，是否删除整个备份？</string>
     <string name="backup_detail_empty_prompt">备份已空，是否删除整个备份？</string>
     <string name="backup_detail_deleted">已删除 %1$s</string>
     <string name="backup_detail_delete_failed">删除失败</string>
-    <string name="backup_detail_pick_container_title">选择要恢复到的发行版</string>
-    <string name="backup_detail_no_containers">没有已安装的发行版</string>
 </resources>

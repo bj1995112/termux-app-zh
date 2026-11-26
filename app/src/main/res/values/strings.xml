@@ -588,7 +588,12 @@
 <string name="restore_damaged">This backup is damaged and cannot be restored</string>
 <string name="restore_pick_items_title">Choose what to restore</string>
 <string name="restore_same_distro">Same distro (%1$s): everything can be restored as-is</string>
-<string name="restore_cross_distro_note">This backup is from %1$s, but the target is %2$s: only configuration data is restored; the programs need to be reinstalled</string>
+<string name="restore_selected">Restore selected</string>
+<string name="backup_delete_whole">Delete the whole backup</string>
+<string name="restore_distro_started">Restoring %1$s from the backup in a new terminal session…</string>
+<string name="restore_distro_need_system">To restore the distro, check the distro system item first.</string>
+<string name="restore_distro_no_system">This backup has no distro system, so the distro cannot be restored from it.</string>
+<string name="restore_source_distro_unknown">This backup does not say which distro it came from, so it cannot be restored.</string>
 <string name="restore_overwrite_title">Target already has files</string>
 <string name="restore_target_not_empty">The target container already has files. Files with the same name will be overwritten.</string>
 <string name="restore_no_items_selected">Select at least one item to restore</string>
@@ -600,14 +605,12 @@
 <string name="restore_item_failed_verify">Failed (verification failed)</string>
 <string name="restore_done_title">Restore finished</string>
 <string name="restore_done_some_failed_title">Restore finished (some items failed)</string>
-<string name="restore_reinstall_agents">Reinstall these assistants</string>
 <string name="restore_auto_prompt_title">Backups found</string>
 <string name="restore_auto_prompt_message">%1$s was just installed and backups were found. Restore one now?</string>
 <string name="backup_manager_title">Backup manager</string>
 <string name="backup_manager_list_title">Backups</string>
 <string name="backup_manager_empty">No backups yet</string>
 <string name="backup_manager_delete">Delete</string>
-<string name="backup_row_restore">Restore</string>
 <string name="backup_manager_delete_confirm">Delete this backup? It cannot be recovered afterwards.</string>
 <string name="backup_manager_deleted">Backup deleted</string>
 <string name="backup_manager_delete_failed">Failed to delete the backup</string>
@@ -644,16 +647,12 @@
     <string name="distro_backup_started">Backing up in a new terminal session…</string>
     <string name="distro_backup_script_failed">Failed to write the backup script: %1$s</string>
     <string name="distro_backup_none_selected">Select at least one item to back up.</string>
-    <string name="restore_system_skipped_cross_distro">System files cannot be restored to a different distro, so the system item is skipped.</string>
     <string name="restore_system_overwrite_warning">Restoring the system files will overwrite the system files of the target distro. Restore onto a freshly installed distro of the same kind when possible.</string>
 
     <!-- Backup detail view: per-file delete (backup-file-delete round) -->
-    <string name="backup_detail_restore">Restore</string>
     <string name="backup_detail_delete_file_confirm">Delete %1$s? It will no longer be in this backup and will not be restored.</string>
     <string name="backup_detail_last_file_confirm">This is the last file in this backup. Deleting it will empty the backup. Delete the whole backup instead?</string>
     <string name="backup_detail_empty_prompt">This backup is now empty. Delete the whole backup?</string>
     <string name="backup_detail_deleted">Deleted %1$s</string>
     <string name="backup_detail_delete_failed">Delete failed</string>
-    <string name="backup_detail_pick_container_title">Choose a distro to restore into</string>
-    <string name="backup_detail_no_containers">No distros installed</string>
 </resources>
