@@ -628,4 +628,26 @@ public final class DistroUtils {
                 return "etc/ssl/certs/ca-certificates.crt";
         }
     }
+
+    /** Shell lines (run inside an Arch container, as root) that disable
+     *  pacman's Landlock download sandbox. Since pacman 7 the sandbox is
+     *  on by default: it restricts downloads to the unprivileged 'alpm'
+     *  user via Landlock, and the Android kernel has no Landlock, so
+     *  every pacman call in a proot container fails with "restricting
+     *  filesystem access failed because Landlock is not supported by the
+     *  kernel!". Writing DisableSandbox under [options] in
+     *  /etc/pacman.conf restores pre-7 behaviour. Idempotent: a conf
+     *  that already has an active DisableSandbox line is left alone
+     *  (a commented-out "#DisableSandbox" does NOT count). The second
+     *  line verifies the write and fails the script loudly when it did
+     *  not land - e.g. a conf with no [options] section, where sed
+     *  silently appends nothing - instead of letting the first pacman
+     *  call fail later with the confusing Landlock error. Single source
+     *  of truth for every Arch pacman entry point. */
+    public static String archDisablePacmanSandboxCommand() {
+        return "grep -q '^DisableSandbox' /etc/pacman.conf"
+            + " || sed -i '/^\\[options\\]/a DisableSandbox' /etc/pacman.conf\n"
+            + "grep -q '^DisableSandbox' /etc/pacman.conf"
+            + " || { echo \"Arch pacman 沙箱关闭失败，/etc/pacman.conf 里没有 [options] 段，退出\"; exit 1; }";
+    }
 }

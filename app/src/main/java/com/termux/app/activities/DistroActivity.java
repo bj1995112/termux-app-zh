@@ -2069,6 +2069,13 @@ public class DistroActivity extends AppCompatActivity {
                                    List<String> packages) {
         String command = buildToolsInstallCommand(distro.id, packages);
         if (command == null) return;
+        // Arch: the tools install runs pacman inside the container, and
+        // pacman 7's Landlock sandbox fails on the Android kernel (see
+        // DistroUtils.archDisablePacmanSandboxCommand). This session has
+        // no certificate bootstrap, so disable the sandbox here.
+        if ("arch".equals(distro.id)) {
+            command = DistroUtils.archDisablePacmanSandboxCommand() + "\n" + command;
+        }
         String prootDistro = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "proot-distro")
             .getAbsolutePath();
         if (!new File(prootDistro).isFile()) {

@@ -1156,6 +1156,15 @@ public class AiAgentsActivity extends AppCompatActivity {
         s.append("      ;;\n");
         s.append("  esac\n");
         s.append("}\n");
+        // Arch: pacman 7 sandboxes downloads with Landlock, which the
+        // Android kernel does not support - every pacman call in the
+        // container fails before it starts. Disable the sandbox once
+        // in /etc/pacman.conf before the first pacman call below; the
+        // certificate-package install is itself a pacman -U call, so
+        // this must come before it (not after ensureCurl).
+        if ("arch".equals(mDistroId)) {
+            s.append(DistroUtils.archDisablePacmanSandboxCommand()).append("\n");
+        }
         // Certificate packages staged by the bootstrap (if any): install
         // them locally before apt/dnf/apk runs, so the package manager can
         // verify the mirrors. Fails the script loudly when it fails.
