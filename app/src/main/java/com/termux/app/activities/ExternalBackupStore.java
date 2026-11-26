@@ -197,6 +197,74 @@ public final class ExternalBackupStore {
         }
     }
 
+    /** Human-readable path for the currently stored external folder, e.g.
+     * "内部存储/Download/测试用的" for a folder picked under Download.
+     * Returns null when no folder is set. For a set folder it never
+     * returns null: a malformed Uri falls back to the raw Uri text.
+     * The stored Uri itself is unchanged; only the display form differs.
+     */
+    public static String displayFolderPath(Context context) {
+        Uri folderUri = getExternalFolderUri(context);
+        if (folderUri == null) return null;
+        return displayFolderPath(folderUri);
+    }
+
+    /** Human-readable path for a SAF tree Uri, decoded from its tree
+     * document id, which has the form {@code <volumeId>:<relative/path>}
+     * (e.g. {@code primary:Download/测试用的}). The {@code primary}
+     * volume is shown as "内部存储"; any other volume id is shown
+     * as-is. A document id with no volume prefix is returned decoded
+     * as-is. A null Uri returns null; anything malformed or
+     * unparseable falls back to the raw Uri text, never throwing.
+     */
+    public static String displayFolderPath(Uri treeUri) {
+        if (treeUri == null) return null;
+        try {
+            String docId = DocumentsContract.getTreeDocumentId(treeUri);
+            if (docId == null || docId.isEmpty()) return treeUri.toString();
+            String decoded = decodePercent(docId);
+            if (decoded == null || decoded.isEmpty()) return treeUri.toString();
+            int colon = decoded.indexOf(':');
+            if (colon < 0) return decoded;
+            String volumeId = decoded.substring(0, colon);
+            String relativePath = decoded.substring(colon + 1);
+            if ("primary".equals(volumeId)) {
+                return "内部存储/" + relativePath;
+            }
+            return volumeId + "/" + relativePath;
+        } catch (RuntimeException e) {
+            // A malformed Uri must never crash the UI showing the folder.
+            Log.w(LOG_TAG, "Could not decode external folder Uri: " + treeUri, e);
+            return treeUri.toString();
+        }
+    }
+
+    /** Percent-decodes a document id (e.g. %E6%B5%8B%E8%AF%95 -> 测试).
+     * Kept local instead of Uri.decode / URLDecoder: Uri.decode is not
+     * in the compile-check stubs, and URLDecoder would wrongly turn a
+     * literal '+' in a folder name into a space. Malformed '%' sequences
+     * are left as-is; never throws.
+     */
+    private static String decodePercent(String encoded) {
+        if (encoded == null || encoded.indexOf('%') < 0) return encoded;
+        byte[] bytes = encoded.getBytes(StandardCharsets.UTF_8);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(bytes.length);
+        for (int i = 0; i < bytes.length; i++) {
+            int b = bytes[i] & 0xFF;
+            if (b == '%' && i + 2 < bytes.length) {
+                int hi = Character.digit((char) (bytes[i + 1] & 0xFF), 16);
+                int lo = Character.digit((char) (bytes[i + 2] & 0xFF), 16);
+                if (hi >= 0 && lo >= 0) {
+                    out.write((hi << 4) | lo);
+                    i += 2;
+                    continue;
+                }
+            }
+            out.write(b);
+        }
+        return new String(out.toByteArray(), StandardCharsets.UTF_8);
+    }
+
     /** True if a folder Uri is persisted AND the app still holds a
      * persistable read+write grant for it. False when no folder was ever
      * picked, or when the user revoked access (e.g. from the system file

@@ -619,4 +619,20 @@
 <string name="backup_external_location_label">外部</string>
 <string name="backup_external_folder_not_set">尚未选择外部备份文件夹。请选择一个文件夹，将备份保存到外部存储。</string>
 <string name="backup_external_permission_lost">已失去对外部备份文件夹的访问权限，请重新选择文件夹。</string>
+
+    <!-- 独立备份发行版 + 系统项（备份第二轮） -->
+    <string name="distro_backup_for">备份 %1$s</string>
+    <string name="distro_backup_title">备份 %1$s</string>
+    <string name="distro_backup_confirm">备份</string>
+    <string name="distro_backup_system">发行版系统</string>
+    <string name="distro_backup_total_size">总大小：%1$s</string>
+    <string name="distro_backup_free_space">可用空间：%1$s</string>
+    <string name="distro_backup_not_enough_space">可用空间不足，无法备份这些内容。请取消勾选部分项目或释放空间。</string>
+    <string name="distro_backup_external_double_space">外部存储：备份会先在 Termux 内部打好包再复制过去，期间临时需要约两倍空间（%1$s），请确保 Termux 内部有足够空间。</string>
+    <string name="distro_backup_session">备份 %1$s</string>
+    <string name="distro_backup_started">正在新终端会话中备份…</string>
+    <string name="distro_backup_script_failed">写备份脚本失败：%1$s</string>
+    <string name="distro_backup_none_selected">请至少选一项备份。</string>
+    <string name="restore_system_skipped_cross_distro">系统文件无法恢复到不同的发行版，系统项将被跳过。</string>
+    <string name="restore_system_overwrite_warning">恢复系统文件会覆盖目标发行版的系统文件。建议恢复到刚装好的同种发行版上。</string>
 </resources>

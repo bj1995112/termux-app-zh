@@ -1,7 +1,8 @@
 // Selective backup for a distro uninstall (uninstall-draft/design.md §2-3, §6):
 // one backup is one directory under ~/.termux/distro-backups/
-// <container>-<yyyyMMdd-HHmm>/ holding manifest.json + home.tar.gz + one
-// agent-<id>.tar.gz per selected agent (data/ + program/ split). The backup
+// <container>-<yyyyMMdd-HHmm>/ holding manifest.json + system.tar.gz +
+// home.tar.gz + one agent-<id>.tar.gz per selected agent (data/ +
+// program/ split). The backup
 // is built by a bash script that runs in a visible terminal session (same
 // pattern as the distro install): pack -> write manifest -> verify ->
 // `proot-distro remove`. Nothing is deleted when the backup or its
@@ -65,6 +66,13 @@ public final class DistroBackup {
      * distro_uninstall_backup_home ("用户文件 (/root)"). Agent labels in
      * the manifest are the AgentDef display names. */
     public static final String HOME_ITEM_LABEL = "用户文件 (/root)";
+
+    /** Manifest item id for the distro-system item. */
+    public static final String SYSTEM_ITEM_ID = "system";
+    /** Archive name for the distro-system item inside a backup dir. */
+    public static final String SYSTEM_ARCHIVE = "system.tar.gz";
+    /** Manifest label for the distro-system item. */
+    public static final String SYSTEM_ITEM_LABEL = "发行版系统";
 
     private DistroBackup() {
         // No instances.
@@ -192,10 +200,10 @@ public final class DistroBackup {
 
         /** One item of a backup (one archive). */
         public static final class Item {
-            /** "home" or "agent:<AgentDef id>". */
+            /** "system", "home" or "agent:<AgentDef id>". */
             public final String id;
             public final String label;
-            /** "home.tar.gz" or "agent-<AgentDef id>.tar.gz". */
+            /** "system.tar.gz", "home.tar.gz" or "agent-<AgentDef id>.tar.gz". */
             public final String archive;
             /** Archive size in bytes (from the manifest). */
             public final long size;
@@ -334,11 +342,27 @@ public final class DistroBackup {
      * non-empty and equal to the target container's distroId. A
      * missing/empty manifest distroId is NEVER same-distro (safe
      * default: cross-distro, data-only). The version number is never
-     * compared — distroId is the distro family. */
-    private static boolean isSameDistro(JSONObject manifest, String targetDistroId) {
+     * compared — distroId is the distro family. Public so the restore
+     * dialog can check it. */
+    public static boolean isSameDistro(JSONObject manifest, String targetDistroId) {
+        if (manifest == null) return false;
         String manifestDistroId = manifest.optString("distroId", "");
         return manifestDistroId != null && !manifestDistroId.isEmpty()
             && manifestDistroId.equals(targetDistroId);
+    }
+
+    /** True when the manifest's items array contains the given item id
+     * (for the restore dialog to test for the system item). False for a
+     * null manifest, a null item id, or a manifest with no items array. */
+    public static boolean manifestHasItem(JSONObject manifest, String itemId) {
+        if (manifest == null || itemId == null) return false;
+        JSONArray array = manifest.optJSONArray("items");
+        if (array == null) return false;
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item != null && itemId.equals(item.optString("id", ""))) return true;
+        }
+        return false;
     }
 
     /** Manifest item id -> archive file name, for the items the manifest
@@ -377,7 +401,10 @@ public final class DistroBackup {
      * <p>Rules (design.md §4): the manifest is re-read here — null or
      * unparseable returns false and the caller marks the backup damaged.
      * The home item extracts home.tar.gz whole into the rootfs (its
-     * paths are rootfs-relative, e.g. root/.bashrc). An agent item
+     * paths are rootfs-relative, e.g. root/.bashrc). The system item
+     * extracts system.tar.gz whole into the rootfs, but ONLY when the
+     * manifest distroId matches the target (same distro family);
+     * cross-distro it is skipped silently, never a failure. An agent item
      * extracts agent-&lt;id&gt;.tar.gz with the data/ or program/ prefix
      * stripped (tar --strip-components=1): same distroId extracts BOTH
      * data/ and program/; cross-distro (or missing manifest distroId)
@@ -392,7 +419,7 @@ public final class DistroBackup {
      * @param targetDistroId  target container's distroId, e.g. "ubuntu"
      *                        (null when unknown — then every agent item
      *                        restores data-only)
-     * @param selectedItemIds item ids to restore ("home" and/or "agent:&lt;id&gt;")
+     * @param selectedItemIds item ids to restore ("system", "home" and/or "agent:&lt;id&gt;")
      * @return true only if every selected item extracted without error
      */
     public static boolean restoreItems(File backupDir, File rootfs, String targetDistroId,
@@ -409,7 +436,28 @@ public final class DistroBackup {
                 allOk = false;
                 continue;
             }
-            if (HOME_ITEM_ID.equals(itemId)) {
+            if (SYSTEM_ITEM_ID.equals(itemId)) {
+                if (!sameDistro) {
+                    // Cross-distro: the system image belongs to another
+                    // distro family — skip silently, not a failure (the
+                    // restore dialog already warns the user).
+                    continue;
+                }
+                String archiveName = archives.containsKey(SYSTEM_ITEM_ID)
+                    ? archives.get(SYSTEM_ITEM_ID) : SYSTEM_ARCHIVE;
+                File archive = new File(backupDir, archiveName);
+                if (!archive.isFile()) {
+                    Log.w(LOG_TAG, "System archive missing: " + archive.getAbsolutePath());
+                    allOk = false;
+                    continue;
+                }
+                List<String> args = new ArrayList<>();
+                args.add("-xzf");
+                args.add(archive.getAbsolutePath());
+                args.add("-C");
+                args.add(rootfs.getAbsolutePath());
+                if (!runTar(args)) allOk = false;
+            } else if (HOME_ITEM_ID.equals(itemId)) {
                 String archiveName = archives.containsKey(HOME_ITEM_ID)
                     ? archives.get(HOME_ITEM_ID) : HOME_ARCHIVE;
                 File archive = new File(backupDir, archiveName);
@@ -482,6 +530,10 @@ public final class DistroBackup {
      *
      * <p>Exact verification rule, per item (design.md §4):
      * <ul>
+     *   <li>system, same distroId: system.tar.gz must be listable, and
+     *       a sample of the archive's file entries (up to 20, skipping
+     *       dir entries) must exist under the rootfs. Cross-distro the
+     *       item is skipped (it was never restored), never a failure.</li>
      *   <li>home: home.tar.gz must be listable, the target rootfs must
      *       have a root/ dir, and a sample of the archive's file
      *       entries (up to 20, skipping dir entries) must exist under
@@ -519,7 +571,32 @@ public final class DistroBackup {
                 failed.add(itemId);
                 continue;
             }
-            if (HOME_ITEM_ID.equals(itemId)) {
+            if (SYSTEM_ITEM_ID.equals(itemId)) {
+                if (!sameDistro) {
+                    // Cross-distro: skipped at restore time, so there is
+                    // nothing to verify — never a failure.
+                    continue;
+                }
+                String archiveName = archives.containsKey(SYSTEM_ITEM_ID)
+                    ? archives.get(SYSTEM_ITEM_ID) : SYSTEM_ARCHIVE;
+                File archive = new File(backupDir, archiveName);
+                List<String> members = archive.isFile() ? listTarMembers(archive) : null;
+                if (members == null) {
+                    failed.add(itemId);
+                    continue;
+                }
+                int checked = 0;
+                boolean ok = true;
+                for (String member : members) {
+                    if (member.endsWith("/")) continue;
+                    if (!new File(rootfs, member).exists()) {
+                        ok = false;
+                        break;
+                    }
+                    if (++checked >= 20) break;
+                }
+                if (!ok) failed.add(itemId);
+            } else if (HOME_ITEM_ID.equals(itemId)) {
                 String archiveName = archives.containsKey(HOME_ITEM_ID)
                     ? archives.get(HOME_ITEM_ID) : HOME_ARCHIVE;
                 File archive = new File(backupDir, archiveName);
@@ -584,7 +661,9 @@ public final class DistroBackup {
 
     /**
      * Builds the backup + remove script that DistroActivity runs in a
-     * visible terminal session. Order: pack home.tar.gz (rootfs /root,
+     * visible terminal session. Order: pack system.tar.gz (whole rootfs
+     * minus /root, every agent's program+data paths and var/cache,
+     * var/log, tmp, var/tmp) -> pack home.tar.gz (rootfs /root,
      * excluding every agent's program+data paths) -> pack one
      * agent-&lt;id&gt;.tar.gz per selected agent (data/ + program/ split,
      * only paths that exist) -> write manifest.json (sizes from stat)
@@ -598,11 +677,12 @@ public final class DistroBackup {
      *
      * <p>Manifest keys (exact): version, container, distroId,
      * distroDisplay, createdAt, items[] with id, label, archive, size.
-     * Item ids are "home" or "agent:&lt;AgentDef id&gt;"; archives are
-     * "home.tar.gz" or "agent-&lt;AgentDef id&gt;.tar.gz". Agent archive
-     * layout: data/&lt;rootfs-relative path&gt; and
-     * program/&lt;rootfs-relative path&gt;; home archive layout:
-     * rootfs-relative paths (e.g. root/.bashrc).
+     * Item ids are "system", "home" or "agent:&lt;AgentDef id&gt;";
+     * archives are "system.tar.gz", "home.tar.gz" or
+     * "agent-&lt;AgentDef id&gt;.tar.gz". Agent archive layout:
+     * data/&lt;rootfs-relative path&gt; and
+     * program/&lt;rootfs-relative path&gt;; home and system archive
+     * layout: rootfs-relative paths (e.g. root/.bashrc, etc/passwd).
      *
      * <p>Verification limit, stated honestly: there is no JSON parser
      * guaranteed on the host (no python/jq/node), so the script verifies
@@ -619,13 +699,39 @@ public final class DistroBackup {
      * @param distroId        distro family id, e.g. "ubuntu" ("" when unknown)
      * @param distroDisplay   display name, e.g. "Ubuntu 26.10"
      * @param backupDir       backup dir (created by newBackupDir)
-     * @param selectedItemIds item ids to back up ("home" and/or "agent:<id>")
+     * @param selectedItemIds item ids to back up ("system", "home" and/or "agent:<id>")
      * @param agents          all AgentDefs (home excludes every agent's
      *                        paths; only selected agents get an archive)
      */
     public static String buildBackupAndRemoveScript(File rootfs, String container,
             String distroId, String distroDisplay, File backupDir,
             List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents) {
+        return buildBackupScript(rootfs, container, distroId, distroDisplay, backupDir,
+            selectedItemIds, agents, true);
+    }
+
+    /**
+     * Builds the backup-only script: same pack + manifest + verify steps
+     * as buildBackupAndRemoveScript, but the container is NOT removed
+     * afterwards (steps [1/3] backup, [2/3] manifest, [3/3] verify) and
+     * no fail/trap wording mentions a removal. Same parameters as
+     * buildBackupAndRemoveScript.
+     */
+    public static String buildBackupOnlyScript(File rootfs, String container,
+            String distroId, String distroDisplay, File backupDir,
+            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents) {
+        return buildBackupScript(rootfs, container, distroId, distroDisplay, backupDir,
+            selectedItemIds, agents, false);
+    }
+
+    /** Shared pack + manifest + verify body for the two builders above.
+     * With removeAfter the script ends with the [4/4] remove step
+     * (`proot-distro remove`); without it the script ends after the
+     * [3/3] verify with a "备份完成" message. */
+    private static String buildBackupScript(File rootfs, String container,
+            String distroId, String distroDisplay, File backupDir,
+            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents,
+            boolean removeAfter) {
         if (rootfs == null) throw new IllegalArgumentException("rootfs is null");
         if (!isValidContainerName(container)) {
             throw new IllegalArgumentException("bad container name: " + container);
@@ -634,6 +740,7 @@ public final class DistroBackup {
         if (selectedItemIds == null) selectedItemIds = new ArrayList<>();
         if (agents == null) agents = new ArrayList<>();
 
+        boolean backupSystem = selectedItemIds.contains(SYSTEM_ITEM_ID);
         boolean backupHome = selectedItemIds.contains(HOME_ITEM_ID);
         // Selected agents, in AGENTS order.
         List<AiAgentUtils.AgentDef> selectedAgents = new ArrayList<>();
@@ -653,9 +760,13 @@ public final class DistroBackup {
         }
         List<String> homeExcludes = dedupPaths(
             DistroUtils.expandWildcardPaths(rootfs, allAgentPaths));
-        // Manifest items, in order: home first, then agents in AGENTS order.
+        // Manifest items, in order: system first, then home, then agents
+        // in AGENTS order.
         // Each entry: {item id, label, archive, shell var holding its size}.
         List<String[]> manifestItems = new ArrayList<>();
+        if (backupSystem) {
+            manifestItems.add(new String[]{SYSTEM_ITEM_ID, SYSTEM_ITEM_LABEL, SYSTEM_ARCHIVE, "SYSTEM_SIZE"});
+        }
         if (backupHome) {
             manifestItems.add(new String[]{HOME_ITEM_ID, HOME_ITEM_LABEL, HOME_ARCHIVE, "HOME_SIZE"});
         }
@@ -664,13 +775,25 @@ public final class DistroBackup {
                 agentArchiveName(def.id), sizeVarFor(def.id)});
         }
         String createdAt = isoNow();
+        // Step labels: [1/4]..[4/4] when the container is removed after
+        // the backup, [1/3]..[3/3] for a backup-only run.
+        int totalSteps = removeAfter ? 4 : 3;
+        String stepBackup = "[1/" + totalSteps + "]";
+        String stepManifest = "[2/" + totalSteps + "]";
+        String stepVerify = "[3/" + totalSteps + "]";
+        String stepRemove = "[4/" + totalSteps + "]";
 
         StringBuilder s = new StringBuilder();
         s.append("#!/data/data/com.termux/files/usr/bin/bash\n");
         s.append("# Generated by Termux \"Linux 发行版\" (DistroBackup) - do not edit.\n");
-        s.append("# Backup of ").append(container).append(" then `proot-distro remove ")
-            .append(container).append("`. Aborts before the remove when any\n");
-        s.append("# backup step or verification fails, so the container is kept.\n");
+        if (removeAfter) {
+            s.append("# Backup of ").append(container).append(" then `proot-distro remove ")
+                .append(container).append("`. Aborts before the remove when any\n");
+            s.append("# backup step or verification fails, so the container is kept.\n");
+        } else {
+            s.append("# Backup of ").append(container).append(". Aborts when any\n");
+            s.append("# backup step or verification fails.\n");
+        }
         s.append("set -e\n");
         s.append("ROOTFS=").append(shellQuote(rootfs.getAbsolutePath())).append("\n");
         s.append("BACKUP_DIR=").append(shellQuote(backupDir.getAbsolutePath())).append("\n");
@@ -683,13 +806,36 @@ public final class DistroBackup {
         // `read` needs the terminal stdin, which a visible session has.
         s.append("fail() {\n");
         s.append("  echo \"备份失败：$1\"\n");
-        s.append("  echo \"容器未删除。\"\n");
+        if (removeAfter) {
+            s.append("  echo \"容器未删除。\"\n");
+        }
         s.append("  read -r -p \"按回车关闭此会话\" || true\n");
         s.append("  exit 1\n");
         s.append("}\n");
-        s.append("trap 'code=$?; echo \"备份或卸载失败（退出码 $code）。容器未删除。\"; read -r -p \"按回车关闭此会话\" || true; exit $code' ERR\n");
-        s.append("echo \"[1/4] 正在备份 \"").append(shellQuote(distroDisplay == null ? "" : distroDisplay)).append(" ...\"\n");
+        if (removeAfter) {
+            s.append("trap 'code=$?; echo \"备份或卸载失败（退出码 $code）。容器未删除。\"; read -r -p \"按回车关闭此会话\" || true; exit $code' ERR\n");
+        } else {
+            s.append("trap 'code=$?; echo \"备份失败（退出码 $code）。\"; read -r -p \"按回车关闭此会话\" || true; exit $code' ERR\n");
+        }
+        s.append("echo \"").append(stepBackup).append(" 正在备份 ").append(shellQuote(distroDisplay == null ? "" : distroDisplay)).append(" ...\"\n");
         s.append("mkdir -p \"$BACKUP_DIR\"\n");
+
+        // --- system.tar.gz: whole rootfs minus /root, every agent
+        // program+data path (same deduped list as the home exclusions)
+        // and the cache/log/tmp dirs (home keeps /root as-is) ---
+        if (backupSystem) {
+            s.append("echo \"正在打包发行版系统 ...\"\n");
+            s.append("tar czf \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\" -C \"$ROOTFS\"");
+            s.append(" --exclude=").append(shellQuote("root"));
+            for (String path : homeExcludes) {
+                s.append(" --exclude=").append(shellQuote(path));
+            }
+            s.append(" --exclude=").append(shellQuote("var/cache"));
+            s.append(" --exclude=").append(shellQuote("var/log"));
+            s.append(" --exclude=").append(shellQuote("tmp"));
+            s.append(" --exclude=").append(shellQuote("var/tmp"));
+            s.append(" .\n");
+        }
 
         // --- home.tar.gz: /root minus every agent program+data path ---
         if (backupHome) {
@@ -723,7 +869,10 @@ public final class DistroBackup {
         }
 
         // --- manifest.json (sizes from stat; archives missing -> abort) ---
-        s.append("echo \"[2/4] 正在写备份清单 ...\"\n");
+        s.append("echo \"").append(stepManifest).append(" 正在写备份清单 ...\"\n");
+        if (backupSystem) {
+            s.append("SYSTEM_SIZE=$(stat -c %s \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\")\n");
+        }
         if (backupHome) {
             s.append("HOME_SIZE=$(stat -c %s \"$BACKUP_DIR/").append(HOME_ARCHIVE).append("\")\n");
         }
@@ -758,7 +907,7 @@ public final class DistroBackup {
         s.append("} > \"$BACKUP_DIR/").append(MANIFEST_FILE).append("\"\n");
 
         // --- verify, then remove (never the other way round) ---
-        s.append("echo \"[3/4] 正在校验备份 ...\"\n");
+        s.append("echo \"").append(stepVerify).append(" 正在校验备份 ...\"\n");
         s.append("[ -s \"$BACKUP_DIR/").append(MANIFEST_FILE)
             .append("\" ] || fail \"manifest.json 为空或缺失\"\n");
         s.append("grep -Fq '\"version\": 1' \"$BACKUP_DIR/").append(MANIFEST_FILE)
@@ -775,12 +924,16 @@ public final class DistroBackup {
                 .append("\" | grep -qv '/$' || fail \"").append(archive)
                 .append(" 里没有文件\"\n");
         }
-        s.append("echo \"[4/4] 正在删除 \"").append(shellQuote(distroDisplay == null ? "" : distroDisplay)).append(" ...\"\n");
-        // proot-distro remove does not ask for confirmation (upstream
-        // README: "Be careful as it does not ask for confirmation"), so
-        // the app's own confirm dialog is the only prompt.
-        s.append("proot-distro remove ").append(container).append("\n");
-        s.append("echo \"卸载完成。备份保存在：$BACKUP_DIR\"\n");
+        if (removeAfter) {
+            s.append("echo \"").append(stepRemove).append(" 正在删除 ").append(shellQuote(distroDisplay == null ? "" : distroDisplay)).append(" ...\"\n");
+            // proot-distro remove does not ask for confirmation (upstream
+            // README: "Be careful as it does not ask for confirmation"), so
+            // the app's own confirm dialog is the only prompt.
+            s.append("proot-distro remove ").append(container).append("\n");
+            s.append("echo \"卸载完成。备份保存在：$BACKUP_DIR\"\n");
+        } else {
+            s.append("echo \"备份完成。备份保存在：$BACKUP_DIR\"\n");
+        }
         s.append("read -r -p \"按回车关闭此会话\" || true\n");
         return s.toString();
     }

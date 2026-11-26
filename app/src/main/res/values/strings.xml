@@ -623,4 +623,20 @@
 <string name="backup_external_location_label">External</string>
 <string name="backup_external_folder_not_set">No external backup folder chosen yet. Choose a folder to store backups on external storage.</string>
 <string name="backup_external_permission_lost">Access to the external backup folder was lost. Please choose the folder again.</string>
+
+    <!-- Standalone distro backup + system item (backup round 2) -->
+    <string name="distro_backup_for">Back up %1$s</string>
+    <string name="distro_backup_title">Back up %1$s</string>
+    <string name="distro_backup_confirm">Back up</string>
+    <string name="distro_backup_system">Distro system</string>
+    <string name="distro_backup_total_size">Total size: %1$s</string>
+    <string name="distro_backup_free_space">Free space: %1$s</string>
+    <string name="distro_backup_not_enough_space">Not enough free space for this backup. Uncheck some items or free up space.</string>
+    <string name="distro_backup_external_double_space">External storage: the backup is packed inside Termux first, so it temporarily needs about twice the space (%1$s) in Termux internal storage.</string>
+    <string name="distro_backup_session">Back up %1$s</string>
+    <string name="distro_backup_started">Backing up in a new terminal session…</string>
+    <string name="distro_backup_script_failed">Failed to write the backup script: %1$s</string>
+    <string name="distro_backup_none_selected">Select at least one item to back up.</string>
+    <string name="restore_system_skipped_cross_distro">System files cannot be restored to a different distro, so the system item is skipped.</string>
+    <string name="restore_system_overwrite_warning">Restoring the system files will overwrite the system files of the target distro. Restore onto a freshly installed distro of the same kind when possible.</string>
 </resources>

@@ -24,6 +24,7 @@ package com.termux.app.activities;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.format.Formatter;
@@ -288,14 +289,15 @@ public class DistroActivity extends AppCompatActivity {
     /** The backup-manager dialog, while it is open (for refresh after a
      * folder pick or a delete). */
     private AlertDialog mBackupManagerDialog;
-    /** The uninstall confirm dialog's destination widgets, while it is
-     * open (for the SAF folder-picker result in onActivityResult). */
-    private RadioButton mUninstallInternalRadio;
-    private RadioButton mUninstallExternalRadio;
-    private TextView mUninstallFolderStatus;
-    /** True while a folder pick launched from the uninstall dialog is
-     * outstanding; a cancel then falls back to internal storage. */
-    private boolean mUninstallFolderPickPending;
+    /** The backup picker dialog currently open (uninstall confirm or
+     * standalone backup), while it is open — its destination widgets
+     * are refreshed from the SAF folder-picker result in
+     * onActivityResult, and its totals drive the dialog positive
+     * button (see BackupPicker). */
+    private BackupPicker mActiveBackupPicker;
+    /** True while a folder pick launched from a backup picker dialog
+     * is outstanding; a cancel then falls back to internal storage. */
+    private boolean mBackupFolderPickPending;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -379,17 +381,19 @@ public class DistroActivity extends AppCompatActivity {
             this, requestCode, resultCode, data);
         if (requestCode != ExternalBackupStore.REQUEST_PICK_EXTERNAL_FOLDER) return;
         if (folderPicked) {
-            mUninstallFolderPickPending = false;
-            updateUninstallDestinationLabel();
+            mBackupFolderPickPending = false;
+            updateBackupDestinationLabel();
             if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
                 refreshBackupManager();
             }
-        } else if (mUninstallFolderPickPending) {
-            // The user cancelled the picker from the uninstall dialog:
+        } else if (mBackupFolderPickPending) {
+            // The user cancelled the picker from a backup dialog:
             // fall back to internal storage for this backup.
-            mUninstallFolderPickPending = false;
-            if (mUninstallInternalRadio != null) mUninstallInternalRadio.setChecked(true);
-            updateUninstallDestinationLabel();
+            mBackupFolderPickPending = false;
+            if (mActiveBackupPicker != null) {
+                mActiveBackupPicker.internalRadio.setChecked(true);
+            }
+            updateBackupDestinationLabel();
             Toast.makeText(this, R.string.backup_external_folder_not_set,
                 Toast.LENGTH_LONG).show();
         } else if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
@@ -992,6 +996,8 @@ public class DistroActivity extends AppCompatActivity {
             }
             items.add(getString(R.string.distro_uninstall_for, display));
             actions.add(() -> startUninstallFlow(container, display));
+            items.add(getString(R.string.distro_backup_for, display));
+            actions.add(() -> startBackupFlow(container, display));
             items.add(getString(R.string.restore_from_backup_for, display));
             actions.add(() -> startRestoreFlow(container, display));
         }
@@ -1029,19 +1035,276 @@ public class DistroActivity extends AppCompatActivity {
     private void startUninstallFlow(final String container, final String display) {
         Toast.makeText(this, R.string.distro_uninstall_computing_sizes, Toast.LENGTH_SHORT).show();
         new Thread(() -> {
-            final File rootfs = DistroUtils.containerRootfs(container);
-            final List<AiAgentUtils.InstalledAgent> agents =
-                AiAgentUtils.detectInstalledAgentsForContainer(container);
-            final long homeSize = rootfs == null ? 0 : DistroUtils.homeBackupSize(rootfs);
-            final Map<String, Long> agentSizes = new LinkedHashMap<>();
-            for (AiAgentUtils.InstalledAgent agent : agents) {
-                AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
-                agentSizes.put(agent.agentId,
-                    (rootfs == null || def == null) ? 0 : DistroUtils.agentPathsSize(rootfs, def));
-            }
-            runOnUiThread(() -> showUninstallConfirmDialog(container, display,
-                rootfs, agents, homeSize, agentSizes));
+            final BackupSizes sizes = computeBackupSizes(container);
+            runOnUiThread(() -> showUninstallConfirmDialog(container, display, sizes));
         }).start();
+    }
+
+    /** Sizes for the backup picker, computed off the UI thread (a du
+     * over a whole rootfs can take seconds). Shared by the uninstall
+     * and standalone backup flows. */
+    private static final class BackupSizes {
+        final File rootfs;
+        final List<AiAgentUtils.InstalledAgent> agents;
+        final long systemSize;
+        final long homeSize;
+        final Map<String, Long> agentSizes;
+
+        BackupSizes(File rootfs, List<AiAgentUtils.InstalledAgent> agents,
+                long systemSize, long homeSize, Map<String, Long> agentSizes) {
+            this.rootfs = rootfs;
+            this.agents = agents;
+            this.systemSize = systemSize;
+            this.homeSize = homeSize;
+            this.agentSizes = agentSizes;
+        }
+    }
+
+    private static BackupSizes computeBackupSizes(String container) {
+        File rootfs = DistroUtils.containerRootfs(container);
+        List<AiAgentUtils.InstalledAgent> agents =
+            AiAgentUtils.detectInstalledAgentsForContainer(container);
+        long systemSize = rootfs == null ? 0 : DistroUtils.systemBackupSize(rootfs);
+        long homeSize = rootfs == null ? 0 : DistroUtils.homeBackupSize(rootfs);
+        Map<String, Long> agentSizes = new LinkedHashMap<>();
+        for (AiAgentUtils.InstalledAgent agent : agents) {
+            AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agent.agentId);
+            agentSizes.put(agent.agentId,
+                (rootfs == null || def == null) ? 0 : DistroUtils.agentPathsSize(rootfs, def));
+        }
+        return new BackupSizes(rootfs, agents, systemSize, homeSize, agentSizes);
+    }
+
+    /** The backup picker shared by the uninstall confirm dialog and
+     * the standalone backup dialog, so the two cannot drift apart:
+     * destination radios (defaulting to the "默认备份位置" setting),
+     * the external folder line with a "更改" button, and the per-item
+     * checklist — system first, then user files, then each installed
+     * agent, default ALL CHECKED, with sizes — plus a live total-size
+     * line, a free-space line and an over-space warning. The owning
+     * dialog sets onTotalsChanged to re-evaluate its positive button
+     * whenever the totals change. */
+    private final class BackupPicker {
+        final LinearLayout view;
+        final RadioButton internalRadio;
+        final RadioButton externalRadio;
+        final TextView folderStatus;
+        final android.widget.Button changeFolderButton;
+        final CheckBox systemCheck;
+        final CheckBox homeCheck;
+        final Map<String, CheckBox> agentChecks;
+        final TextView totalView;
+        final TextView freeSpaceView;
+        final TextView spaceWarningView;
+        final long systemSize;
+        final long homeSize;
+        final Map<String, Long> agentSizes;
+        Runnable onTotalsChanged;
+        private boolean overSpace;
+
+        BackupPicker(long systemSize, long homeSize,
+                List<AiAgentUtils.InstalledAgent> agents,
+                Map<String, Long> agentSizes) {
+            this.systemSize = systemSize;
+            this.homeSize = homeSize;
+            this.agentSizes = agentSizes;
+            view = new LinearLayout(DistroActivity.this);
+            view.setOrientation(LinearLayout.VERTICAL);
+            TextView itemsTitle = new TextView(DistroActivity.this);
+            itemsTitle.setText(R.string.distro_uninstall_backup_items_title);
+            view.addView(itemsTitle);
+            // Backup destination (design.md §6): Termux internal
+            // storage (default) or the external SAF folder. The choice
+            // defaults to the "默认备份位置" setting from the backup
+            // manager. Picking external with no folder set yet opens
+            // the system folder picker first (see onActivityResult);
+            // the backup itself is still packed internally by the
+            // terminal-session script and copied to external storage
+            // afterwards (see copyPendingExternalBackup).
+            TextView destinationTitle = new TextView(DistroActivity.this);
+            destinationTitle.setText(R.string.backup_external_destination_title);
+            view.addView(destinationTitle);
+            RadioGroup destinationGroup = new RadioGroup(DistroActivity.this);
+            destinationGroup.setOrientation(RadioGroup.VERTICAL);
+            internalRadio = new RadioButton(DistroActivity.this);
+            internalRadio.setId(View.generateViewId());
+            internalRadio.setText(R.string.backup_external_location_internal);
+            externalRadio = new RadioButton(DistroActivity.this);
+            externalRadio.setId(View.generateViewId());
+            externalRadio.setText(R.string.backup_external_location_external);
+            destinationGroup.addView(internalRadio);
+            destinationGroup.addView(externalRadio);
+            if (isExternalBackupDefault()) {
+                externalRadio.setChecked(true);
+            } else {
+                internalRadio.setChecked(true);
+            }
+            view.addView(destinationGroup);
+            // External folder line + "更改" button, on one row. The
+            // button only shows when external storage is selected and
+            // a folder is already set (see refreshDestinationLabel).
+            LinearLayout folderRow = new LinearLayout(DistroActivity.this);
+            folderRow.setOrientation(LinearLayout.HORIZONTAL);
+            folderStatus = new TextView(DistroActivity.this);
+            folderStatus.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            folderRow.addView(folderStatus);
+            changeFolderButton = new android.widget.Button(DistroActivity.this);
+            changeFolderButton.setText(R.string.backup_external_change_folder);
+            changeFolderButton.setOnClickListener(v -> {
+                mBackupFolderPickPending = true;
+                ExternalBackupStore.pickExternalFolder(DistroActivity.this);
+            });
+            folderRow.addView(changeFolderButton);
+            view.addView(folderRow);
+            destinationGroup.setOnCheckedChangeListener((group, checkedId) -> {
+                if (checkedId == externalRadio.getId()
+                    && !ExternalBackupStore.hasExternalFolder(DistroActivity.this)) {
+                    mBackupFolderPickPending = true;
+                    ExternalBackupStore.pickExternalFolder(DistroActivity.this);
+                }
+                refreshDestinationLabel();
+            });
+            systemCheck = new CheckBox(DistroActivity.this);
+            systemCheck.setText(getString(R.string.distro_backup_system)
+                + " (" + Formatter.formatShortFileSize(DistroActivity.this, systemSize) + ")");
+            systemCheck.setChecked(true);
+            systemCheck.setOnCheckedChangeListener((button, checked) -> updateTotals());
+            view.addView(systemCheck);
+            homeCheck = new CheckBox(DistroActivity.this);
+            homeCheck.setText(getString(R.string.distro_uninstall_backup_home)
+                + " (" + Formatter.formatShortFileSize(DistroActivity.this, homeSize) + ")");
+            homeCheck.setChecked(true);
+            homeCheck.setOnCheckedChangeListener((button, checked) -> updateTotals());
+            view.addView(homeCheck);
+            agentChecks = new LinkedHashMap<>();
+            for (AiAgentUtils.InstalledAgent agent : agents) {
+                CheckBox checkBox = new CheckBox(DistroActivity.this);
+                Long size = agentSizes.get(agent.agentId);
+                checkBox.setText(agent.displayName + " ("
+                    + Formatter.formatShortFileSize(DistroActivity.this,
+                        size == null ? 0 : size) + ")");
+                checkBox.setChecked(true);
+                checkBox.setOnCheckedChangeListener((button, checked) -> updateTotals());
+                view.addView(checkBox);
+                agentChecks.put(agent.agentId, checkBox);
+            }
+            totalView = new TextView(DistroActivity.this);
+            view.addView(totalView);
+            freeSpaceView = new TextView(DistroActivity.this);
+            view.addView(freeSpaceView);
+            spaceWarningView = new TextView(DistroActivity.this);
+            spaceWarningView.setVisibility(View.GONE);
+            view.addView(spaceWarningView);
+            refreshDestinationLabel();
+        }
+
+        /** Item ids currently checked, in checklist order: system,
+         * home, then agents. */
+        List<String> selectedItemIds() {
+            List<String> selected = new ArrayList<>();
+            if (systemCheck.isChecked()) selected.add(DistroBackup.SYSTEM_ITEM_ID);
+            if (homeCheck.isChecked()) selected.add(DistroBackup.HOME_ITEM_ID);
+            for (Map.Entry<String, CheckBox> e : agentChecks.entrySet()) {
+                if (e.getValue().isChecked()) {
+                    selected.add(DistroBackup.agentItemId(e.getKey()));
+                }
+            }
+            return selected;
+        }
+
+        boolean isExternal() {
+            return externalRadio.isChecked();
+        }
+
+        boolean isOverSpace() {
+            return overSpace;
+        }
+
+        /** Folder line + "更改" button for the current destination,
+         * then the totals (the destination changes the free space). */
+        void refreshDestinationLabel() {
+            boolean external = externalRadio.isChecked();
+            if (!external) {
+                folderStatus.setText(
+                    R.string.distro_uninstall_backup_destination_internal);
+            } else if (ExternalBackupStore.hasExternalFolder(DistroActivity.this)) {
+                String path = ExternalBackupStore.displayFolderPath(DistroActivity.this);
+                if (path == null) {
+                    Uri uri = ExternalBackupStore.getExternalFolderUri(DistroActivity.this);
+                    path = uri == null ? "" : uri.toString();
+                }
+                folderStatus.setText(getString(
+                    R.string.backup_external_folder_chosen, path));
+            } else {
+                folderStatus.setText(R.string.backup_external_folder_not_set);
+            }
+            changeFolderButton.setVisibility(external
+                && ExternalBackupStore.hasExternalFolder(DistroActivity.this)
+                ? View.VISIBLE : View.GONE);
+            updateTotals();
+        }
+
+        /** Recompute the total of the checked items and the free space
+         * for the chosen destination; show the over-space warning and
+         * remember it for the dialog positive button. External backups
+         * are packed internally first, so they temporarily need about
+         * twice the space in Termux internal storage. */
+        void updateTotals() {
+            long total = 0;
+            if (systemCheck.isChecked()) total += systemSize;
+            if (homeCheck.isChecked()) total += homeSize;
+            for (Map.Entry<String, CheckBox> e : agentChecks.entrySet()) {
+                if (e.getValue().isChecked()) {
+                    Long size = agentSizes.get(e.getKey());
+                    total += size == null ? 0 : size;
+                }
+            }
+            File internalRoot = DistroBackup.internalBackupRoot(DistroActivity.this);
+            long internalFree = DistroUtils.usableSpace(internalRoot);
+            boolean external = externalRadio.isChecked();
+            long externalFree = external
+                ? DistroUtils.externalStorageUsableSpace() : -1;
+            totalView.setText(getString(R.string.distro_backup_total_size,
+                Formatter.formatShortFileSize(DistroActivity.this, total)));
+            long shownFree = external ? externalFree : internalFree;
+            if (shownFree >= 0) {
+                freeSpaceView.setText(getString(R.string.distro_backup_free_space,
+                    Formatter.formatShortFileSize(DistroActivity.this, shownFree)));
+                freeSpaceView.setVisibility(View.VISIBLE);
+            } else {
+                freeSpaceView.setVisibility(View.GONE);
+            }
+            overSpace = false;
+            String warning = null;
+            if (external) {
+                if (internalFree >= 0 && total * 2 > internalFree) {
+                    overSpace = true;
+                    warning = getString(R.string.distro_backup_external_double_space,
+                        Formatter.formatShortFileSize(DistroActivity.this, total * 2));
+                } else if (externalFree >= 0 && total > externalFree) {
+                    overSpace = true;
+                    warning = getString(R.string.distro_backup_not_enough_space);
+                }
+            } else if (internalFree >= 0 && total > internalFree) {
+                overSpace = true;
+                warning = getString(R.string.distro_backup_not_enough_space);
+            }
+            if (warning != null) {
+                spaceWarningView.setText(warning);
+                spaceWarningView.setVisibility(View.VISIBLE);
+            } else {
+                spaceWarningView.setVisibility(View.GONE);
+            }
+            if (onTotalsChanged != null) onTotalsChanged.run();
+        }
+    }
+
+    /** Refresh the open backup picker dialog's destination line (and
+     * its totals: the destination changes the free space). No-op when
+     * no backup picker dialog is open. */
+    private void updateBackupDestinationLabel() {
+        if (mActiveBackupPicker != null) mActiveBackupPicker.refreshDestinationLabel();
     }
 
     /** Uninstall confirm dialog: whole-environment warning, the agents
@@ -1049,11 +1312,9 @@ public class DistroActivity extends AppCompatActivity {
      * when it is on, a per-item checklist (user files + each installed
      * agent, default ALL CHECKED, with sizes). */
     private void showUninstallConfirmDialog(final String container,
-            final String display, final File rootfs,
-            final List<AiAgentUtils.InstalledAgent> agents, final long homeSize,
-            final Map<String, Long> agentSizes) {
+            final String display, final BackupSizes sizes) {
         if (isFinishing() || isDestroyed()) return;
-        if (rootfs == null) {
+        if (sizes.rootfs == null) {
             // The container is already gone (e.g. removed from a terminal):
             // just refresh the list.
             Toast.makeText(this, R.string.distro_uninstall_rootfs_missing, Toast.LENGTH_LONG).show();
@@ -1073,11 +1334,11 @@ public class DistroActivity extends AppCompatActivity {
         layout.addView(warning);
 
         TextView agentsLine = new TextView(this);
-        if (agents.isEmpty()) {
+        if (sizes.agents.isEmpty()) {
             agentsLine.setText(R.string.distro_uninstall_no_agents);
         } else {
             List<String> names = new ArrayList<>();
-            for (AiAgentUtils.InstalledAgent agent : agents) names.add(agent.displayName);
+            for (AiAgentUtils.InstalledAgent agent : sizes.agents) names.add(agent.displayName);
             agentsLine.setText(getString(R.string.distro_uninstall_agents_will_delete,
                 joinWithComma(names)));
         }
@@ -1091,67 +1352,16 @@ public class DistroActivity extends AppCompatActivity {
         final LinearLayout checklist = new LinearLayout(this);
         checklist.setOrientation(LinearLayout.VERTICAL);
         checklist.setVisibility(View.GONE);
-        TextView itemsTitle = new TextView(this);
-        itemsTitle.setText(R.string.distro_uninstall_backup_items_title);
-        checklist.addView(itemsTitle);
-        // Backup destination (design.md §6): Termux internal storage
-        // (default) or the external SAF folder. The choice defaults to
-        // the "默认备份位置" setting from the backup manager. Picking
-        // external with no folder set yet opens the system folder picker
-        // first (see onActivityResult); the backup itself is still
-        // packed internally by the terminal-session script and copied to
-        // external storage afterwards (see copyPendingExternalBackup).
-        TextView destinationTitle = new TextView(this);
-        destinationTitle.setText(R.string.backup_external_destination_title);
-        checklist.addView(destinationTitle);
-        RadioGroup destinationGroup = new RadioGroup(this);
-        destinationGroup.setOrientation(RadioGroup.VERTICAL);
-        RadioButton internalRadio = new RadioButton(this);
-        internalRadio.setId(View.generateViewId());
-        internalRadio.setText(R.string.backup_external_location_internal);
-        RadioButton externalRadio = new RadioButton(this);
-        externalRadio.setId(View.generateViewId());
-        externalRadio.setText(R.string.backup_external_location_external);
-        destinationGroup.addView(internalRadio);
-        destinationGroup.addView(externalRadio);
-        if (isExternalBackupDefault()) {
-            externalRadio.setChecked(true);
-        } else {
-            internalRadio.setChecked(true);
-        }
-        checklist.addView(destinationGroup);
-        final TextView folderStatus = new TextView(this);
-        checklist.addView(folderStatus);
-        mUninstallInternalRadio = internalRadio;
-        mUninstallExternalRadio = externalRadio;
-        mUninstallFolderStatus = folderStatus;
-        updateUninstallDestinationLabel();
-        destinationGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            if (checkedId == externalRadio.getId()
-                && !ExternalBackupStore.hasExternalFolder(DistroActivity.this)) {
-                mUninstallFolderPickPending = true;
-                ExternalBackupStore.pickExternalFolder(DistroActivity.this);
-            }
-            updateUninstallDestinationLabel();
-        });
-        final CheckBox homeCheck = new CheckBox(this);
-        homeCheck.setText(getString(R.string.distro_uninstall_backup_home)
-            + " (" + Formatter.formatShortFileSize(this, homeSize) + ")");
-        homeCheck.setChecked(true);
-        checklist.addView(homeCheck);
-        final Map<String, CheckBox> agentChecks = new LinkedHashMap<>();
-        for (AiAgentUtils.InstalledAgent agent : agents) {
-            CheckBox checkBox = new CheckBox(this);
-            Long size = agentSizes.get(agent.agentId);
-            checkBox.setText(agent.displayName + " ("
-                + Formatter.formatShortFileSize(this, size == null ? 0 : size) + ")");
-            checkBox.setChecked(true);
-            checklist.addView(checkBox);
-            agentChecks.put(agent.agentId, checkBox);
-        }
+        // Shared backup picker (see BackupPicker): destination, folder
+        // line, per-item checklist, live total + free space.
+        final BackupPicker picker = new BackupPicker(sizes.systemSize, sizes.homeSize,
+            sizes.agents, sizes.agentSizes);
+        checklist.addView(picker.view);
         layout.addView(checklist);
-        backupSwitch.setOnCheckedChangeListener((button, checked) ->
-            checklist.setVisibility(checked ? View.VISIBLE : View.GONE));
+        backupSwitch.setOnCheckedChangeListener((button, checked) -> {
+            checklist.setVisibility(checked ? View.VISIBLE : View.GONE);
+            picker.updateTotals();
+        });
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(layout);
@@ -1164,17 +1374,24 @@ public class DistroActivity extends AppCompatActivity {
             .setPositiveButton(R.string.distro_uninstall_confirm, null)
             .setNegativeButton(android.R.string.cancel, null)
             .create();
-        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+        mActiveBackupPicker = picker;
+        // Not enough free space disables the confirm button, but only
+        // while backup is on (with backup off there is nothing to pack).
+        picker.onTotalsChanged = () -> {
+            android.widget.Button positive =
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (positive != null) {
+                positive.setEnabled(!backupSwitch.isChecked() || !picker.isOverSpace());
+            }
+        };
+        dialog.setOnShowListener(d -> {
+            picker.updateTotals();
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
             .setOnClickListener(v -> {
                 boolean backup = backupSwitch.isChecked();
                 List<String> selected = new ArrayList<>();
                 if (backup) {
-                    if (homeCheck.isChecked()) selected.add(DistroBackup.HOME_ITEM_ID);
-                    for (Map.Entry<String, CheckBox> e : agentChecks.entrySet()) {
-                        if (e.getValue().isChecked()) {
-                            selected.add(DistroBackup.agentItemId(e.getKey()));
-                        }
-                    }
+                    selected.addAll(picker.selectedItemIds());
                     if (selected.isEmpty()) {
                         Toast.makeText(DistroActivity.this,
                             R.string.distro_uninstall_backup_none_selected,
@@ -1182,9 +1399,7 @@ public class DistroActivity extends AppCompatActivity {
                         return;
                     }
                 }
-                boolean backupToExternal = backup
-                    && mUninstallExternalRadio != null
-                    && mUninstallExternalRadio.isChecked();
+                boolean backupToExternal = backup && picker.isExternal();
                 if (backupToExternal
                     && !ExternalBackupStore.hasExternalFolder(DistroActivity.this)) {
                     // External chosen but no folder (e.g. the picker was
@@ -1195,16 +1410,154 @@ public class DistroActivity extends AppCompatActivity {
                     return;
                 }
                 dialog.dismiss();
-                startUninstallSession(container, display, rootfs, backup, selected,
+                startUninstallSession(container, display, sizes.rootfs, backup, selected,
                     backupToExternal);
-            }));
+            });
+        });
         dialog.setOnDismissListener(d -> {
-            mUninstallInternalRadio = null;
-            mUninstallExternalRadio = null;
-            mUninstallFolderStatus = null;
-            mUninstallFolderPickPending = false;
+            if (mActiveBackupPicker == picker) mActiveBackupPicker = null;
+            mBackupFolderPickPending = false;
         });
         dialog.show();
+    }
+
+    // ------------------------------------------------------------------
+    // Standalone backup (no uninstall): same picker, backup-only script.
+    // ------------------------------------------------------------------
+
+    /** "备份 <display>" tapped: same size computation as the uninstall
+     * flow, then the shared picker in standalone mode (no warning, no
+     * switch — backing up is the point). */
+    private void startBackupFlow(final String container, final String display) {
+        Toast.makeText(this, R.string.distro_uninstall_computing_sizes, Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            final BackupSizes sizes = computeBackupSizes(container);
+            runOnUiThread(() -> showBackupConfirmDialog(container, display, sizes));
+        }).start();
+    }
+
+    /** Standalone backup dialog: the shared picker directly, with
+     * title "备份 <display>". */
+    private void showBackupConfirmDialog(final String container,
+            final String display, final BackupSizes sizes) {
+        if (isFinishing() || isDestroyed()) return;
+        if (sizes.rootfs == null) {
+            Toast.makeText(this, R.string.distro_uninstall_rootfs_missing, Toast.LENGTH_LONG).show();
+            refreshInstalledContainers();
+            updateListRows(getString(R.string.distro_status_updated,
+                formatTime(System.currentTimeMillis())));
+            return;
+        }
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        layout.setPadding(pad, pad / 2, pad, pad / 2);
+        final BackupPicker picker = new BackupPicker(sizes.systemSize, sizes.homeSize,
+            sizes.agents, sizes.agentSizes);
+        layout.addView(picker.view);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(layout);
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.distro_backup_title, display))
+            .setView(scroll)
+            // Positive button is overridden below so that confirming
+            // with nothing checked shows an error instead of dismissing
+            // the dialog.
+            .setPositiveButton(R.string.distro_backup_confirm, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create();
+        mActiveBackupPicker = picker;
+        picker.onTotalsChanged = () -> {
+            android.widget.Button positive =
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (positive != null) positive.setEnabled(!picker.isOverSpace());
+        };
+        dialog.setOnShowListener(d -> {
+            picker.updateTotals();
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    List<String> selected = picker.selectedItemIds();
+                    if (selected.isEmpty()) {
+                        Toast.makeText(DistroActivity.this,
+                            R.string.distro_backup_none_selected,
+                            Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    boolean backupToExternal = picker.isExternal();
+                    if (backupToExternal
+                        && !ExternalBackupStore.hasExternalFolder(DistroActivity.this)) {
+                        // External chosen but no folder (e.g. the picker
+                        // was cancelled): stay in the dialog, do not start.
+                        Toast.makeText(DistroActivity.this,
+                            R.string.backup_external_folder_not_set,
+                            Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    dialog.dismiss();
+                    startBackupSession(container, display, sizes.rootfs,
+                        selected, backupToExternal);
+                });
+        });
+        dialog.setOnDismissListener(d -> {
+            if (mActiveBackupPicker == picker) mActiveBackupPicker = null;
+            mBackupFolderPickPending = false;
+        });
+        dialog.show();
+    }
+
+    /** Write the backup-only script and run it in a new visible
+     * terminal session (same pattern as the uninstall script, but no
+     * `proot-distro remove`). Unlike uninstall, this does NOT finish
+     * the activity and does NOT mark a pending uninstall — the
+     * container stays. When backupToExternal is true the script still
+     * packs internally first; the copy to external storage is recorded
+     * here and performed by checkPendingExternalCopies once the backup
+     * dir is complete (see isBackupDirComplete). */
+    private void startBackupSession(String container, String display,
+            File rootfs, List<String> selectedItemIds, boolean backupToExternal) {
+        if (!DistroBackup.isValidContainerName(container)) {
+            Log.w(LOG_TAG, "Refusing to back up bad container name: " + container);
+            return;
+        }
+        File backupDir;
+        try {
+            backupDir = DistroBackup.newBackupDir(
+                DistroBackup.internalBackupRoot(this), container);
+        } catch (IllegalStateException e) {
+            Log.w(LOG_TAG, "Failed to create backup dir", e);
+            Toast.makeText(this,
+                getString(R.string.distro_backup_script_failed, e.getMessage()),
+                Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (backupToExternal) markPendingExternalCopy(container, backupDir);
+        String distroId = DistroUtils.distroIdForContainer(container);
+        String script = DistroBackup.buildBackupOnlyScript(rootfs, container,
+            distroId == null ? "" : distroId, display, backupDir, selectedItemIds,
+            AiAgentUtils.AGENTS);
+        File scriptFile = new File(TermuxConstants.TERMUX_DATA_HOME_DIR,
+            "distro-backup-" + container + ".sh");
+        try {
+            File parent = scriptFile.getParentFile();
+            if (parent != null && !(parent.isDirectory() || parent.mkdirs())) {
+                throw new IOException("Cannot create " + parent.getAbsolutePath());
+            }
+            try (FileOutputStream out = new FileOutputStream(scriptFile)) {
+                out.write(script.getBytes(StandardCharsets.UTF_8));
+            }
+            scriptFile.setExecutable(true, true);
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to write backup script", e);
+            if (backupToExternal) removePendingExternalCopy(container);
+            Toast.makeText(this,
+                getString(R.string.distro_backup_script_failed, e.getMessage()),
+                Toast.LENGTH_LONG).show();
+            return;
+        }
+        String sessionName = getString(R.string.distro_backup_session, display);
+        DistroUtils.startSessionWithExecutable(this, scriptFile.getAbsolutePath(), null,
+            sessionName, sessionName);
+        Toast.makeText(this, R.string.distro_backup_started, Toast.LENGTH_LONG).show();
     }
 
     /** Write the uninstall script and run it in a new visible terminal
@@ -1314,6 +1667,11 @@ public class DistroActivity extends AppCompatActivity {
      * containers that still exist. Call on a background thread, e.g.
      * from onCreate/onResume (same as MirrorSettings.syncPendingInstalls). */
     private void checkPendingUninstalls() {
+        // A standalone backup never removes its container, so the
+        // external copy for it cannot wait for "container gone" (see
+        // checkPendingExternalCopies); run that check here too, on this
+        // same background thread.
+        checkPendingExternalCopies();
         SharedPreferences prefs =
             SharedPreferenceUtils.getPrivateSharedPreferences(this, UNINSTALL_PREFS_NAME);
         Set<String> pending = new LinkedHashSet<>(
@@ -1364,6 +1722,55 @@ public class DistroActivity extends AppCompatActivity {
             updateListRows(getString(R.string.distro_status_updated,
                 formatTime(System.currentTimeMillis())));
         });
+    }
+
+    /** Resume-time external copy for backups whose container is NOT
+     * gone — i.e. standalone backups (a standalone backup never runs
+     * `proot-distro remove`, so checkPendingUninstalls would never
+     * trigger the copy). For each pending external copy whose backup
+     * dir is COMPLETE (see isBackupDirComplete), run the existing
+     * copyPendingExternalBackup logic; incomplete ones are left pending
+     * for a later resume (the terminal session may still be packing).
+     * Call on a background thread (the copy can move gigabytes over
+     * SAF). Safe to run alongside the uninstall flow: a complete pack
+     * means the script has finished packing (it writes manifest.json
+     * last), so copying cannot race the pack step. */
+    private void checkPendingExternalCopies() {
+        SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
+            this, UNINSTALL_PREFS_NAME);
+        Set<String> pending = new LinkedHashSet<>(prefs.getStringSet(
+            KEY_PENDING_EXTERNAL_COPIES, new LinkedHashSet<String>()));
+        if (pending.isEmpty()) return;
+        for (String entry : pending) {
+            String[] parts = entry.split("\\|", 2);
+            if (parts.length != 2) continue;
+            File backupDir = new File(parts[1]);
+            if (!isBackupDirComplete(backupDir)) continue;
+            copyPendingExternalBackup(parts[0]);
+        }
+    }
+
+    /** True when a backup dir holds everything the session was meant
+     * to pack: a readable manifest listing at least one item, and
+     * every listed archive exists and is non-empty. The backup script
+     * writes manifest.json only after all archives are packed (and
+     * verifies them), so a complete dir means packing is done — an
+     * in-progress session never looks complete. */
+    private static boolean isBackupDirComplete(File backupDir) {
+        JSONObject manifest = DistroBackup.readManifest(backupDir);
+        if (manifest == null) return false;
+        JSONArray items = manifest.optJSONArray("items");
+        if (items == null || items.length() == 0) return false;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) return false;
+            String archive = item.optString("archive", "");
+            if (archive.isEmpty() || archive.contains("/")
+                || archive.contains("\\") || archive.contains("..")) return false;
+            File archiveFile = new File(backupDir, archive);
+            if (!archiveFile.isFile() || archiveFile.length() == 0) return false;
+        }
+        return true;
     }
 
     /** Host metadata for a container whose rootfs is gone: the
@@ -1804,6 +2211,15 @@ public class DistroActivity extends AppCompatActivity {
         return itemId;
     }
 
+    /** True when the backup lists the given item id (used for the
+     * system item of external backups, whose manifest is not local). */
+    private static boolean hasBackupItemRow(UnifiedBackup backup, String itemId) {
+        for (UnifiedBackup.BackupItemRow item : backup.items) {
+            if (item.id.equals(itemId)) return true;
+        }
+        return false;
+    }
+
     /** "distroId equal" is the whole same/cross-distro test (design.md
      * §4): only the distro family is compared, never the version
      * number. A missing/empty backup distroId is cross-distro. */
@@ -1883,7 +2299,19 @@ public class DistroActivity extends AppCompatActivity {
             final File rootfs, final UnifiedBackup backup) {
         if (isFinishing() || isDestroyed()) return;
         String targetDistroId = DistroUtils.distroIdForContainer(container);
-        boolean sameDistro = isSameDistroForRestore(backup, targetDistroId);
+        // The system item (DistroBackup.SYSTEM_ITEM_ID) only exists in
+        // backups made after this round. Read the manifest when it is
+        // local; external backups have no local manifest, so use the
+        // listed item ids instead (they come from the same manifest).
+        // Same-distro is likewise read from the manifest when available.
+        JSONObject manifest = backup.dir != null
+            ? DistroBackup.readManifest(backup.dir) : null;
+        boolean hasSystem = manifest != null
+            ? DistroBackup.manifestHasItem(manifest, DistroBackup.SYSTEM_ITEM_ID)
+            : hasBackupItemRow(backup, DistroBackup.SYSTEM_ITEM_ID);
+        boolean sameDistro = manifest != null
+            ? DistroBackup.isSameDistro(manifest, targetDistroId)
+            : isSameDistroForRestore(backup, targetDistroId);
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -1896,8 +2324,28 @@ public class DistroActivity extends AppCompatActivity {
                 backup.distroDisplay, display));
         }
         layout.addView(distroLine);
+        if (hasSystem && !sameDistro) {
+            // Cross-distro: system files cannot be restored to a
+            // different distro — the system item is skipped below and
+            // never passed to restoreItems.
+            TextView skipNote = new TextView(this);
+            skipNote.setText(R.string.restore_system_skipped_cross_distro);
+            layout.addView(skipNote);
+        } else if (hasSystem && sameDistro && isTargetRootNonEmpty(rootfs)) {
+            // Same distro onto a non-empty target: restoring the system
+            // files will overwrite the target distro's system files.
+            // Warn prominently, but do not block — the existing
+            // target-not-empty confirm still fires on confirm.
+            TextView systemWarning = new TextView(this);
+            systemWarning.setText(R.string.restore_system_overwrite_warning);
+            systemWarning.setTypeface(Typeface.DEFAULT_BOLD);
+            layout.addView(systemWarning);
+        }
         final Map<String, CheckBox> checks = new LinkedHashMap<>();
         for (UnifiedBackup.BackupItemRow item : backup.items) {
+            if (!sameDistro && DistroBackup.SYSTEM_ITEM_ID.equals(item.id)) {
+                continue; // system files cannot be restored cross-distro
+            }
             CheckBox checkBox = new CheckBox(this);
             String text = item.label;
             if (item.sizeKnown) {
@@ -2194,7 +2642,7 @@ public class DistroActivity extends AppCompatActivity {
         final TextView folderStatus = new TextView(this);
         layout.addView(folderStatus);
         android.widget.Button chooseFolderButton = new android.widget.Button(this);
-        chooseFolderButton.setText(R.string.backup_external_choose_folder);
+        chooseFolderButton.setText(R.string.backup_external_change_folder);
         chooseFolderButton.setOnClickListener(v ->
             ExternalBackupStore.pickExternalFolder(DistroActivity.this));
         layout.addView(chooseFolderButton);
@@ -2320,32 +2768,14 @@ public class DistroActivity extends AppCompatActivity {
             .apply();
     }
 
-    /** Folder line under the uninstall dialog's destination choice:
-     * internal destination, or the picked external folder / not-set
-     * notice. No-op when the uninstall dialog is not open. */
-    private void updateUninstallDestinationLabel() {
-        if (mUninstallFolderStatus == null) return;
-        boolean external = mUninstallExternalRadio != null
-            && mUninstallExternalRadio.isChecked();
-        if (!external) {
-            mUninstallFolderStatus.setText(
-                R.string.distro_uninstall_backup_destination_internal);
-        } else if (ExternalBackupStore.hasExternalFolder(this)) {
-            Uri uri = ExternalBackupStore.getExternalFolderUri(this);
-            mUninstallFolderStatus.setText(getString(
-                R.string.backup_external_folder_chosen, uri == null ? "" : uri.toString()));
-        } else {
-            mUninstallFolderStatus.setText(R.string.backup_external_folder_not_set);
-        }
-    }
-
-    /** Folder line in the backup manager's setting row. */
+    /** Folder line in the backup manager's setting row: the
+     * human-readable folder path, not the raw content:// URI. */
     private void updateExternalFolderStatus(TextView statusView) {
         if (statusView == null) return;
-        if (ExternalBackupStore.hasExternalFolder(this)) {
-            Uri uri = ExternalBackupStore.getExternalFolderUri(this);
+        String folderPath = ExternalBackupStore.displayFolderPath(this);
+        if (folderPath != null) {
             statusView.setText(getString(R.string.backup_external_folder_chosen,
-                uri == null ? "" : uri.toString()));
+                folderPath));
         } else {
             statusView.setText(R.string.backup_external_folder_not_set);
         }

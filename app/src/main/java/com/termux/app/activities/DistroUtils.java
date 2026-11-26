@@ -13,6 +13,7 @@ package com.termux.app.activities;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Environment;
 import android.util.AtomicFile;
 import android.util.Log;
 import android.widget.Toast;
@@ -337,6 +338,48 @@ public final class DistroUtils {
         }
         return Math.max(0, dirSize(home) - pathsSize(rootfs,
             expandWildcardPaths(rootfs, excluded)));
+    }
+
+    /** Size of the distro system inside a rootfs excluding /root, every
+     * agent's program+data paths, and var/cache, var/log, tmp, var/tmp
+     * (bytes) — the "发行版系统" item size in the uninstall backup
+     * checklist. Uses the same exclusion set the backup script packs
+     * into system.tar.gz, so the shown size matches what will be
+     * packed. */
+    public static long systemBackupSize(File rootfs) {
+        if (rootfs == null) return 0;
+        if (!rootfs.isDirectory()) return 0;
+        List<String> excluded = new ArrayList<>();
+        excluded.add("root");
+        for (AiAgentUtils.AgentDef def : AiAgentUtils.AGENTS) {
+            excluded.addAll(AiAgentUtils.programPaths(def));
+            excluded.addAll(AiAgentUtils.dataPaths(def));
+        }
+        excluded.add("var/cache");
+        excluded.add("var/log");
+        excluded.add("tmp");
+        excluded.add("var/tmp");
+        return Math.max(0, dirSize(rootfs) - pathsSize(rootfs,
+            expandWildcardPaths(rootfs, excluded)));
+    }
+
+    /** Usable space (bytes) in the filesystem holding dir, or 0 when
+     * dir is null. */
+    public static long usableSpace(File dir) {
+        if (dir == null) return 0;
+        return dir.getUsableSpace();
+    }
+
+    /** Usable space (bytes) on the shared external storage, or 0 when
+     * it cannot be determined. */
+    public static long externalStorageUsableSpace() {
+        try {
+            File external = Environment.getExternalStorageDirectory();
+            if (external == null) return 0;
+            return external.getUsableSpace();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /** Expand one "*" segment in rootfs-relative paths against the real
