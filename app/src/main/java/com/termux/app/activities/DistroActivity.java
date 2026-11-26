@@ -3269,6 +3269,16 @@ public class DistroActivity extends AppCompatActivity {
         script.append("  exit 1\n");
         script.append("fi\n");
         script.append("echo \"发行版 $NAME 已恢复，正在恢复勾选的文件...\"\n");
+        // Hard-link repair (shared with DistroBackup.restoreItems):
+        // when tar fails on hard-link members, recreate them as
+        // symlinks instead of failing the item (see
+        // DistroBackup.hardLinkRepairFunction). A repair that
+        // returns 0 only proves the links are back, not that the
+        // extraction failed only because of links, so the repair
+        // branch also runs verify_members: every extracted member
+        // must exist under the rootfs before the step reports
+        // success. Defined once here, before its first use below.
+        script.append(DistroBackup.hardLinkRepairFunction());
         script.append("FAILED=0\n");
         for (RestoreStep step : steps) {
             if (DistroBackup.HOME_ITEM_ID.equals(step.itemId)) {
@@ -3278,6 +3288,9 @@ public class DistroActivity extends AppCompatActivity {
                     .append("\n");
                 script.append("if tar -xzf ").append(DistroBackup.shellQuote(step.archivePath))
                     .append(" -C \"$ROOTFS\"; then echo ").append(DistroBackup.shellQuote("用户文件：成功"))
+                    .append("; elif repair_hard_links ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" \"$ROOTFS\" 0 && verify_members ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" \"$ROOTFS\" 0; then echo ").append(DistroBackup.shellQuote("用户文件：成功（硬链接已转为软链接）"))
                     .append("; else echo ").append(DistroBackup.shellQuote("用户文件：失败"))
                     .append("; FAILED=1; fi\n");
             } else {
@@ -3297,6 +3310,10 @@ public class DistroActivity extends AppCompatActivity {
                 script.append("elif tar -xzf ").append(DistroBackup.shellQuote(step.archivePath))
                     .append(" -C \"$ROOTFS\" --strip-components=1 $SECTIONS; then echo ")
                     .append(DistroBackup.shellQuote(step.label + "：成功"))
+                    .append("; elif repair_hard_links ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" \"$ROOTFS\" 1 $SECTIONS && verify_members ").append(DistroBackup.shellQuote(step.archivePath))
+                    .append(" \"$ROOTFS\" 1 $SECTIONS; then echo ")
+                    .append(DistroBackup.shellQuote(step.label + "：成功（硬链接已转为软链接）"))
                     .append("; else echo ").append(DistroBackup.shellQuote(step.label + "：失败"))
                     .append("; FAILED=1; fi\n");
             }

@@ -40,6 +40,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -549,6 +550,253 @@ public final class DistroBackup {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Hard-link repair (design.md §4): Android SELinux forbids link()
+    // in app data, so host GNU tar fails on hard-link members when
+    // restoring an agent archive ("Cannot hard link ... Permission
+    // denied", tar exits 2) — while every real file is already
+    // extracted and only the link entries are missing. The members
+    // were symlinks when packed (the backup script uses tar -h, which
+    // follows symlinks; two packed paths to one inode become a hard
+    // link), so recreating them as symlinks restores the original
+    // layout. The repair below is one shared shell function, used by
+    // both restore paths: restoreItems runs it through bash -s, and
+    // DistroActivity embeds the same text in the restore-distro
+    // script. No new dependency (tar + coreutils only), and the
+    // backup format is untouched, so old backups are repaired too.
+    // ------------------------------------------------------------------
+
+    /** The repair_hard_links + verify_members shell functions, as
+     *  text. Callers emit them once, then call
+     *  repair_hard_links &lt;archive&gt; &lt;rootfs&gt; &lt;strip&gt;
+     *  [sections...] and verify_members with the same arguments:
+     *  strip is the --strip-components count the extraction used
+     *  (1 for agent archives, 0 for home), sections are the
+     *  top-level sections actually extracted (empty = whole
+     *  archive). The link target is the target path relative
+     *  to the link's directory (computed by _repair_relpath): the
+     *  repaired link resolves exactly like the original npm link did
+     *  inside the container, and the host side can follow it inside
+     *  the rootfs too — a container-absolute target would not
+     *  resolve from the host, so verifyRestoredItems would report
+     *  the item failed even though the restore is correct.
+     *  repair_hard_links returns 0 iff the archive lists cleanly,
+     *  holds at least one hard-link member in the repaired sections,
+     *  every such member's target is also a member of the archive
+     *  (a target that is not in the archive at all means a genuinely
+     *  damaged backup), and every such member now exists as a
+     *  symlink (test -L, never -e: the target may live in a section
+     *  that was not extracted). Link chains need no ordering: a
+     *  symlink to another symlink resolves through it.
+     *  verify_members is the script path's post-repair check (the
+     *  Java path already has verifyRestoredItems): it lists every
+     *  member of the extracted sections and requires each one to
+     *  exist under the rootfs. A member counts as present when
+     *  test -e OR test -L passes — a repaired symlink whose target
+     *  lives in a section that was not extracted is dangling by
+     *  design, and -e alone would misjudge it missing. Directory
+     *  members (names ending in /) are checked without the trailing
+     *  slash. It returns 0 iff the archive lists cleanly, holds at
+     *  least one member in the checked sections, and every member
+     *  is present. It only runs after a successful repair, never on
+     *  the success path: a repair can return 0 while the extraction
+     *  also failed for another reason (e.g. disk full left a real
+     *  file missing), and without this check the script would
+     *  report success. Member names with spaces are not supported
+     *  (agent paths never contain them). */
+    public static String hardLinkRepairFunction() {
+        StringBuilder s = new StringBuilder();
+        s.append("# repair_hard_links <archive> <rootfs> <strip> [sections...]\n");
+        s.append("# Recreates every hard-link member of <archive> as a symlink under\n");
+        s.append("# <rootfs> (see DistroBackup.hardLinkRepairFunction javadoc).\n");
+        s.append("# verify_members <archive> <rootfs> <strip> [sections...]\n");
+        s.append("# Requires every member of the extracted sections to exist under\n");
+        s.append("# <rootfs> (-e or -L: a repaired symlink may dangle by design).\n");
+        s.append("# _repair_relpath <link-dir> <target>: the target path relative\n");
+        s.append("# to the link's directory (both rootfs-relative, no leading\n");
+        s.append("# slash). The repaired link is relative on purpose: it\n");
+        s.append("# resolves exactly like the original npm link did inside the\n");
+        s.append("# container, and the host side can follow it inside the\n");
+        s.append("# rootfs too (a container-absolute target would not resolve\n");
+        s.append("# from the host, so verifyRestoredItems would report the\n");
+        s.append("# item failed even though the restore is correct).\n");
+        s.append("_repair_relpath() {\n");
+        s.append("  local from=\"$1\" to=\"$2\"\n");
+        s.append("  local -a fparts=() tparts=()\n");
+        s.append("  local common=0 rel=\"\" i\n");
+        s.append("  if [ \"$from\" != \".\" ] && [ -n \"$from\" ]; then\n");
+        s.append("    IFS=/ read -r -a fparts <<< \"$from\"\n");
+        s.append("  fi\n");
+        s.append("  IFS=/ read -r -a tparts <<< \"$to\"\n");
+        s.append("  while [ \"$common\" -lt \"${#fparts[@]}\" ] && [ \"$common\" -lt \"${#tparts[@]}\" ] \\\n");
+        s.append("    && [ \"${fparts[$common]}\" = \"${tparts[$common]}\" ]; do\n");
+        s.append("    common=$((common + 1))\n");
+        s.append("  done\n");
+        s.append("  for ((i = common; i < ${#fparts[@]}; i++)); do rel=\"$rel../\"; done\n");
+        s.append("  for ((i = common; i < ${#tparts[@]}; i++)); do rel=\"$rel${tparts[$i]}/\"; done\n");
+        s.append("  rel=\"${rel%/}\"\n");
+        s.append("  printf '%s\\n' \"$rel\"\n");
+        s.append("}\n");
+        s.append("repair_hard_links() {\n");
+        s.append("  if [ \"$#\" -lt 3 ]; then return 1; fi\n");
+        s.append("  local archive=\"$1\" rootfs=\"$2\" strip=\"$3\"\n");
+        s.append("  shift 3\n");
+        s.append("  local tarbin=\"${REPAIR_TAR:-tar}\"\n");
+        s.append("  local list members checked total ok pair name target in_section dest want line sec\n");
+        s.append("  total=0\n");
+        s.append("  ok=1\n");
+        s.append("  list=\"$(mktemp)\" || return 1\n");
+        s.append("  members=\"$(mktemp)\" || { rm -f \"$list\"; return 1; }\n");
+        s.append("  checked=\"$(mktemp)\" || { rm -f \"$list\" \"$members\"; return 1; }\n");
+        s.append("  if ! \"$tarbin\" -tzf \"$archive\" > \"$members\" 2>/dev/null; then\n");
+        s.append("    rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("    return 1\n");
+        s.append("  fi\n");
+        s.append("  if ! \"$tarbin\" -tzvf \"$archive\" > \"$list\" 2>/dev/null; then\n");
+        s.append("    rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("    return 1\n");
+        s.append("  fi\n");
+        s.append("  while IFS= read -r line; do\n");
+        s.append("    case \"$line\" in\n");
+        s.append("      h*) ;;\n");
+        s.append("      *) continue ;;\n");
+        s.append("    esac\n");
+        s.append("    pair=\"$(printf '%s\\n' \"$line\" | sed -E -n 's/^h[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+(.*) link to (.*)$/\\1|\\2/p')\"\n");
+        // NOTE: tar pads the owner column, so the five fields before
+        // the name (perms, owner, size, date, time) are separated by
+        // one OR MORE spaces ([ ]+), never exactly one.
+        s.append("    if [ -z \"$pair\" ]; then ok=0; continue; fi\n");
+        s.append("    name=\"${pair%%|*}\"\n");
+        s.append("    target=\"${pair#*|}\"\n");
+        s.append("    if [ \"$#\" -gt 0 ]; then\n");
+        s.append("      in_section=0\n");
+        s.append("      for sec in \"$@\"; do\n");
+        s.append("        case \"$name\" in\n");
+        s.append("          \"$sec\"/*) in_section=1 ;;\n");
+        s.append("        esac\n");
+        s.append("      done\n");
+        s.append("      if [ \"$in_section\" -eq 0 ]; then continue; fi\n");
+        s.append("    fi\n");
+        s.append("    total=$((total + 1))\n");
+        s.append("    if ! grep -qxF -- \"$target\" \"$members\"; then ok=0; continue; fi\n");
+        s.append("    if [ \"$strip\" -eq 1 ]; then\n");
+        s.append("      name=\"${name#*/}\"\n");
+        s.append("      target=\"${target#*/}\"\n");
+        s.append("    fi\n");
+        s.append("    if [ -z \"$name\" ] || [ -z \"$target\" ]; then ok=0; continue; fi\n");
+        s.append("    dest=\"$rootfs/$name\"\n");
+        s.append("    want=\"$(_repair_relpath \"$(dirname \"$name\")\" \"$target\")\"\n");
+        s.append("    printf '%s\\n' \"$dest\" >> \"$checked\"\n");
+        s.append("    if [ -L \"$dest\" ]; then\n");
+        s.append("      if [ \"$(readlink \"$dest\")\" != \"$want\" ]; then ok=0; fi\n");
+        s.append("      continue\n");
+        s.append("    fi\n");
+        s.append("    if [ -e \"$dest\" ]; then ok=0; continue; fi\n");
+        s.append("    mkdir -p \"$(dirname \"$dest\")\" || { ok=0; continue; }\n");
+        s.append("    ln -s \"$want\" \"$dest\" || ok=0\n");
+        s.append("  done < \"$list\"\n");
+        s.append("  while IFS= read -r dest; do\n");
+        s.append("    if [ ! -L \"$dest\" ]; then ok=0; fi\n");
+        s.append("  done < \"$checked\"\n");
+        s.append("  rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("  [ \"$total\" -gt 0 ] && [ \"$ok\" -eq 1 ]\n");
+        s.append("}\n");
+        s.append("verify_members() {\n");
+        s.append("  if [ \"$#\" -lt 3 ]; then return 1; fi\n");
+        s.append("  local archive=\"$1\" rootfs=\"$2\" strip=\"$3\"\n");
+        s.append("  shift 3\n");
+        s.append("  local tarbin=\"${REPAIR_TAR:-tar}\"\n");
+        s.append("  local members member in_section count ok sec\n");
+        s.append("  count=0\n");
+        s.append("  ok=1\n");
+        s.append("  members=\"$(mktemp)\" || return 1\n");
+        s.append("  if ! \"$tarbin\" -tzf \"$archive\" > \"$members\" 2>/dev/null; then\n");
+        s.append("    rm -f \"$members\"\n");
+        s.append("    return 1\n");
+        s.append("  fi\n");
+        s.append("  while IFS= read -r member; do\n");
+        s.append("    if [ \"$#\" -gt 0 ]; then\n");
+        s.append("      in_section=0\n");
+        s.append("      for sec in \"$@\"; do\n");
+        s.append("        case \"$member\" in\n");
+        s.append("          \"$sec\"/*) in_section=1 ;;\n");
+        s.append("        esac\n");
+        s.append("      done\n");
+        s.append("      if [ \"$in_section\" -eq 0 ]; then continue; fi\n");
+        s.append("    fi\n");
+        s.append("    if [ \"$strip\" -eq 1 ]; then\n");
+        s.append("      member=\"${member#*/}\"\n");
+        s.append("    fi\n");
+        s.append("    member=\"${member%/}\"\n");
+        s.append("    if [ -z \"$member\" ]; then continue; fi\n");
+        s.append("    count=$((count + 1))\n");
+        s.append("    if [ ! -e \"$rootfs/$member\" ] && [ ! -L \"$rootfs/$member\" ]; then\n");
+        s.append("      ok=0\n");
+        s.append("    fi\n");
+        s.append("  done < \"$members\"\n");
+        s.append("  rm -f \"$members\"\n");
+        s.append("  [ \"$count\" -gt 0 ] && [ \"$ok\" -eq 1 ]\n");
+        s.append("}\n");
+        return s.toString();
+    }
+
+    /** Runs the shared repair_hard_links function for one archive
+     *  whose extraction just failed. The function text is fed to
+     *  bash -s on stdin, with the archive, rootfs, strip count and
+     *  sections as arguments; REPAIR_TAR points at the host tar
+     *  (ProcessBuilder does not inherit the Termux session PATH).
+     *  True iff the repair reports every hard-link member present
+     *  as a symlink. Only call after a failed extraction — a
+     *  successful extraction needs no repair. Call on a background
+     *  thread. */
+    private static boolean repairHardLinks(File archive, File rootfs, int strip,
+            List<String> sections) {
+        if (archive == null || !archive.isFile() || rootfs == null || !rootfs.isDirectory()) {
+            return false;
+        }
+        File bash = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "bash");
+        String bashPath = bash.isFile() ? bash.getAbsolutePath() : "bash";
+        List<String> command = new ArrayList<>();
+        command.add(bashPath);
+        command.add("-s");
+        command.add(archive.getAbsolutePath());
+        command.add(rootfs.getAbsolutePath());
+        command.add(Integer.toString(strip));
+        if (sections != null) command.addAll(sections);
+        StringBuilder script = new StringBuilder();
+        script.append(hardLinkRepairFunction());
+        script.append("repair_hard_links \"$@\"\n");
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.redirectErrorStream(true);
+        builder.environment().put("REPAIR_TAR", tarExecutable());
+        try {
+            Process process = builder.start();
+            try (OutputStream out = process.getOutputStream()) {
+                out.write(script.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.d(LOG_TAG, "repair: " + line);
+                }
+            }
+            int exit = process.waitFor();
+            if (exit != 0) {
+                Log.w(LOG_TAG, "repair_hard_links exited " + exit + " for "
+                    + archive.getAbsolutePath());
+                return false;
+            }
+            Log.i(LOG_TAG, "Hard-link members repaired as symlinks for "
+                + archive.getAbsolutePath());
+            return true;
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "Failed to run repair_hard_links for "
+                + archive.getAbsolutePath(), e);
+            return false;
+        }
+    }
+
     /** Same-distro rule (design.md §4): the manifest's distroId must be
      * non-empty and equal to the target container's distroId. A
      * missing/empty manifest distroId is NEVER same-distro (safe
@@ -682,7 +930,7 @@ public final class DistroBackup {
                 args.add(archive.getAbsolutePath());
                 args.add("-C");
                 args.add(rootfs.getAbsolutePath());
-                if (!runTar(args)) allOk = false;
+                if (!runTar(args) && !repairHardLinks(archive, rootfs, 0, null)) allOk = false;
             } else if (itemId.startsWith(AGENT_ITEM_ID_PREFIX)) {
                 String agentId = itemId.substring(AGENT_ITEM_ID_PREFIX.length());
                 AiAgentUtils.AgentDef def = AiAgentUtils.findDef(agentId);
@@ -725,7 +973,7 @@ public final class DistroBackup {
                 args.add(rootfs.getAbsolutePath());
                 args.add("--strip-components=1");
                 args.addAll(wanted);
-                if (!runTar(args)) allOk = false;
+                if (!runTar(args) && !repairHardLinks(archive, rootfs, 1, wanted)) allOk = false;
             } else {
                 Log.w(LOG_TAG, "Unknown backup item id: " + itemId);
                 allOk = false;
