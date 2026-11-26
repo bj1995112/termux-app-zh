@@ -22,11 +22,14 @@
 package com.termux.app.activities;
 
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.format.Formatter;
 import android.util.AtomicFile;
 import android.util.Log;
@@ -279,9 +282,14 @@ public class DistroActivity extends AppCompatActivity {
      * every resume (see checkPendingUninstalls). */
     private final Set<String> mUninstallStillPresentNoted = new HashSet<>();
     /** External-copy failures already toasted in this activity lifetime
-     * (the pending copy is retried on a later resume; see
-     * copyPendingExternalBackup). */
+     * (a failed copy is retried by the watcher, and again on a later
+     * resume; see copyPendingExternalBackup). */
     private final Set<String> mExternalCopyFailedNoted = new HashSet<>();
+    /** Containers whose external copy already showed the "copying"
+     * Toast in this activity lifetime. The watcher retries a failed
+     * copy every few seconds, so without this the "copying" Toast
+     * would fire on every retry (see copyPendingExternalBackup). */
+    private final Set<String> mExternalCopyCopyingNoted = new HashSet<>();
     /** Containers whose backup is being copied to external storage
      * right now. copyPendingExternalBackup adds the container before
      * copying and removes it afterwards, so the watcher and the
@@ -289,13 +297,8 @@ public class DistroActivity extends AppCompatActivity {
      * once; a second call while one is running simply skips. */
     private final Set<String> mExternalCopyInProgress =
         Collections.synchronizedSet(new HashSet<String>());
-    /** Watcher threads started by startBackupSession /
-     * startUninstallSession (see startExternalCopyWatcher), stopped
-     * in onDestroy. */
-    private final Set<Thread> mExternalCopyWatchers =
-        Collections.synchronizedSet(new HashSet<Thread>());
     /** How often the external-copy watcher re-checks whether the
-     * backup dir is complete. */
+     * backup dir is complete, and retries a failed copy. */
     private static final long EXTERNAL_COPY_WATCH_INTERVAL_MS = 5000;
     /** The watcher gives up after this long; the pending record and
      * the resume-time checkPendingExternalCopies remain the fallback. */
@@ -390,15 +393,6 @@ public class DistroActivity extends AppCompatActivity {
         new Thread(this::checkPendingUninstalls).start();
         new Thread(this::checkRestoreAutoPrompt).start();
         new Thread(this::checkModelConfigReapply).start();
-    }
-
-    @Override
-    protected void onDestroy() {
-        // Stop any external-copy watcher: its activity is gone, and the
-        // pending record + checkPendingExternalCopies on the next resume
-        // remain the fallback for the copy.
-        stopExternalCopyWatchers();
-        super.onDestroy();
     }
 
     @Override
@@ -2284,7 +2278,7 @@ public class DistroActivity extends AppCompatActivity {
                             R.string.restore_damaged, Toast.LENGTH_LONG).show();
                         return;
                     }
-                    showRestoreContainerPicker(backup);
+                    startRestoreForBackup(backup);
                 });
                 row.addView(restoreButton);
                 android.widget.Button deleteButton =
@@ -2866,7 +2860,7 @@ public class DistroActivity extends AppCompatActivity {
             .setNegativeButton(android.R.string.cancel, null);
         if (!backup.damaged) {
             builder.setPositiveButton(R.string.backup_detail_restore,
-                (d, w) -> showRestoreContainerPicker(backup));
+                (d, w) -> startRestoreForBackup(backup));
         }
         final AlertDialog dialog = builder.create();
         dialog.setOnDismissListener(d -> {
@@ -2952,7 +2946,78 @@ public class DistroActivity extends AppCompatActivity {
         }
     }
 
-    /** Restore from the detail view: dismiss the detail dialog (the
+    /** Restore entry for one backup, from the manager row and the
+     * detail view: skip the container picker when the target is
+     * unambiguous, otherwise fall through to it.
+     * (a) The backup's own container is still installed: restore
+     * straight into it. (b) Otherwise, when exactly one installed
+     * container belongs to the backup's distro family, restore into
+     * it. (c) Otherwise (source distro not installed, or several
+     * containers of that family) show the picker and let the user
+     * choose — cross-distro restores go through here. The item
+     * picker and the restore rules after it are unchanged, and a
+     * damaged backup still only toasts and never restores. */
+    private void startRestoreForBackup(final UnifiedBackup backup) {
+        if (isFinishing() || isDestroyed()) return;
+        if (backup.damaged) {
+            Toast.makeText(this,
+                R.string.restore_damaged, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
+            mBackupManagerDialog.dismiss();
+        }
+        if (mInstalledContainers.isEmpty()) {
+            Toast.makeText(this,
+                R.string.backup_detail_no_containers, Toast.LENGTH_LONG).show();
+            return;
+        }
+        // (a) Source container still installed: direct restore.
+        if (!backup.container.isEmpty()
+            && mInstalledContainers.contains(backup.container)) {
+            restoreToContainer(backup, backup.container);
+            return;
+        }
+        // (b) Exactly one installed container of the backup's distro
+        // family: direct restore. An empty backup distroId never
+        // matches (a missing distroId is cross-distro), and
+        // distroIdForContainer may return null for an unknown
+        // container — equals is called on the backup id, so null is
+        // simply not a match.
+        if (!backup.distroId.isEmpty()) {
+            String onlyMatch = null;
+            int matches = 0;
+            for (String container : mInstalledContainers) {
+                if (backup.distroId.equals(DistroUtils.distroIdForContainer(container))) {
+                    onlyMatch = container;
+                    matches++;
+                }
+            }
+            if (matches == 1) {
+                restoreToContainer(backup, onlyMatch);
+                return;
+            }
+        }
+        // (c) Ambiguous: show the picker.
+        showRestoreContainerPicker(backup);
+    }
+
+    /** One restore target, already chosen: resolve its display name
+     * and rootfs, then open the item picker. Shared by the direct
+     * path and the container picker's tap handler. */
+    private void restoreToContainer(final UnifiedBackup backup, String container) {
+        String display = displayNameForContainer(container);
+        File rootfs = DistroUtils.containerRootfs(container);
+        if (rootfs == null) {
+            Toast.makeText(this,
+                R.string.restore_target_missing, Toast.LENGTH_LONG).show();
+            return;
+        }
+        showItemPicker(container, display, rootfs, backup);
+    }
+
+    /** Restore target picker (the ambiguous fallback of
+     * startRestoreForBackup): dismiss the detail dialog (the
      * positive button already does) and the manager dialog, then list
      * the installed containers by display name. Tapping one opens the
      * existing item picker; the restore rules there are unchanged. */
@@ -2975,17 +3040,8 @@ public class DistroActivity extends AppCompatActivity {
         }
         new AlertDialog.Builder(this)
             .setTitle(R.string.backup_detail_pick_container_title)
-            .setItems(labels, (dialog, which) -> {
-                String container = containers.get(which);
-                String display = displayNameForContainer(container);
-                File rootfs = DistroUtils.containerRootfs(container);
-                if (rootfs == null) {
-                    Toast.makeText(DistroActivity.this,
-                        R.string.restore_target_missing, Toast.LENGTH_LONG).show();
-                    return;
-                }
-                showItemPicker(container, display, rootfs, backup);
-            })
+            .setItems(labels, (dialog, which) ->
+                restoreToContainer(backup, containers.get(which)))
             .setNegativeButton(android.R.string.cancel, null)
             .show();
     }
@@ -3080,47 +3136,43 @@ public class DistroActivity extends AppCompatActivity {
      * behaviour). The session has no completion callback, so the
      * watcher polls isBackupDirComplete every few seconds; the script
      * writes manifest.json last, so a complete dir means packing is
-     * done and copying cannot race the pack step. Stops when the copy
-     * has run, when the activity is destroyed (see onDestroy), or
-     * after EXTERNAL_COPY_WATCH_TIMEOUT_MS; the pending record and
-     * the resume-time checkPendingExternalCopies remain the fallback
-     * in all three cases. Call on the UI thread, right after the
-     * terminal session is launched. */
+     * done and copying cannot race the pack step. Once the dir is
+     * complete the watcher keeps calling copyPendingExternalBackup
+     * every EXTERNAL_COPY_WATCH_INTERVAL_MS until the copy succeeds —
+     * a single failed attempt (e.g. a momentary SAF/permission
+     * hiccup) no longer ends the watch; the internal copy and the
+     * pending record are kept, so the next round retries. The watcher
+     * stops only when the copy succeeds or after
+     * EXTERNAL_COPY_WATCH_TIMEOUT_MS. It is a daemon thread and is
+     * NOT stopped when this activity is destroyed: an uninstall
+     * session finishes this activity right after launching, so
+     * stopping the watcher on destroy would kill the copy before it
+     * starts. The pending record and the resume-time
+     * checkPendingExternalCopies remain the fallback in all cases.
+     * Call on the UI thread, right after the terminal session is
+     * launched. */
     private void startExternalCopyWatcher(final String container, final File backupDir) {
         final Thread watcher = new Thread(() -> {
-            try {
-                long deadline =
-                    System.currentTimeMillis() + EXTERNAL_COPY_WATCH_TIMEOUT_MS;
-                while (System.currentTimeMillis() < deadline) {
-                    if (Thread.currentThread().isInterrupted()) return;
-                    if (isBackupDirComplete(backupDir)) {
-                        copyPendingExternalBackup(container);
-                        return;
-                    }
-                    try {
-                        Thread.sleep(EXTERNAL_COPY_WATCH_INTERVAL_MS);
-                    } catch (InterruptedException e) {
-                        return;
-                    }
+            long deadline =
+                System.currentTimeMillis() + EXTERNAL_COPY_WATCH_TIMEOUT_MS;
+            while (System.currentTimeMillis() < deadline) {
+                if (Thread.currentThread().isInterrupted()) return;
+                if (isBackupDirComplete(backupDir)) {
+                    if (copyPendingExternalBackup(container)) return;
+                    // Copy failed: keep polling — the internal copy
+                    // and the pending record are kept, so the next
+                    // round retries the copy.
                 }
-                Log.i(LOG_TAG, "External copy watcher timed out for " + container);
-            } finally {
-                mExternalCopyWatchers.remove(Thread.currentThread());
+                try {
+                    Thread.sleep(EXTERNAL_COPY_WATCH_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
             }
+            Log.i(LOG_TAG, "External copy watcher timed out for " + container);
         });
         watcher.setDaemon(true);
-        mExternalCopyWatchers.add(watcher);
         watcher.start();
-    }
-
-    /** Interrupt every running external-copy watcher (activity going
-     * away; see onDestroy). Copies already in flight are NOT
-     * interrupted — only the polling stops. */
-    private void stopExternalCopyWatchers() {
-        synchronized (mExternalCopyWatchers) {
-            for (Thread watcher : mExternalCopyWatchers) watcher.interrupt();
-            mExternalCopyWatchers.clear();
-        }
     }
 
     /** Post-pack external copy, triggered by the watcher
@@ -3140,19 +3192,31 @@ public class DistroActivity extends AppCompatActivity {
      *       is KEPT, so a later resume retries the copy; the user is
      *       told once per activity lifetime, with the reason.</li>
      * </ol>
-     * A copy already in flight for this container makes a second call
-     * return at once (see mExternalCopyInProgress). Call on a
-     * background thread (the copy can move gigabytes over SAF). If the
-     * user never returns to this screen the copy simply waits; the
-     * backup stays internal meanwhile. */
-    private void copyPendingExternalBackup(String container) {
+     * Returns true when there is nothing left to copy: the copy
+     * succeeded, or no pending entry exists for this container (so
+     * the watcher can stop). Returns false when the copy failed, so
+     * the watcher keeps retrying until success or its timeout; a
+     * second call while a copy is already in flight also returns
+     * false at once (see mExternalCopyInProgress) and the watcher
+     * re-checks on its next round.
+     * <p>
+     * The copy runs on the APPLICATION context and its Toasts are
+     * posted to the main looper (see postToastOnMainThread), never on
+     * this activity: the watcher outlives the activity (an uninstall
+     * finishes it right after launching), so holding the destroyed
+     * activity as the Context would break the copy and the Toasts.
+     * Call on a background thread (the copy can move gigabytes over
+     * SAF). If the user never returns to this screen the copy simply
+     * waits; the backup stays internal meanwhile. */
+    private boolean copyPendingExternalBackup(String container) {
         // Claim the container first: the watcher and the resume-time
         // check can fire at the same moment, and two SAF copies of the
         // same backup dir must never run concurrently.
-        if (!mExternalCopyInProgress.add(container)) return;
+        if (!mExternalCopyInProgress.add(container)) return false;
         try {
+            final Context appContext = getApplicationContext();
             SharedPreferences prefs = SharedPreferenceUtils.getPrivateSharedPreferences(
-                this, UNINSTALL_PREFS_NAME);
+                appContext, UNINSTALL_PREFS_NAME);
             Set<String> pending = new LinkedHashSet<>(prefs.getStringSet(
                 KEY_PENDING_EXTERNAL_COPIES, new LinkedHashSet<String>()));
             String match = null;
@@ -3165,54 +3229,69 @@ public class DistroActivity extends AppCompatActivity {
                     break;
                 }
             }
-            if (match == null) return;
-            runOnUiThread(() -> Toast.makeText(DistroActivity.this,
-                R.string.backup_external_copying, Toast.LENGTH_LONG).show());
+            if (match == null) return true;
+            // The watcher retries a failed copy every few seconds, so
+            // the "copying" Toast fires only once per container per
+            // activity lifetime (same pattern as the failure Toast).
+            if (mExternalCopyCopyingNoted.add(container)) {
+                postToastOnMainThread(appContext,
+                    appContext.getString(R.string.backup_external_copying));
+            }
             int copyResult = ExternalBackupStore.COPY_NO_MANIFEST;
             if (backupDir.isDirectory()) {
                 copyResult = ExternalBackupStore.copyBackupToExternalWithResult(
-                    this, backupDir);
+                    appContext, backupDir);
             }
             if (copyResult == ExternalBackupStore.COPY_OK) {
                 deleteRecursively(backupDir);
                 pending.remove(match);
                 prefs.edit().putStringSet(KEY_PENDING_EXTERNAL_COPIES, pending).apply();
-                runOnUiThread(() -> {
-                    String folderPath = ExternalBackupStore.displayFolderPath(
-                        DistroActivity.this);
-                    Toast.makeText(DistroActivity.this,
-                        getString(R.string.backup_external_copy_done,
-                            folderPath == null ? "" : folderPath),
-                        Toast.LENGTH_LONG).show();
-                });
+                final String folderPath =
+                    ExternalBackupStore.displayFolderPath(appContext);
+                postToastOnMainThread(appContext, appContext.getString(
+                    R.string.backup_external_copy_done,
+                    folderPath == null ? "" : folderPath));
+                return true;
             } else {
                 final int failure = copyResult;
                 if (mExternalCopyFailedNoted.add(container)) {
-                    runOnUiThread(() -> Toast.makeText(DistroActivity.this,
-                        getString(R.string.backup_external_copy_failed,
-                            copyErrorReason(failure)),
-                        Toast.LENGTH_LONG).show());
+                    postToastOnMainThread(appContext, appContext.getString(
+                        R.string.backup_external_copy_failed,
+                        copyErrorReason(appContext, failure)));
                 }
+                return false;
             }
         } finally {
             mExternalCopyInProgress.remove(container);
         }
     }
 
+    /** Show a Toast from any thread — including a watcher thread that
+     * outlives this activity: posted to the main looper with the
+     * application context, so it works after onDestroy and never
+     * holds the destroyed activity. */
+    private void postToastOnMainThread(final Context context, final String message) {
+        new Handler(Looper.getMainLooper()).post(() ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show());
+    }
+
     /** Short user-facing reason for a COPY_* result code (see
-     * ExternalBackupStore). Called on the UI thread. */
-    private String copyErrorReason(int copyResult) {
+     * ExternalBackupStore). Resolved against the given context — the
+     * application context, since copyPendingExternalBackup can run
+     * after this activity is destroyed. Called on a background
+     * thread. */
+    private String copyErrorReason(Context context, int copyResult) {
         switch (copyResult) {
             case ExternalBackupStore.COPY_NO_FOLDER:
-                return getString(R.string.backup_external_copy_reason_no_folder);
+                return context.getString(R.string.backup_external_copy_reason_no_folder);
             case ExternalBackupStore.COPY_NO_MANIFEST:
-                return getString(R.string.backup_external_copy_reason_no_manifest);
+                return context.getString(R.string.backup_external_copy_reason_no_manifest);
             case ExternalBackupStore.COPY_CREATE_FAILED:
-                return getString(R.string.backup_external_copy_reason_create_failed);
+                return context.getString(R.string.backup_external_copy_reason_create_failed);
             case ExternalBackupStore.COPY_VERIFY_FAILED:
-                return getString(R.string.backup_external_copy_reason_verify_failed);
+                return context.getString(R.string.backup_external_copy_reason_verify_failed);
             default:
-                return getString(R.string.backup_external_copy_reason_copy_failed);
+                return context.getString(R.string.backup_external_copy_reason_copy_failed);
         }
     }
 
