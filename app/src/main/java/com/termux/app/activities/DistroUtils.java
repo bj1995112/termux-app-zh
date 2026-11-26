@@ -340,6 +340,19 @@ public final class DistroUtils {
             expandWildcardPaths(rootfs, excluded)));
     }
 
+    /** Top-level rootfs dirs that are NOT part of the distro and must
+     * never be packed into system.tar.gz or counted in its size:
+     * Android host paths proot bind-mounts into the container
+     * (unreadable from the host, so tar fails with "Permission denied"
+     * and aborts the whole backup) plus the virtual/runtime
+     * filesystems, recreated at container start. DistroBackup's
+     * system tar uses this same list. */
+    public static final String[] SYSTEM_EXCLUDED_TOP_DIRS = {
+        "apex", "data", "mnt", "odm", "product", "sdcard", "storage",
+        "system", "system_ext", "vendor", "linkerconfig",
+        "dev", "proc", "sys", "run"
+    };
+
     /** Size of the distro system inside a rootfs excluding /root, every
      * agent's program+data paths, and var/cache, var/log, tmp, var/tmp
      * (bytes) — the "发行版系统" item size in the uninstall backup
@@ -359,6 +372,7 @@ public final class DistroUtils {
         excluded.add("var/log");
         excluded.add("tmp");
         excluded.add("var/tmp");
+        for (String dir : SYSTEM_EXCLUDED_TOP_DIRS) excluded.add(dir);
         return Math.max(0, dirSize(rootfs) - pathsSize(rootfs,
             expandWildcardPaths(rootfs, excluded)));
     }

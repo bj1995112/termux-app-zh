@@ -821,11 +821,17 @@ public final class DistroBackup {
         s.append("mkdir -p \"$BACKUP_DIR\"\n");
 
         // --- system.tar.gz: whole rootfs minus /root, every agent
-        // program+data path (same deduped list as the home exclusions)
-        // and the cache/log/tmp dirs (home keeps /root as-is) ---
+        // program+data path (same deduped list as the home exclusions),
+        // the cache/log/tmp dirs, and the Android bind-mount + runtime
+        // top dirs (DistroUtils.SYSTEM_EXCLUDED_TOP_DIRS — not part of
+        // the distro; tar cannot read them from the host and aborts).
+        // --ignore-failed-read (placed after the archive name: GNU tar
+        // takes the word right after `czf` as the file name, so it must
+        // not go there): one unreadable file only warns instead of
+        // failing the whole backup (same for home and agent tars). ---
         if (backupSystem) {
             s.append("echo \"正在打包发行版系统 ...\"\n");
-            s.append("tar czf \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\" -C \"$ROOTFS\"");
+            s.append("tar czf \"$BACKUP_DIR/").append(SYSTEM_ARCHIVE).append("\" --ignore-failed-read -C \"$ROOTFS\"");
             s.append(" --exclude=").append(shellQuote("root"));
             for (String path : homeExcludes) {
                 s.append(" --exclude=").append(shellQuote(path));
@@ -834,13 +840,16 @@ public final class DistroBackup {
             s.append(" --exclude=").append(shellQuote("var/log"));
             s.append(" --exclude=").append(shellQuote("tmp"));
             s.append(" --exclude=").append(shellQuote("var/tmp"));
+            for (String dir : DistroUtils.SYSTEM_EXCLUDED_TOP_DIRS) {
+                s.append(" --exclude=").append(shellQuote(dir));
+            }
             s.append(" .\n");
         }
 
         // --- home.tar.gz: /root minus every agent program+data path ---
         if (backupHome) {
             s.append("echo \"正在打包用户文件 (/root) ...\"\n");
-            s.append("tar czf \"$BACKUP_DIR/").append(HOME_ARCHIVE).append("\" -C \"$ROOTFS\"");
+            s.append("tar czf \"$BACKUP_DIR/").append(HOME_ARCHIVE).append("\" --ignore-failed-read -C \"$ROOTFS\"");
             for (String path : homeExcludes) {
                 s.append(" --exclude=").append(shellQuote(path));
             }
@@ -861,7 +870,7 @@ public final class DistroBackup {
                 appendStageLinks(s, def.id, "data", dedupPaths(
                     DistroUtils.expandWildcardPaths(rootfs, AiAgentUtils.dataPaths(def))));
                 s.append("tar czhf \"$BACKUP_DIR/").append(agentArchiveName(def.id))
-                    .append("\" -C \"$STAGE\"/").append(shellQuote(def.id))
+                    .append("\" --ignore-failed-read -C \"$STAGE\"/").append(shellQuote(def.id))
                     .append(" data program\n");
             }
             s.append("rm -rf \"$STAGE\"\n");
