@@ -337,21 +337,49 @@ public final class ExternalBackupStore {
         return result;
     }
 
+    /** Copy result codes for copyBackupToExternalWithResult: the
+     * boolean copyBackupToExternal keeps its old meaning (true iff the
+     * result is COPY_OK); the int form lets the caller tell the user
+     * WHY a copy failed. */
+    public static final int COPY_OK = 0;
+    /** No external folder is set, or the app no longer holds a
+     * read+write grant for it. */
+    public static final int COPY_NO_FOLDER = 1;
+    /** The internal backup dir is missing, or its manifest.json is
+     * missing/unreadable. */
+    public static final int COPY_NO_MANIFEST = 2;
+    /** The external backup dir or one of its files could not be
+     * created (including removing a same-named dir first). */
+    public static final int COPY_CREATE_FAILED = 3;
+    /** A backup file could not be copied over (read/write failure). */
+    public static final int COPY_FAILED = 4;
+    /** The files landed but the copied dir has no manifest.json, so
+     * the copy is not a usable backup. */
+    public static final int COPY_VERIFY_FAILED = 5;
+
     /** Copies a whole internal backup dir (manifest.json + *.tar.gz) into
      * the external folder under the same dir name. An existing external
      * dir of the same name is replaced. Returns true on success.
      * The caller packs the backup locally first; this only transfers it.
-     */
+     * Same as copyBackupToExternalWithResult(...) == COPY_OK. */
     public static boolean copyBackupToExternal(Context context, File internalBackupDir) {
+        return copyBackupToExternalWithResult(context, internalBackupDir) == COPY_OK;
+    }
+
+    /** Same transfer as copyBackupToExternal, but returns a COPY_*
+     * result code so the caller can explain a failure. On any failure
+     * a partially created external dir is removed, and the internal
+     * dir is left untouched (the caller keeps it and retries later). */
+    public static int copyBackupToExternalWithResult(Context context, File internalBackupDir) {
         if (context == null || internalBackupDir == null || !internalBackupDir.isDirectory()) {
-            return false;
+            return COPY_NO_MANIFEST;
         }
         if (!new File(internalBackupDir, MANIFEST_FILE_NAME).isFile()) {
             Log.w(LOG_TAG, "Internal backup dir has no manifest.json: " + internalBackupDir);
-            return false;
+            return COPY_NO_MANIFEST;
         }
         Uri folderUri = getExternalFolderUri(context);
-        if (folderUri == null || !hasExternalFolder(context)) return false;
+        if (folderUri == null || !hasExternalFolder(context)) return COPY_NO_FOLDER;
         ContentResolver resolver = context.getContentResolver();
         String dirName = internalBackupDir.getName();
         Uri newDirUri = null;
@@ -363,18 +391,18 @@ public final class ExternalBackupStore {
                     DocumentsContract.getTreeDocumentId(folderUri), dirName);
             if (existing != null && !DocumentsContract.deleteDocument(resolver, existing)) {
                 Log.w(LOG_TAG, "Could not remove existing external backup dir: " + dirName);
-                return false;
+                return COPY_CREATE_FAILED;
             }
             newDirUri = DocumentsContract.createDocument(resolver, treeDocUri,
                     DocumentsContract.Document.MIME_TYPE_DIR, dirName);
             if (newDirUri == null) {
                 Log.w(LOG_TAG, "Could not create external backup dir: " + dirName);
-                return false;
+                return COPY_CREATE_FAILED;
             }
             File[] files = internalBackupDir.listFiles();
             if (files == null) {
                 deleteExternalDirQuietly(resolver, newDirUri);
-                return false;
+                return COPY_FAILED;
             }
             for (File file : files) {
                 if (!file.isFile()) continue; // backup dirs are flat; skip subdirs
@@ -383,24 +411,24 @@ public final class ExternalBackupStore {
                 if (fileUri == null) {
                     Log.w(LOG_TAG, "Could not create external file: " + file.getName());
                     deleteExternalDirQuietly(resolver, newDirUri);
-                    return false;
+                    return COPY_CREATE_FAILED;
                 }
                 if (!copyFileToUri(resolver, file, fileUri)) {
                     deleteExternalDirQuietly(resolver, newDirUri);
-                    return false;
+                    return COPY_FAILED;
                 }
             }
             // The manifest must have landed, or the copy is not a backup.
             if (findChildUri(resolver, folderUri,
                     DocumentsContract.getDocumentId(newDirUri), MANIFEST_FILE_NAME) == null) {
                 deleteExternalDirQuietly(resolver, newDirUri);
-                return false;
+                return COPY_VERIFY_FAILED;
             }
-            return true;
+            return COPY_OK;
         } catch (FileNotFoundException | SecurityException | IllegalArgumentException e) {
             Log.w(LOG_TAG, "Could not copy backup to external folder: " + internalBackupDir, e);
             if (newDirUri != null) deleteExternalDirQuietly(resolver, newDirUri);
-            return false;
+            return COPY_FAILED;
         }
     }
 

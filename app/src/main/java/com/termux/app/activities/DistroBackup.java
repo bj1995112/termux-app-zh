@@ -791,12 +791,19 @@ public final class DistroBackup {
      * @param selectedItemIds item ids to back up ("system", "home" and/or "agent:<id>")
      * @param agents          all AgentDefs (home excludes every agent's
      *                        paths; only selected agents get an archive)
+     * @param externalFolderDisplay human-readable external folder path
+     *                        (see ExternalBackupStore.displayFolderPath),
+     *                        or null for an internal backup. When non-null
+     *                        the final message says the packed backup is
+     *                        being copied there, instead of only printing
+     *                        the internal $BACKUP_DIR.
      */
     public static String buildBackupAndRemoveScript(File rootfs, String container,
             String distroId, String distroDisplay, File backupDir,
-            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents) {
+            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents,
+            String externalFolderDisplay) {
         return buildBackupScript(rootfs, container, distroId, distroDisplay, backupDir,
-            selectedItemIds, agents, true);
+            selectedItemIds, agents, true, externalFolderDisplay);
     }
 
     /**
@@ -804,13 +811,15 @@ public final class DistroBackup {
      * as buildBackupAndRemoveScript, but the container is NOT removed
      * afterwards (steps [1/3] backup, [2/3] manifest, [3/3] verify) and
      * no fail/trap wording mentions a removal. Same parameters as
-     * buildBackupAndRemoveScript.
+     * buildBackupAndRemoveScript, including the nullable
+     * externalFolderDisplay (see above).
      */
     public static String buildBackupOnlyScript(File rootfs, String container,
             String distroId, String distroDisplay, File backupDir,
-            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents) {
+            List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents,
+            String externalFolderDisplay) {
         return buildBackupScript(rootfs, container, distroId, distroDisplay, backupDir,
-            selectedItemIds, agents, false);
+            selectedItemIds, agents, false, externalFolderDisplay);
     }
 
     /** Shared pack + manifest + verify body for the two builders above.
@@ -820,7 +829,7 @@ public final class DistroBackup {
     private static String buildBackupScript(File rootfs, String container,
             String distroId, String distroDisplay, File backupDir,
             List<String> selectedItemIds, List<AiAgentUtils.AgentDef> agents,
-            boolean removeAfter) {
+            boolean removeAfter, String externalFolderDisplay) {
         if (rootfs == null) throw new IllegalArgumentException("rootfs is null");
         if (!isValidContainerName(container)) {
             throw new IllegalArgumentException("bad container name: " + container);
@@ -1028,9 +1037,22 @@ public final class DistroBackup {
             // README: "Be careful as it does not ask for confirmation"), so
             // the app's own confirm dialog is the only prompt.
             s.append("proot-distro remove ").append(container).append("\n");
-            s.append("echo \"卸载完成。备份保存在：$BACKUP_DIR\"\n");
+            if (externalFolderDisplay != null) {
+                // The whole message is shellQuoted as one string: the
+                // folder name is user-chosen, so $ / ` / " in it must
+                // not expand, and ' in it must not break the quoting.
+                s.append("echo ").append(shellQuote(
+                    "卸载完成。备份已打包，正在复制到外部存储：" + externalFolderDisplay)).append("\n");
+            } else {
+                s.append("echo \"卸载完成。备份保存在：$BACKUP_DIR\"\n");
+            }
         } else {
-            s.append("echo \"备份完成。备份保存在：$BACKUP_DIR\"\n");
+            if (externalFolderDisplay != null) {
+                s.append("echo ").append(shellQuote(
+                    "备份完成。备份已打包，正在复制到外部存储：" + externalFolderDisplay)).append("\n");
+            } else {
+                s.append("echo \"备份完成。备份保存在：$BACKUP_DIR\"\n");
+            }
         }
         s.append("read -r -p \"按回车关闭此会话\" || true\n");
         return s.toString();
