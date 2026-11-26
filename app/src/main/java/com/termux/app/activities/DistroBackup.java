@@ -559,7 +559,13 @@ public final class DistroBackup {
     // were symlinks when packed (the backup script uses tar -h, which
     // follows symlinks; two packed paths to one inode become a hard
     // link), so recreating them as symlinks restores the original
-    // layout. The repair below is one shared shell function, used by
+    // layout — but only if the real file lands on the package-tree
+    // member of each hard-link group, not on the bin shim: tar stores
+    // whichever member it meets first as the regular file, and when
+    // that is /usr/bin/pi the package file must be made the real file
+    // (content copied over) instead of linked to it, or Node resolves
+    // relative siblings against /usr/bin/ and the agent fails to
+    // start. The repair below is one shared shell function, used by
     // both restore paths: restoreItems runs it through bash -s, and
     // DistroActivity embeds the same text in the restore-distro
     // script. No new dependency (tar + coreutils only), and the
@@ -580,14 +586,39 @@ public final class DistroBackup {
      *  the rootfs too — a container-absolute target would not
      *  resolve from the host, so verifyRestoredItems would report
      *  the item failed even though the restore is correct.
+     *  The repair is DIRECTION-AWARE: a hard-link group (one regular
+     *  file plus the hard-link members pointing at it) is repaired
+     *  so that the CANONICAL member holds the real file — the longest
+     *  member inside the package tree (a bin path, whose parent dir
+     *  is named bin or .bin, never holds it, except a package's own
+     *  bin/ under node_modules; if every member is a bin path the
+     *  recorded regular file stays canonical). When the canonical
+     *  member is a hard-link member, the recorded regular file's
+     *  content is copied to it (mode preserved), the recorded file
+     *  becomes a symlink to it, and every other member links to it.
+     *  Without this, a backup that stored the bin shim as the regular
+     *  file (tar archives bin/ before lib/) restores inverted — the
+     *  real file lands on /usr/bin/pi and the package file points at
+     *  it — and Node resolves relative siblings against the realpath,
+     *  so pi fails with "Cannot find module './cli-runtime.js'"
+     *  even though the file exists in dist/bundle/. A group whose
+     *  recorded regular file was not extracted (e.g. a data-only
+     *  restore whose target lives in program/) keeps the old
+     *  dangling-symlink behaviour: the members link to the recorded
+     *  target and no content is copied.
      *  repair_hard_links returns 0 iff the archive lists cleanly,
      *  holds at least one hard-link member in the repaired sections,
-     *  every such member's target is also a member of the archive
+     *  every such member's target resolves to a member of the archive
      *  (a target that is not in the archive at all means a genuinely
      *  damaged backup), and every such member now exists as a
-     *  symlink (test -L, never -e: the target may live in a section
-     *  that was not extracted). Link chains need no ordering: a
-     *  symlink to another symlink resolves through it.
+     *  symlink or, for the canonical member of a swapped group, as
+     *  a regular file (test -L / -f: the target may live in a
+     *  section that was not extracted). Link chains need no ordering:
+     *  a symlink to another symlink resolves through it; chains are
+     *  resolved transitively to their regular file when grouping.
+     *  The repair also fixes a layout an older repair left inverted:
+     *  if the canonical member is currently a symlink to the recorded
+     *  file, the swap runs again and puts the real file back.
      *  verify_members is the script path's post-repair check (the
      *  Java path already has verifyRestoredItems): it lists every
      *  member of the extracted sections and requires each one to
@@ -596,7 +627,12 @@ public final class DistroBackup {
      *  lives in a section that was not extracted is dangling by
      *  design, and -e alone would misjudge it missing. Directory
      *  members (names ending in /) are checked without the trailing
-     *  slash. It returns 0 iff the archive lists cleanly, holds at
+     *  slash. It additionally requires every hard-link group whose
+     *  recorded regular file is present on disk to be in the
+     *  canonical direction (the canonical member is a regular file,
+     *  and the recorded file is a symlink when it differs from the
+     *  canonical), so an inverted layout cannot report success.
+     *  It returns 0 iff the archive lists cleanly, holds at
      *  least one member in the checked sections, and every member
      *  is present. It only runs after a successful repair, never on
      *  the success path: a repair can return 0 while the extraction
@@ -608,10 +644,25 @@ public final class DistroBackup {
         StringBuilder s = new StringBuilder();
         s.append("# repair_hard_links <archive> <rootfs> <strip> [sections...]\n");
         s.append("# Recreates every hard-link member of <archive> as a symlink under\n");
-        s.append("# <rootfs> (see DistroBackup.hardLinkRepairFunction javadoc).\n");
+        s.append("# <rootfs>, except that each hard-link GROUP is repaired in the\n");
+        s.append("# direction of its canonical member (see DistroBackup.hardLinkRepairFunction\n");
+        s.append("# javadoc): the member that must hold the real file is the longest\n");
+        s.append("# non-bin member of the group (bin = parent dir named bin or .bin,\n");
+        s.append("# except a package's own bin/ under node_modules); if every member is\n");
+        s.append("# a bin path, the recorded regular file stays canonical. When the\n");
+        s.append("# canonical member is a hard-link member, the recorded regular file's\n");
+        s.append("# content is copied to it, the recorded file becomes a symlink to it,\n");
+        s.append("# and every other member links to it — so a bin shim never ends up\n");
+        s.append("# holding the real file while the package file points at it (Node\n");
+        s.append("# resolves relative siblings against the realpath, so that inverted\n");
+        s.append("# layout fails with \"Cannot find module './cli-runtime.js'\").\n");
         s.append("# verify_members <archive> <rootfs> <strip> [sections...]\n");
         s.append("# Requires every member of the extracted sections to exist under\n");
-        s.append("# <rootfs> (-e or -L: a repaired symlink may dangle by design).\n");
+        s.append("# <rootfs> (-e or -L: a repaired symlink may dangle by design), and\n");
+        s.append("# additionally requires every hard-link group whose recorded regular\n");
+        s.append("# file is present on disk to be in the canonical direction (the\n");
+        s.append("# canonical member is a regular file, and the recorded file is a\n");
+        s.append("# symlink when it differs from the canonical).\n");
         s.append("# _repair_relpath <link-dir> <target>: the target path relative\n");
         s.append("# to the link's directory (both rootfs-relative, no leading\n");
         s.append("# slash). The repaired link is relative on purpose: it\n");
@@ -620,6 +671,23 @@ public final class DistroBackup {
         s.append("# rootfs too (a container-absolute target would not resolve\n");
         s.append("# from the host, so verifyRestoredItems would report the\n");
         s.append("# item failed even though the restore is correct).\n");
+        s.append("# _repair_is_bin <path>: 0 if <path> is a bin entry (its parent\n");
+        s.append("# directory is named bin or .bin), except a package's own bin/\n");
+        s.append("# directory under node_modules (e.g. .../node_modules/@scope/pkg/bin/cli),\n");
+        s.append("# which holds the real package file, not a shim.\n");
+        s.append("_repair_is_bin() {\n");
+        s.append("  local p=\"$1\" parent base\n");
+        s.append("  parent=\"$(dirname \"$p\")\"\n");
+        s.append("  base=\"$(basename \"$parent\")\"\n");
+        s.append("  case \"$base\" in\n");
+        s.append("    bin|.bin) ;;\n");
+        s.append("    *) return 1 ;;\n");
+        s.append("  esac\n");
+        s.append("  case \"$p\" in\n");
+        s.append("    */node_modules/*/bin/*) return 1 ;;\n");
+        s.append("  esac\n");
+        s.append("  return 0\n");
+        s.append("}\n");
         s.append("_repair_relpath() {\n");
         s.append("  local from=\"$1\" to=\"$2\"\n");
         s.append("  local -a fparts=() tparts=()\n");
@@ -637,23 +705,29 @@ public final class DistroBackup {
         s.append("  rel=\"${rel%/}\"\n");
         s.append("  printf '%s\\n' \"$rel\"\n");
         s.append("}\n");
-        s.append("repair_hard_links() {\n");
+        s.append("# _repair_groups <archive> <strip> <out-file> [sections...]\n");
+        s.append("# Writes one line per in-scope hard-link member:\n");
+        s.append("#   key|member|direct\n");
+        s.append("# (all stripped), where key is the transitively resolved regular-file\n");
+        s.append("# member of the member's hard-link group. key is empty when the target\n");
+        s.append("# is not in the archive at all (genuinely damaged backup). Returns 0\n");
+        s.append("# iff the archive lists cleanly and every h-line parses.\n");
+        s.append("_repair_groups() {\n");
         s.append("  if [ \"$#\" -lt 3 ]; then return 1; fi\n");
-        s.append("  local archive=\"$1\" rootfs=\"$2\" strip=\"$3\"\n");
+        s.append("  local archive=\"$1\" strip=\"$2\" out=\"$3\"\n");
         s.append("  shift 3\n");
         s.append("  local tarbin=\"${REPAIR_TAR:-tar}\"\n");
-        s.append("  local list members checked total ok pair name target in_section dest want line sec\n");
-        s.append("  total=0\n");
-        s.append("  ok=1\n");
+        s.append("  local list members entries line pair name target key nxt i in_section sec\n");
         s.append("  list=\"$(mktemp)\" || return 1\n");
         s.append("  members=\"$(mktemp)\" || { rm -f \"$list\"; return 1; }\n");
-        s.append("  checked=\"$(mktemp)\" || { rm -f \"$list\" \"$members\"; return 1; }\n");
+        s.append("  entries=\"$(mktemp)\" || { rm -f \"$list\" \"$members\"; return 1; }\n");
+        s.append("  : > \"$out\" || { rm -f \"$list\" \"$members\" \"$entries\"; return 1; }\n");
         s.append("  if ! \"$tarbin\" -tzf \"$archive\" > \"$members\" 2>/dev/null; then\n");
-        s.append("    rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("    rm -f \"$list\" \"$members\" \"$entries\"\n");
         s.append("    return 1\n");
         s.append("  fi\n");
         s.append("  if ! \"$tarbin\" -tzvf \"$archive\" > \"$list\" 2>/dev/null; then\n");
-        s.append("    rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("    rm -f \"$list\" \"$members\" \"$entries\"\n");
         s.append("    return 1\n");
         s.append("  fi\n");
         s.append("  while IFS= read -r line; do\n");
@@ -662,12 +736,13 @@ public final class DistroBackup {
         s.append("      *) continue ;;\n");
         s.append("    esac\n");
         s.append("    pair=\"$(printf '%s\\n' \"$line\" | sed -E -n 's/^h[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+[^ ]+[ ]+(.*) link to (.*)$/\\1|\\2/p')\"\n");
-        // NOTE: tar pads the owner column, so the five fields before
-        // the name (perms, owner, size, date, time) are separated by
-        // one OR MORE spaces ([ ]+), never exactly one.
-        s.append("    if [ -z \"$pair\" ]; then ok=0; continue; fi\n");
-        s.append("    name=\"${pair%%|*}\"\n");
-        s.append("    target=\"${pair#*|}\"\n");
+        s.append("    if [ -z \"$pair\" ] || [ -z \"${pair%%|*}\" ] || [ -z \"${pair#*|}\" ]; then\n");
+        s.append("      rm -f \"$list\" \"$members\" \"$entries\"\n");
+        s.append("      return 1\n");
+        s.append("    fi\n");
+        s.append("    printf '%s\\n' \"$pair\" >> \"$entries\"\n");
+        s.append("  done < \"$list\"\n");
+        s.append("  while IFS='|' read -r name target; do\n");
         s.append("    if [ \"$#\" -gt 0 ]; then\n");
         s.append("      in_section=0\n");
         s.append("      for sec in \"$@\"; do\n");
@@ -675,30 +750,146 @@ public final class DistroBackup {
         s.append("          \"$sec\"/*) in_section=1 ;;\n");
         s.append("        esac\n");
         s.append("      done\n");
-        s.append("      if [ \"$in_section\" -eq 0 ]; then continue; fi\n");
+        s.append("      [ \"$in_section\" -eq 1 ] || continue\n");
         s.append("    fi\n");
-        s.append("    total=$((total + 1))\n");
-        s.append("    if ! grep -qxF -- \"$target\" \"$members\"; then ok=0; continue; fi\n");
+        s.append("    key=\"$target\"\n");
+        s.append("    i=0\n");
+        s.append("    while [ \"$i\" -lt 10 ]; do\n");
+        s.append("      nxt=\"$(awk -F'|' -v k=\"$key\" '$1==k {print $2; exit}' \"$entries\")\"\n");
+        s.append("      if [ -n \"$nxt\" ]; then key=\"$nxt\"; i=$((i + 1)); else break; fi\n");
+        s.append("    done\n");
+        s.append("    if [ \"$i\" -ge 10 ]; then key=\"\"; fi\n");
+        s.append("    if [ -n \"$key\" ] && ! grep -qxF -- \"$key\" \"$members\"; then key=\"\"; fi\n");
         s.append("    if [ \"$strip\" -eq 1 ]; then\n");
         s.append("      name=\"${name#*/}\"\n");
+        s.append("      key=\"${key#*/}\"\n");
         s.append("      target=\"${target#*/}\"\n");
         s.append("    fi\n");
-        s.append("    if [ -z \"$name\" ] || [ -z \"$target\" ]; then ok=0; continue; fi\n");
-        s.append("    dest=\"$rootfs/$name\"\n");
-        s.append("    want=\"$(_repair_relpath \"$(dirname \"$name\")\" \"$target\")\"\n");
-        s.append("    printf '%s\\n' \"$dest\" >> \"$checked\"\n");
-        s.append("    if [ -L \"$dest\" ]; then\n");
-        s.append("      if [ \"$(readlink \"$dest\")\" != \"$want\" ]; then ok=0; fi\n");
-        s.append("      continue\n");
+        s.append("    printf '%s|%s|%s\\n' \"$key\" \"$name\" \"$target\" >> \"$out\"\n");
+        s.append("  done < \"$entries\"\n");
+        s.append("  rm -f \"$list\" \"$members\" \"$entries\"\n");
+        s.append("  return 0\n");
+        s.append("}\n");
+        s.append("# _repair_canonical <key>: reads \"member|direct\" lines on stdin and\n");
+        s.append("# prints the group member that must hold the real file: the longest\n");
+        s.append("# non-bin member (ties keep the recorded regular file, which is\n");
+        s.append("# considered first); if every member is a bin path, the recorded\n");
+        s.append("# regular file.\n");
+        s.append("_repair_canonical() {\n");
+        s.append("  local key=\"$1\" best=\"\" bestlen=-1 member direct len\n");
+        s.append("  if ! _repair_is_bin \"$key\"; then best=\"$key\"; bestlen=${#key}; fi\n");
+        s.append("  while IFS='|' read -r member direct; do\n");
+        s.append("    [ -n \"$member\" ] || continue\n");
+        s.append("    if _repair_is_bin \"$member\"; then continue; fi\n");
+        s.append("    len=${#member}\n");
+        s.append("    if [ \"$len\" -gt \"$bestlen\" ]; then best=\"$member\"; bestlen=\"$len\"; fi\n");
+        s.append("  done\n");
+        s.append("  if [ -z \"$best\" ]; then best=\"$key\"; fi\n");
+        s.append("  printf '%s\\n' \"$best\"\n");
+        s.append("}\n");
+        s.append("repair_hard_links() {\n");
+        s.append("  if [ \"$#\" -lt 3 ]; then return 1; fi\n");
+        s.append("  local archive=\"$1\" rootfs=\"$2\" strip=\"$3\"\n");
+        s.append("  shift 3\n");
+        s.append("  local groups checked checked_reg total ok key member direct\n");
+        s.append("  local best r_disk c_disk dest want want_r tmp\n");
+        s.append("  total=0\n");
+        s.append("  ok=1\n");
+        s.append("  groups=\"$(mktemp)\" || return 1\n");
+        s.append("  checked=\"$(mktemp)\" || { rm -f \"$groups\"; return 1; }\n");
+        s.append("  checked_reg=\"$(mktemp)\" || { rm -f \"$groups\" \"$checked\"; return 1; }\n");
+        s.append("  if ! _repair_groups \"$archive\" \"$strip\" \"$groups\" \"$@\"; then\n");
+        s.append("    rm -f \"$groups\" \"$checked\" \"$checked_reg\"\n");
+        s.append("    return 1\n");
+        s.append("  fi\n");
+        s.append("  total=\"$(wc -l < \"$groups\" | tr -d ' ')\"\n");
+        s.append("  if grep -q '^|' \"$groups\"; then ok=0; fi\n");
+        s.append("  for key in $(awk -F'|' '!seen[$1]++ {print $1}' \"$groups\"); do\n");
+        s.append("    [ -n \"$key\" ] || continue\n");
+        s.append("    best=\"$(_repair_canonical \"$key\" < <(awk -F'|' -v k=\"$key\" '$1==k {print $2\"|\"$3}' \"$groups\"))\"\n");
+        s.append("    r_disk=\"$rootfs/$key\"\n");
+        s.append("    if [ \"$best\" = \"$key\" ]; then\n");
+        s.append("      while IFS='|' read -r member direct; do\n");
+        s.append("        [ -n \"$member\" ] || { ok=0; continue; }\n");
+        s.append("        dest=\"$rootfs/$member\"\n");
+        s.append("        want=\"$(_repair_relpath \"$(dirname \"$member\")\" \"$direct\")\"\n");
+        s.append("        printf '%s\\n' \"$dest\" >> \"$checked\"\n");
+        s.append("        if [ -L \"$dest\" ]; then\n");
+        s.append("          if [ \"$(readlink \"$dest\")\" != \"$want\" ]; then ok=0; fi\n");
+        s.append("          continue\n");
+        s.append("        fi\n");
+        s.append("        if [ -e \"$dest\" ]; then ok=0; continue; fi\n");
+        s.append("        mkdir -p \"$(dirname \"$dest\")\" || { ok=0; continue; }\n");
+        s.append("        ln -s \"$want\" \"$dest\" || ok=0\n");
+        s.append("      done < <(awk -F'|' -v k=\"$key\" '$1==k {print $2\"|\"$3}' \"$groups\")\n");
+        s.append("    else\n");
+        s.append("      c_disk=\"$rootfs/$best\"\n");
+        s.append("      if [ -f \"$c_disk\" ] && [ ! -L \"$c_disk\" ]; then\n");
+        s.append("        :\n");
+        s.append("      elif [ -f \"$r_disk\" ] && [ ! -L \"$r_disk\" ]; then\n");
+        s.append("        if [ -L \"$c_disk\" ] || [ -e \"$c_disk\" ]; then\n");
+        s.append("          rm -f \"$c_disk\" || { ok=0; continue; }\n");
+        s.append("        fi\n");
+        s.append("        mkdir -p \"$(dirname \"$c_disk\")\" || { ok=0; continue; }\n");
+        s.append("        cp -p \"$r_disk\" \"$c_disk\" 2>/dev/null || { cp \"$r_disk\" \"$c_disk\" && chmod --reference=\"$r_disk\" \"$c_disk\"; } || { ok=0; continue; }\n");
+        s.append("      else\n");
+        s.append("        while IFS='|' read -r member direct; do\n");
+        s.append("          [ -n \"$member\" ] || { ok=0; continue; }\n");
+        s.append("          dest=\"$rootfs/$member\"\n");
+        s.append("          want=\"$(_repair_relpath \"$(dirname \"$member\")\" \"$direct\")\"\n");
+        s.append("          printf '%s\\n' \"$dest\" >> \"$checked\"\n");
+        s.append("          if [ -L \"$dest\" ]; then\n");
+        s.append("            if [ \"$(readlink \"$dest\")\" != \"$want\" ]; then ok=0; fi\n");
+        s.append("            continue\n");
+        s.append("          fi\n");
+        s.append("          if [ -e \"$dest\" ]; then ok=0; continue; fi\n");
+        s.append("          mkdir -p \"$(dirname \"$dest\")\" || { ok=0; continue; }\n");
+        s.append("          ln -s \"$want\" \"$dest\" || ok=0\n");
+        s.append("        done < <(awk -F'|' -v k=\"$key\" '$1==k {print $2\"|\"$3}' \"$groups\")\n");
+        s.append("        continue\n");
+        s.append("      fi\n");
+        s.append("      want_r=\"$(_repair_relpath \"$(dirname \"$key\")\" \"$best\")\"\n");
+        s.append("      if [ -L \"$r_disk\" ]; then\n");
+        s.append("        if [ \"$(readlink \"$r_disk\")\" != \"$want_r\" ]; then\n");
+        s.append("          rm -f \"$r_disk\"\n");
+        s.append("          ln -s \"$want_r\" \"$r_disk\" || ok=0\n");
+        s.append("        fi\n");
+        s.append("      elif [ -e \"$r_disk\" ]; then\n");
+        s.append("        tmp=\"$r_disk.tmp.$$\"\n");
+        s.append("        rm -f \"$tmp\"\n");
+        s.append("        ln -s \"$want_r\" \"$tmp\" && mv -f \"$tmp\" \"$r_disk\" || { rm -f \"$tmp\"; ok=0; }\n");
+        s.append("      else\n");
+        s.append("        mkdir -p \"$(dirname \"$r_disk\")\" || ok=0\n");
+        s.append("        ln -s \"$want_r\" \"$r_disk\" || ok=0\n");
+        s.append("      fi\n");
+        s.append("      printf '%s\\n' \"$r_disk\" >> \"$checked\"\n");
+        s.append("      printf '%s\\n' \"$c_disk\" >> \"$checked_reg\"\n");
+        s.append("      while IFS='|' read -r member direct; do\n");
+        s.append("        [ -n \"$member\" ] || { ok=0; continue; }\n");
+        s.append("        [ \"$member\" = \"$best\" ] && continue\n");
+        s.append("        dest=\"$rootfs/$member\"\n");
+        s.append("        want=\"$(_repair_relpath \"$(dirname \"$member\")\" \"$best\")\"\n");
+        s.append("        printf '%s\\n' \"$dest\" >> \"$checked\"\n");
+        s.append("        if [ -L \"$dest\" ]; then\n");
+        s.append("          if [ \"$(readlink \"$dest\")\" != \"$want\" ]; then\n");
+        s.append("            rm -f \"$dest\"\n");
+        s.append("            ln -s \"$want\" \"$dest\" || ok=0\n");
+        s.append("          fi\n");
+        s.append("          continue\n");
+        s.append("        fi\n");
+        s.append("        if [ -e \"$dest\" ]; then ok=0; continue; fi\n");
+        s.append("        mkdir -p \"$(dirname \"$dest\")\" || { ok=0; continue; }\n");
+        s.append("        ln -s \"$want\" \"$dest\" || ok=0\n");
+        s.append("      done < <(awk -F'|' -v k=\"$key\" '$1==k {print $2\"|\"$3}' \"$groups\")\n");
         s.append("    fi\n");
-        s.append("    if [ -e \"$dest\" ]; then ok=0; continue; fi\n");
-        s.append("    mkdir -p \"$(dirname \"$dest\")\" || { ok=0; continue; }\n");
-        s.append("    ln -s \"$want\" \"$dest\" || ok=0\n");
-        s.append("  done < \"$list\"\n");
+        s.append("  done\n");
         s.append("  while IFS= read -r dest; do\n");
         s.append("    if [ ! -L \"$dest\" ]; then ok=0; fi\n");
         s.append("  done < \"$checked\"\n");
-        s.append("  rm -f \"$list\" \"$members\" \"$checked\"\n");
+        s.append("  while IFS= read -r dest; do\n");
+        s.append("    if [ ! -f \"$dest\" ] || [ -L \"$dest\" ]; then ok=0; fi\n");
+        s.append("  done < \"$checked_reg\"\n");
+        s.append("  rm -f \"$groups\" \"$checked\" \"$checked_reg\"\n");
         s.append("  [ \"$total\" -gt 0 ] && [ \"$ok\" -eq 1 ]\n");
         s.append("}\n");
         s.append("verify_members() {\n");
@@ -706,12 +897,14 @@ public final class DistroBackup {
         s.append("  local archive=\"$1\" rootfs=\"$2\" strip=\"$3\"\n");
         s.append("  shift 3\n");
         s.append("  local tarbin=\"${REPAIR_TAR:-tar}\"\n");
-        s.append("  local members member in_section count ok sec\n");
+        s.append("  local members member in_section count ok sec groups key best\n");
+        s.append("  local r_disk c_disk key_in_scope\n");
         s.append("  count=0\n");
         s.append("  ok=1\n");
         s.append("  members=\"$(mktemp)\" || return 1\n");
+        s.append("  groups=\"$(mktemp)\" || { rm -f \"$members\"; return 1; }\n");
         s.append("  if ! \"$tarbin\" -tzf \"$archive\" > \"$members\" 2>/dev/null; then\n");
-        s.append("    rm -f \"$members\"\n");
+        s.append("    rm -f \"$members\" \"$groups\"\n");
         s.append("    return 1\n");
         s.append("  fi\n");
         s.append("  while IFS= read -r member; do\n");
@@ -734,7 +927,30 @@ public final class DistroBackup {
         s.append("      ok=0\n");
         s.append("    fi\n");
         s.append("  done < \"$members\"\n");
-        s.append("  rm -f \"$members\"\n");
+        s.append("  if ! _repair_groups \"$archive\" \"$strip\" \"$groups\" \"$@\"; then\n");
+        s.append("    rm -f \"$members\" \"$groups\"\n");
+        s.append("    return 1\n");
+        s.append("  fi\n");
+        s.append("  if grep -q '^|' \"$groups\"; then ok=0; fi\n");
+        s.append("  for key in $(awk -F'|' '!seen[$1]++ {print $1}' \"$groups\"); do\n");
+        s.append("    [ -n \"$key\" ] || continue\n");
+        s.append("    if [ \"$#\" -eq 0 ]; then\n");
+        s.append("      key_in_scope=1\n");
+        s.append("    else\n");
+        s.append("      key_in_scope=0\n");
+        s.append("      for sec in \"$@\"; do\n");
+        s.append("        if grep -qxF -- \"$sec/$key\" \"$members\"; then key_in_scope=1; fi\n");
+        s.append("      done\n");
+        s.append("    fi\n");
+        s.append("    [ \"$key_in_scope\" -eq 1 ] || continue\n");
+        s.append("    r_disk=\"$rootfs/$key\"\n");
+        s.append("    if [ ! -e \"$r_disk\" ] && [ ! -L \"$r_disk\" ]; then continue; fi\n");
+        s.append("    best=\"$(_repair_canonical \"$key\" < <(awk -F'|' -v k=\"$key\" '$1==k {print $2\"|\"$3}' \"$groups\"))\"\n");
+        s.append("    c_disk=\"$rootfs/$best\"\n");
+        s.append("    if [ ! -f \"$c_disk\" ] || [ -L \"$c_disk\" ]; then ok=0; fi\n");
+        s.append("    if [ \"$best\" != \"$key\" ] && [ ! -L \"$r_disk\" ]; then ok=0; fi\n");
+        s.append("  done\n");
+        s.append("  rm -f \"$members\" \"$groups\"\n");
         s.append("  [ \"$count\" -gt 0 ] && [ \"$ok\" -eq 1 ]\n");
         s.append("}\n");
         return s.toString();
