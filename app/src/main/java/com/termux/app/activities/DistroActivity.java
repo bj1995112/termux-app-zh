@@ -289,6 +289,9 @@ public class DistroActivity extends AppCompatActivity {
     /** The backup-manager dialog, while it is open (for refresh after a
      * folder pick or a delete). */
     private AlertDialog mBackupManagerDialog;
+    /** The backup detail dialog, if open: dismissed when a per-file
+     * delete completes so it never shows a stale item list. */
+    private AlertDialog mBackupDetailDialog;
     /** The backup picker dialog currently open (uninstall confirm or
      * standalone backup), while it is open — its destination widgets
      * are refreshed from the SAF folder-picker result in
@@ -2097,7 +2100,14 @@ public class DistroActivity extends AppCompatActivity {
             for (int i = 0; i < info.itemIds.size(); i++) {
                 String label = i < info.itemLabels.size()
                     ? info.itemLabels.get(i) : info.itemIds.get(i);
-                rows.add(new BackupItemRow(info.itemIds.get(i), label, "", 0, false));
+                // Archive names come from ExternalBackupInfo.itemArchives
+                // (parallel to itemIds/itemLabels); "" when absent so the
+                // detail row just omits the archive name.
+                String archive = info.itemArchives != null
+                    && i < info.itemArchives.size()
+                    && info.itemArchives.get(i) != null
+                    ? info.itemArchives.get(i) : "";
+                rows.add(new BackupItemRow(info.itemIds.get(i), label, archive, 0, false));
             }
             return new UnifiedBackup(true, false, null, info.uri, info.container,
                 info.distroId, info.distroDisplay, info.createdAt, info.totalSize, rows);
@@ -2689,44 +2699,214 @@ public class DistroActivity extends AppCompatActivity {
         dialog.show();
     }
 
-    /** Detail view for one backup: source distro, date, size, location,
-     * and its items with sizes (per-item sizes are only known for
-     * internal backups). Delete is offered here as well as by
-     * long-press in the list. */
+    /** Detail view for one backup: header lines (source distro, date,
+     * total size, location) plus one row per item — label, archive name
+     * and size where known — each with its own delete button. The
+     * dialog buttons are restore / delete whole backup / cancel. A
+     * damaged backup keeps the old behaviour: the damaged note only,
+     * no file list, no restore button, whole-delete + cancel only. */
     private void showBackupDetail(final UnifiedBackup backup) {
-        StringBuilder message = new StringBuilder();
+        if (isFinishing() || isDestroyed()) return;
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        layout.setPadding(pad, pad / 2, pad, pad / 2);
+
         String source = !backup.distroDisplay.isEmpty()
             ? backup.distroDisplay : backup.container;
-        message.append(source).append("\n");
-        message.append(formatCreatedAt(backup.createdAt)).append("\n");
-        String location = backup.external
-            ? getString(R.string.backup_external_location_label)
-            : getString(R.string.backup_external_location_internal);
-        message.append(Formatter.formatShortFileSize(this, backup.totalSize))
-            .append(" · ").append(location).append("\n");
+        TextView sourceLine = new TextView(this);
+        sourceLine.setText(source);
+        layout.addView(sourceLine);
+        String date = formatCreatedAt(backup.createdAt);
+        if (!date.isEmpty()) {
+            TextView dateLine = new TextView(this);
+            dateLine.setText(date);
+            layout.addView(dateLine);
+        }
+        TextView sizeLine = new TextView(this);
+        sizeLine.setText(Formatter.formatShortFileSize(this, backup.totalSize));
+        layout.addView(sizeLine);
+        TextView locationLine = new TextView(this);
+        if (backup.external) {
+            String location = getString(R.string.backup_external_location_label);
+            String folderPath = ExternalBackupStore.displayFolderPath(this);
+            if (folderPath != null && !folderPath.isEmpty()) {
+                location += ": " + folderPath;
+            }
+            locationLine.setText(location);
+        } else {
+            locationLine.setText(R.string.backup_external_location_internal);
+        }
+        layout.addView(locationLine);
+
         if (backup.damaged) {
-            message.append(getString(R.string.restore_damaged));
+            TextView damagedLine = new TextView(this);
+            damagedLine.setText(R.string.restore_damaged);
+            layout.addView(damagedLine);
         } else {
             for (UnifiedBackup.BackupItemRow item : backup.items) {
-                message.append("\n").append(item.label);
-                if (item.sizeKnown) {
-                    message.append(" (")
-                        .append(Formatter.formatShortFileSize(this, item.size)).append(")");
+                String text = item.label;
+                String archive = item.archive == null ? "" : item.archive;
+                if (!archive.isEmpty() && item.sizeKnown) {
+                    text += " (" + archive + ", "
+                        + Formatter.formatShortFileSize(this, item.size) + ")";
+                } else if (!archive.isEmpty()) {
+                    text += " (" + archive + ")";
+                } else if (item.sizeKnown) {
+                    text += " (" + Formatter.formatShortFileSize(this, item.size) + ")";
                 }
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                TextView labelView = new TextView(this);
+                labelView.setLayoutParams(new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                labelView.setText(text);
+                row.addView(labelView);
+                android.widget.Button deleteButton = new android.widget.Button(this);
+                deleteButton.setText(R.string.backup_manager_delete);
+                deleteButton.setOnClickListener(v -> confirmDeleteBackupItem(backup, item));
+                row.addView(deleteButton);
+                layout.addView(row);
             }
         }
-        new AlertDialog.Builder(this)
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(layout);
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
             .setTitle(backupTitleLine(backup))
-            .setMessage(message.toString().trim())
+            .setView(scroll)
             .setNeutralButton(R.string.backup_manager_delete,
                 (d, w) -> confirmDeleteBackup(backup))
+            .setNegativeButton(android.R.string.cancel, null);
+        if (!backup.damaged) {
+            builder.setPositiveButton(R.string.backup_detail_restore,
+                (d, w) -> showRestoreContainerPicker(backup));
+        }
+        final AlertDialog dialog = builder.create();
+        dialog.setOnDismissListener(d -> {
+            if (mBackupDetailDialog == dialog) mBackupDetailDialog = null;
+        });
+        mBackupDetailDialog = dialog;
+        dialog.show();
+    }
+
+    /** Dismiss the detail dialog, if open (called when a per-file
+     * delete completes, so the detail view never shows a stale list). */
+    private void dismissBackupDetail() {
+        if (mBackupDetailDialog != null && mBackupDetailDialog.isShowing()) {
+            mBackupDetailDialog.dismiss();
+        }
+        mBackupDetailDialog = null;
+    }
+
+    /** Per-file delete for one row of the detail view. Last-file rule:
+     * when this is the backup's only item there is no per-file delete
+     * — offer to delete the whole backup instead. Otherwise confirm
+     * with the item label, then delete on a background thread (SAF /
+     * file IO off the UI thread, same pattern as confirmDeleteBackup).
+     * The delete calls are the contracts the logic children implement:
+     * DistroBackup.deleteBackupItem / ExternalBackupStore.deleteBackupItem,
+     * both returning the DistroBackup.DELETE_ITEM_* codes. */
+    private void confirmDeleteBackupItem(final UnifiedBackup backup,
+            final UnifiedBackup.BackupItemRow item) {
+        if (backup.items.size() == 1) {
+            new AlertDialog.Builder(this)
+                .setMessage(R.string.backup_detail_last_file_confirm)
+                .setPositiveButton(R.string.backup_manager_delete,
+                    (d, w) -> confirmDeleteBackup(backup))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setMessage(getString(R.string.backup_detail_delete_file_confirm, item.label))
+            .setPositiveButton(R.string.backup_manager_delete, (dialog, which) ->
+                new Thread(() -> {
+                    int result;
+                    if (backup.external) {
+                        result = ExternalBackupStore.deleteBackupItem(
+                            DistroActivity.this, backup.externalUri, item.id);
+                    } else {
+                        result = DistroBackup.deleteBackupItem(backup.dir, item.id);
+                    }
+                    final int code = result;
+                    final String label = item.label;
+                    runOnUiThread(() -> onDeleteBackupItemResult(backup, label, code));
+                }).start())
             .setNegativeButton(android.R.string.cancel, null)
             .show();
     }
 
-    /** Delete one whole backup (v1: no per-item delete), with a confirm
-     * dialog. Internal: delete the backup dir. External: delete the SAF
-     * dir. The list is refreshed afterwards. */
+    /** Result of a per-file delete, on the UI thread. OK: toast and
+     * refresh the manager list. EMPTY: the backup has no files left —
+     * ask whether to delete the whole backup (positive) or just refresh
+     * (negative). FAILED / NOT_FOUND / anything else: toast failure and
+     * refresh. The detail dialog is dismissed first in every branch so
+     * it never shows the pre-delete item list. */
+    private void onDeleteBackupItemResult(final UnifiedBackup backup, String label, int result) {
+        if (result == DistroBackup.DELETE_ITEM_OK) {
+            Toast.makeText(this,
+                getString(R.string.backup_detail_deleted, label), Toast.LENGTH_LONG).show();
+            dismissBackupDetail();
+            refreshBackupManager();
+        } else if (result == DistroBackup.DELETE_ITEM_EMPTY) {
+            dismissBackupDetail();
+            new AlertDialog.Builder(this)
+                .setMessage(R.string.backup_detail_empty_prompt)
+                .setPositiveButton(R.string.backup_manager_delete,
+                    (d, w) -> confirmDeleteBackup(backup))
+                .setNegativeButton(android.R.string.cancel,
+                    (d, w) -> refreshBackupManager())
+                .show();
+        } else {
+            Toast.makeText(this,
+                R.string.backup_detail_delete_failed, Toast.LENGTH_LONG).show();
+            dismissBackupDetail();
+            refreshBackupManager();
+        }
+    }
+
+    /** Restore from the detail view: dismiss the detail dialog (the
+     * positive button already does) and the manager dialog, then list
+     * the installed containers by display name. Tapping one opens the
+     * existing item picker; the restore rules there are unchanged. */
+    private void showRestoreContainerPicker(final UnifiedBackup backup) {
+        if (isFinishing() || isDestroyed()) return;
+        if (mBackupManagerDialog != null && mBackupManagerDialog.isShowing()) {
+            mBackupManagerDialog.dismiss();
+        }
+        if (mInstalledContainers.isEmpty()) {
+            Toast.makeText(this,
+                R.string.backup_detail_no_containers, Toast.LENGTH_LONG).show();
+            return;
+        }
+        final List<String> containers = new ArrayList<>(mInstalledContainers);
+        Collections.sort(containers,
+            (a, b) -> displayNameForContainer(a).compareTo(displayNameForContainer(b)));
+        String[] labels = new String[containers.size()];
+        for (int i = 0; i < containers.size(); i++) {
+            labels[i] = displayNameForContainer(containers.get(i));
+        }
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.backup_detail_pick_container_title)
+            .setItems(labels, (dialog, which) -> {
+                String container = containers.get(which);
+                String display = displayNameForContainer(container);
+                File rootfs = DistroUtils.containerRootfs(container);
+                if (rootfs == null) {
+                    Toast.makeText(DistroActivity.this,
+                        R.string.restore_target_missing, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                showItemPicker(container, display, rootfs, backup);
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    /** Delete one whole backup, with a confirm dialog. Internal: delete
+     * the backup dir. External: delete the SAF dir. The list is
+     * refreshed afterwards. (Per-file delete is confirmDeleteBackupItem;
+     * the last-file case routes here too.) */
     private void confirmDeleteBackup(final UnifiedBackup backup) {
         new AlertDialog.Builder(this)
             .setMessage(R.string.backup_manager_delete_confirm)

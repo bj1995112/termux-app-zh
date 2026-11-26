@@ -639,4 +639,14 @@
     <string name="distro_backup_none_selected">Select at least one item to back up.</string>
     <string name="restore_system_skipped_cross_distro">System files cannot be restored to a different distro, so the system item is skipped.</string>
     <string name="restore_system_overwrite_warning">Restoring the system files will overwrite the system files of the target distro. Restore onto a freshly installed distro of the same kind when possible.</string>
+
+    <!-- Backup detail view: per-file delete (backup-file-delete round) -->
+    <string name="backup_detail_restore">Restore</string>
+    <string name="backup_detail_delete_file_confirm">Delete %1$s? It will no longer be in this backup and will not be restored.</string>
+    <string name="backup_detail_last_file_confirm">This is the last file in this backup. Deleting it will empty the backup. Delete the whole backup instead?</string>
+    <string name="backup_detail_empty_prompt">This backup is now empty. Delete the whole backup?</string>
+    <string name="backup_detail_deleted">Deleted %1$s</string>
+    <string name="backup_detail_delete_failed">Delete failed</string>
+    <string name="backup_detail_pick_container_title">Choose a distro to restore into</string>
+    <string name="backup_detail_no_containers">No distros installed</string>
 </resources>

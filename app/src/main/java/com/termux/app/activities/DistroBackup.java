@@ -258,6 +258,95 @@ public final class DistroBackup {
     }
 
     // ------------------------------------------------------------------
+    // Per-file delete (backup manager detail view): remove ONE item
+    // (archive) from a backup dir and update the manifest so the backup
+    // stays consistent. FAIL-SAFE ORDER: the manifest is updated FIRST
+    // and the archive is deleted only after the write succeeds — a
+    // manifest that still lists a missing archive breaks restore, while
+    // a leftover orphan archive is harmless (restore reads the manifest,
+    // and a later whole-backup delete removes the file). The manifest
+    // write goes through writeManifest, which already uses AtomicFile
+    // (write-to-temp then rename).
+    // ------------------------------------------------------------------
+
+    /** Item removed; the backup still has items. */
+    public static final int DELETE_ITEM_OK = 0;
+    /** Item removed; the backup now has NO items left (the caller may
+     * offer to delete the whole backup). */
+    public static final int DELETE_ITEM_EMPTY = 1;
+    /** Could not update the manifest — the archive was NOT deleted. */
+    public static final int DELETE_ITEM_FAILED = 2;
+    /** The item id is not in the manifest. */
+    public static final int DELETE_ITEM_NOT_FOUND = 3;
+
+    /** Deletes the item with the given id from a backup dir: removes it
+     * from the manifest's "items" array (all other top-level fields —
+     * version, container, distroId, distroDisplay, createdAt — are
+     * copied unchanged) and then deletes its archive file. Returns one
+     * of DELETE_ITEM_OK / DELETE_ITEM_EMPTY / DELETE_ITEM_FAILED /
+     * DELETE_ITEM_NOT_FOUND. If the manifest cannot be read or written,
+     * returns DELETE_ITEM_FAILED and the archive is left untouched. If
+     * the archive file itself cannot be deleted after the manifest was
+     * updated, still returns OK/EMPTY: the manifest is the source of
+     * truth for restore. */
+    public static int deleteBackupItem(File backupDir, String itemId) {
+        JSONObject manifest = readManifest(backupDir);
+        if (manifest == null) return DELETE_ITEM_FAILED;
+        JSONArray items = manifest.optJSONArray("items");
+        if (items == null) return DELETE_ITEM_NOT_FOUND;
+        int index = -1;
+        String archive = null;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            if (itemId != null && itemId.equals(item.optString("id", ""))) {
+                index = i;
+                archive = item.optString("archive", "");
+                break;
+            }
+        }
+        if (index < 0) return DELETE_ITEM_NOT_FOUND;
+
+        // New manifest: a copy of the old one with that one item removed
+        // from "items"; every other top-level field is carried over.
+        JSONArray remaining = new JSONArray();
+        for (int i = 0; i < items.length(); i++) {
+            if (i == index) continue;
+            remaining.put(items.opt(i));
+        }
+        JSONObject updated = new JSONObject();
+        try {
+            java.util.Iterator<String> keys = manifest.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if ("items".equals(key)) continue;
+                updated.put(key, manifest.opt(key));
+            }
+            updated.put("items", remaining);
+        } catch (JSONException e) {
+            Log.w(LOG_TAG, "Failed to build updated manifest while deleting item " + itemId, e);
+            return DELETE_ITEM_FAILED;
+        }
+        try {
+            writeManifest(backupDir, updated);
+        } catch (IllegalStateException e) {
+            Log.w(LOG_TAG, "Failed to update manifest while deleting item " + itemId, e);
+            return DELETE_ITEM_FAILED;
+        }
+        // Manifest first, archive second. A failed file delete still
+        // counts as OK/EMPTY — the orphan is removed by a later
+        // whole-backup delete.
+        if (archive != null && !archive.isEmpty()) {
+            File archiveFile = new File(backupDir, archive);
+            if (archiveFile.isFile() && !archiveFile.delete()) {
+                Log.w(LOG_TAG, "Manifest updated but archive not deleted: "
+                        + archiveFile.getAbsolutePath());
+            }
+        }
+        return remaining.length() == 0 ? DELETE_ITEM_EMPTY : DELETE_ITEM_OK;
+    }
+
+    // ------------------------------------------------------------------
     // Restore (design.md §4): unpack selected items from a backup dir
     // into a container's rootfs. Extraction runs synchronously with the
     // host GNU tar (the same tar the backup script uses), on a

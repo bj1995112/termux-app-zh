@@ -85,8 +85,10 @@ public final class ExternalBackupStore {
      * <p>Fields taken straight from the manifest: {@code container},
      * {@code distroId}, {@code distroDisplay} and {@code createdAt} are null
      * when the manifest omits them; {@code totalSize} is the sum of the
-     * {@code size} values of the manifest's items; {@code itemIds} and
-     * {@code itemLabels} list the items in manifest order.
+     * {@code size} values of the manifest's items; {@code itemIds},
+     * {@code itemLabels} and {@code itemArchives} list the items in
+     * manifest order, parallel to each other (one entry per item; an
+     * archive entry is "" when the manifest omits it).
      */
     public static final class ExternalBackupInfo {
         /** Uri of the backup dir itself (a document Uri under the picked folder). */
@@ -98,10 +100,12 @@ public final class ExternalBackupStore {
         public final long totalSize;
         public final List<String> itemIds;
         public final List<String> itemLabels;
+        public final List<String> itemArchives;
 
         public ExternalBackupInfo(Uri uri, String container, String distroId,
                 String distroDisplay, String createdAt, long totalSize,
-                List<String> itemIds, List<String> itemLabels) {
+                List<String> itemIds, List<String> itemLabels,
+                List<String> itemArchives) {
             this.uri = uri;
             this.container = container;
             this.distroId = distroId;
@@ -113,6 +117,9 @@ public final class ExternalBackupStore {
                     : Collections.<String>emptyList();
             this.itemLabels = itemLabels != null
                     ? Collections.unmodifiableList(new ArrayList<>(itemLabels))
+                    : Collections.<String>emptyList();
+            this.itemArchives = itemArchives != null
+                    ? Collections.unmodifiableList(new ArrayList<>(itemArchives))
                     : Collections.<String>emptyList();
         }
     }
@@ -474,6 +481,95 @@ public final class ExternalBackupStore {
         }
     }
 
+    /** Deletes ONE item from an external (SAF) backup dir and updates its
+     * manifest.json. Result codes are DistroBackup.DELETE_ITEM_*:
+     * OK (removed, items remain), EMPTY (removed, no items left),
+     * FAILED (the manifest could not be updated — the archive is NOT
+     * deleted), NOT_FOUND (the item id is not in the manifest).
+     *
+     * <p>Fail-safe order: the manifest is rewritten first; the archive
+     * document is deleted only after the manifest overwrite succeeds.
+     * The manifest is the source of truth, so a leftover orphan archive
+     * (archive delete failed after a successful manifest write) is
+     * harmless and still reports OK/EMPTY.
+     */
+    public static int deleteBackupItem(Context context, Uri backupDirUri, String itemId) {
+        if (context == null || backupDirUri == null || itemId == null || itemId.isEmpty()) {
+            return DistroBackup.DELETE_ITEM_FAILED;
+        }
+        Uri folderUri = getExternalFolderUri(context);
+        if (folderUri == null || !hasExternalFolder(context)) {
+            return DistroBackup.DELETE_ITEM_FAILED;
+        }
+        ContentResolver resolver = context.getContentResolver();
+        try {
+            String docId = DocumentsContract.getDocumentId(backupDirUri);
+            Uri manifestUri = findChildUri(resolver, folderUri, docId, MANIFEST_FILE_NAME);
+            if (manifestUri == null) return DistroBackup.DELETE_ITEM_FAILED;
+            String jsonText = readUriAsString(resolver, manifestUri);
+            if (jsonText == null) return DistroBackup.DELETE_ITEM_FAILED;
+            JSONObject manifest = new JSONObject(jsonText);
+            JSONArray items = manifest.optJSONArray("items");
+            if (items == null) return DistroBackup.DELETE_ITEM_NOT_FOUND;
+            int targetIndex = -1;
+            String archiveName = null;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item == null) continue;
+                if (itemId.equals(item.optString("id", ""))) {
+                    targetIndex = i;
+                    archiveName = item.optString("archive", "");
+                    break;
+                }
+            }
+            if (targetIndex < 0) return DistroBackup.DELETE_ITEM_NOT_FOUND;
+            // Build the new manifest: a copy of the old one with the item
+            // removed from "items"; every other field is unchanged.
+            JSONObject newManifest = new JSONObject(manifest.toString());
+            JSONArray newItems = new JSONArray();
+            for (int i = 0; i < items.length(); i++) {
+                if (i == targetIndex) continue;
+                JSONObject item = items.optJSONObject(i);
+                if (item == null) continue;
+                newItems.put(item);
+            }
+            newManifest.put("items", newItems);
+            // Overwrite the manifest document (openOutputStream "w" mode
+            // truncates — same overwrite pattern copyFileToUri uses).
+            // If this fails, the archive is NOT deleted: FAILED.
+            try (OutputStream out = resolver.openOutputStream(manifestUri)) {
+                if (out == null) return DistroBackup.DELETE_ITEM_FAILED;
+                out.write(newManifest.toString(2).getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException | SecurityException e) {
+                Log.w(LOG_TAG, "Could not update external manifest for " + backupDirUri, e);
+                return DistroBackup.DELETE_ITEM_FAILED;
+            }
+            // Manifest updated: now delete the archive document. An
+            // already-absent archive counts as done; a failed delete
+            // leaves a harmless orphan (manifest is the source of truth).
+            if (archiveName != null && !archiveName.isEmpty()) {
+                Uri archiveUri = findChildUri(resolver, folderUri, docId, archiveName);
+                if (archiveUri != null) {
+                    try {
+                        DocumentsContract.deleteDocument(resolver, archiveUri);
+                    } catch (FileNotFoundException e) {
+                        // Already gone; nothing to do.
+                    } catch (SecurityException | IllegalArgumentException e) {
+                        Log.w(LOG_TAG, "Could not delete external archive " + archiveName
+                                + " in " + backupDirUri, e);
+                    }
+                }
+            }
+            return newItems.length() == 0
+                    ? DistroBackup.DELETE_ITEM_EMPTY : DistroBackup.DELETE_ITEM_OK;
+        } catch (JSONException | SecurityException | IllegalArgumentException e) {
+            Log.w(LOG_TAG, "Could not delete item " + itemId + " from external backup "
+                    + backupDirUri, e);
+            return DistroBackup.DELETE_ITEM_FAILED;
+        }
+    }
+
     // ---- private helpers ----
 
     /** One row of a DocumentsProvider children query. */
@@ -570,6 +666,7 @@ public final class ExternalBackupStore {
             JSONArray items = manifest.optJSONArray("items");
             List<String> itemIds = new ArrayList<>();
             List<String> itemLabels = new ArrayList<>();
+            List<String> itemArchives = new ArrayList<>();
             long totalSize = 0;
             if (items != null) {
                 for (int i = 0; i < items.length(); i++) {
@@ -577,6 +674,7 @@ public final class ExternalBackupStore {
                     if (item == null) continue;
                     itemIds.add(item.optString("id", ""));
                     itemLabels.add(item.optString("label", ""));
+                    itemArchives.add(item.optString("archive", ""));
                     totalSize += item.optLong("size", 0);
                 }
             }
@@ -585,7 +683,7 @@ public final class ExternalBackupStore {
                     manifest.optString("distroId", null),
                     manifest.optString("distroDisplay", null),
                     manifest.optString("createdAt", null),
-                    totalSize, itemIds, itemLabels);
+                    totalSize, itemIds, itemLabels, itemArchives);
         } catch (JSONException | SecurityException | IllegalArgumentException e) {
             // Unreadable or malformed manifest: not a usable backup, skip it.
             Log.w(LOG_TAG, "Skipping external backup dir with unreadable manifest: "

@@ -635,4 +635,14 @@
     <string name="distro_backup_none_selected">请至少选一项备份。</string>
     <string name="restore_system_skipped_cross_distro">系统文件无法恢复到不同的发行版，系统项将被跳过。</string>
     <string name="restore_system_overwrite_warning">恢复系统文件会覆盖目标发行版的系统文件。建议恢复到刚装好的同种发行版上。</string>
+
+    <!-- 备份详情：按文件删除（backup-file-delete 轮） -->
+    <string name="backup_detail_restore">恢复</string>
+    <string name="backup_detail_delete_file_confirm">删除 %1$s？这个备份里就不再有这一项，恢复时也不会恢复它。</string>
+    <string name="backup_detail_last_file_confirm">这是备份里的最后一个文件。删除后备份将为空，是否删除整个备份？</string>
+    <string name="backup_detail_empty_prompt">备份已空，是否删除整个备份？</string>
+    <string name="backup_detail_deleted">已删除 %1$s</string>
+    <string name="backup_detail_delete_failed">删除失败</string>
+    <string name="backup_detail_pick_container_title">选择要恢复到的发行版</string>
+    <string name="backup_detail_no_containers">没有已安装的发行版</string>
 </resources>
